@@ -2,13 +2,12 @@
 
 import React, { useState, useCallback } from 'react';
 import { useAppStore } from '@/lib/store';
-import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, TrendingDown, TrendingUp } from 'lucide-react';
+import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface ProcessAllProgress {
   clipId: string;
   clipName: string;
-  isReversed: boolean;
   status: 'pending' | 'processing' | 'done' | 'error';
   error?: string;
 }
@@ -30,7 +29,7 @@ export function ProcessAll() {
     setIsProcessingAll(true);
 
     const items = processableClips.map((c) => ({
-      clipId: c.id, clipName: c.originalName, isReversed: !!c.sourceClipId, status: 'pending' as const,
+      clipId: c.id, clipName: c.originalName, status: 'pending' as const,
     }));
     setProgressItems(items);
 
@@ -49,10 +48,8 @@ export function ProcessAll() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             clipId: clip.id,
-            sourceClipId: clip.sourceClipId || undefined,
+            trimDuration: clip.trimDuration,
             speedRamps: clip.speedRamps,
-            trimStart: clip.trimStart,
-            trimEnd: clip.trimEnd,
             outputFormat: 'mp4',
           }),
         });
@@ -96,7 +93,7 @@ export function ProcessAll() {
               {item.status === 'processing' && <Loader2 className="w-4 h-4 text-orange-400 animate-spin shrink-0" />}
               {item.status === 'done' && <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />}
               {item.status === 'error' && <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />}
-              {item.isReversed ? <TrendingUp className="w-3 h-3 text-cyan-400/50 shrink-0" /> : <TrendingDown className="w-3 h-3 text-orange-400/50 shrink-0" />}
+              <Combine className="w-3 h-3 text-white/30 shrink-0" />
               <span className="text-xs text-white/50 truncate flex-1">{item.clipName}</span>
               {item.status === 'processing' && <span className="text-[10px] text-orange-400/70 animate-pulse">Processing...</span>}
               {item.status === 'done' && <span className="text-[10px] text-cyan-400/70">Done</span>}
@@ -116,7 +113,7 @@ export function ProcessAll() {
         className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
           isProcessingAll || processingState.isProcessing ? 'bg-orange-500/10 text-orange-400/60 cursor-not-allowed' :
           processableClips.length === 0 ? 'bg-white/[0.03] text-white/20 cursor-not-allowed' :
-          'bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 shadow-lg shadow-orange-500/20'
+          'bg-gradient-to-r from-orange-500 to-cyan-500 text-white hover:from-orange-400 hover:to-cyan-400 shadow-lg shadow-orange-500/20'
         }`}>
         {isProcessingAll || processingState.isProcessing ? (
           <><Loader2 className="w-4 h-4 animate-spin" /> Processing {processableClips.length} clip{processableClips.length > 1 ? 's' : ''}...</>

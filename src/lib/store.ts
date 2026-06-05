@@ -1,15 +1,23 @@
 import { create } from 'zustand';
 import type { AppState, VideoClip, SpeedRampPoint } from './types';
 
-// Normal: 4x → 0.6x (decelerate)
-export const NORMAL_RAMP: [number, number] = [4.0, 0.6];
-// Reversed: 0.6x → 4x (accelerate)
-export const REVERSED_RAMP: [number, number] = [0.6, 4.0];
+// Speed ramp configuration: V-shaped 4x → 0.6x → 4x
+export const RAMP_START = 4.0;
+export const RAMP_MID = 0.6;
+export const RAMP_END = 4.0;
+export const DEFAULT_TRIM_DURATION = 1.00; // seconds of original video to use
 
-export function createSpeedRamp(startSpeed: number, endSpeed: number, duration: number): SpeedRampPoint[] {
+/**
+ * Create a V-shaped speed ramp: 4x → 0.6x → 4x
+ * First half: deceleration (forward video)
+ * Second half: acceleration (reversed video)
+ */
+export function createReverseSpeedRamp(trimDuration: number): SpeedRampPoint[] {
+  const halfDuration = trimDuration / 2;
   return [
-    { time: 0, speed: startSpeed },
-    { time: duration, speed: endSpeed },
+    { time: 0, speed: RAMP_START },
+    { time: halfDuration, speed: RAMP_MID },
+    { time: trimDuration, speed: RAMP_END },
   ];
 }
 
@@ -37,26 +45,10 @@ export const useAppStore = create<AppState>((set) => ({
     message: '',
   },
 
-  addClip: (clip) => set((state) => {
-    // Auto-create reversed clip alongside the original
-    // The reversed clip's sourceClipId = clip.id so the process API can find the uploaded file
-    const reversedId = `rev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const reversedClip: VideoClip = {
-      ...clip,
-      id: reversedId,
-      originalName: `${clip.originalName} (reversed)`,
-      sourceClipId: clip.id, // KEY: points to original clip's ID for file lookup
-      speedRamps: createSpeedRamp(REVERSED_RAMP[0], REVERSED_RAMP[1], clip.duration),
-      status: 'ready',
-      processedUrl: undefined,
-      error: undefined,
-    };
-
-    return {
-      clips: [...state.clips, clip, reversedClip],
-      selectedClipId: state.selectedClipId || clip.id,
-    };
-  }),
+  addClip: (clip) => set((state) => ({
+    clips: [...state.clips, clip],
+    selectedClipId: clip.id,
+  })),
 
   removeClip: (id) => set((state) => ({
     clips: state.clips.filter(c => c.id !== id),
@@ -71,8 +63,11 @@ export const useAppStore = create<AppState>((set) => ({
     clips: state.clips.map(c => c.id === id ? { ...c, ...updates } : c),
   })),
 
-  setClipTrim: (id, trimStart, trimEnd) => set((state) => ({
-    clips: state.clips.map(c => c.id === id ? { ...c, trimStart, trimEnd } : c),
+  setClipTrimDuration: (id, trimDuration) => set((state) => ({
+    clips: state.clips.map(c => c.id === id
+      ? { ...c, trimDuration, speedRamps: createReverseSpeedRamp(trimDuration) }
+      : c
+    ),
   })),
 
   setProcessingState: (newState) => set((state) => ({

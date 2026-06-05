@@ -17,10 +17,7 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
   const [timeDisplay, setTimeDisplay] = useState({ current: 0, duration: 0 });
 
   const hasProcessed = !!clip?.processedUrl && clip?.status === 'done';
-  // For reversed clips, use sourceClipId to find the original video for playback
-  const originalUrl = clip?.sourceClipId
-    ? `/api/download?id=${clip.sourceClipId}`
-    : clip?.url || '';
+  const originalUrl = clip?.url || '';
   const videoSrc = clip ? (showOriginal ? originalUrl : (clip.processedUrl || originalUrl)) : '';
 
   const handlePlayPause = useCallback(() => {
@@ -108,14 +105,14 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
             <div className="text-center">
               <div className="w-10 h-10 border-2 border-orange-400/30 border-t-orange-400 rounded-full animate-spin mx-auto mb-2" />
-              <p className="text-xs text-white/50">Processing...</p>
+              <p className="text-xs text-white/50">Processing V-Ramp...</p>
             </div>
           </div>
         )}
         <div className="absolute top-2 left-2">
           <span className={`text-[9px] px-2 py-0.5 rounded-full font-medium ${
             showOriginal ? 'bg-orange-500/20 text-orange-400' : hasProcessed ? 'bg-cyan-500/20 text-cyan-400' : 'bg-white/10 text-white/40'
-          }`}>{showOriginal ? 'ORIGINAL' : hasProcessed ? 'PROCESSED' : 'ORIGINAL'}</span>
+          }`}>{showOriginal ? 'ORIGINAL' : hasProcessed ? 'V-RAMP' : 'ORIGINAL'}</span>
         </div>
       </div>
 

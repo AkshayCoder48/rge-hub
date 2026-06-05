@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useRef } from 'react';
 import { Upload, Film, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useAppStore, createSpeedRamp, NORMAL_RAMP } from '@/lib/store';
+import { useAppStore, createReverseSpeedRamp, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import type { VideoClip } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
 
@@ -63,6 +63,7 @@ export function UploadZone() {
           }
 
           const data = await response.json();
+          const trimDuration = Math.min(DEFAULT_TRIM_DURATION, data.duration);
 
           const clip: VideoClip = {
             id: data.id,
@@ -77,13 +78,11 @@ export function UploadZone() {
             format: data.format,
             fileSize: data.fileSize,
             url: data.url,
-            trimStart: 0,
-            trimEnd: data.duration,
-            speedRamps: createSpeedRamp(NORMAL_RAMP[0], NORMAL_RAMP[1], data.duration),
+            trimDuration,
+            speedRamps: createReverseSpeedRamp(trimDuration),
             status: 'ready',
           };
 
-          // addClip auto-creates reversed clip (0.6x → 4x) with sourceClipId = clip.id
           addClip(clip);
 
           setUploads((prev) => prev.map((u) =>
@@ -91,8 +90,8 @@ export function UploadZone() {
           ));
 
           toast({
-            title: 'Video uploaded — 2 clips created',
-            description: `${file.name}: 4x→0.6x (normal) + 0.6x→4x (reversed)`,
+            title: 'Video uploaded — Reverse Speed Ramp created',
+            description: `${file.name}: First ${trimDuration.toFixed(2)}s → ${RAMP_START}x→${RAMP_MID}x→${RAMP_END}x`,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to upload video';
@@ -149,7 +148,7 @@ export function UploadZone() {
             <h3 className={`text-lg md:text-xl font-semibold transition-colors ${isDragging ? 'text-orange-400' : 'text-white/80'}`}>
               {isDragging ? 'Release to upload' : 'Drop your video here'}
             </h3>
-            <p className="text-sm text-white/40">or click to browse · Auto-creates normal + reversed clips</p>
+            <p className="text-sm text-white/40">or click to browse · Auto-creates reverse speed ramp</p>
           </div>
           <div className="flex items-center gap-2 mt-2">
             <Film className="w-3.5 h-3.5 text-white/20" />

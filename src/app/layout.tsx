@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Z.ai Code Scaffold - AI-Powered Development",
-  description: "Modern Next.js scaffold optimized for AI-powered development with Z.ai. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["Z.ai", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
+  title: "Reverse Speed Ramp - V-Shaped Video Speed Control",
+  description: "Upload a video and automatically create a reverse speed ramp clip: forward at 4x→0.6x then reversed at 0.6x→4x. Combined into one smooth V-ramp.",
+  keywords: ["speed ramp", "reverse", "video editing", "FFmpeg", "Next.js", "V-ramp", "speed control"],
   authors: [{ name: "Z.ai Team" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",

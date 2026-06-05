@@ -1,25 +1,38 @@
 ---
 Task ID: 1
 Agent: main
-Task: Fix Turbopack panic and ID deployment issues
+Task: Restructure app to create single combined reverse speed ramp clip
 
 Work Log:
-- Identified Turbopack panic caused by permission denied on /home/z/my-project/agent-ctx directory
-- Fixed parent directory permissions with `chmod o+rx`
-- Cleaned .next cache to resolve stale Turbopack state
-- Fixed next.config.ts: moved outputFileTracingExcludes from experimental to top level, changed from array to object format (`{ '*': ['agent-ctx'] }`)
-- Removed unnecessary turbopack rules config and experimental section
-- Verified all component code for ID handling - the sourceClipId chain is correct:
-  - Upload saves file as `{uuid}.{ext}` 
-  - addClip auto-creates reversed clip with `sourceClipId = clip.id`
-  - Process API uses `sourceClipId || clipId` to find uploaded file
-  - Download API searches both uploads/ and processed/ dirs by ID prefix
-  - VideoPreview uses `/api/download?id=${clip.sourceClipId}` for reversed clips
-- Successfully started dev server using double-fork daemonization approach
-- Verified page renders correctly with agent-browser - shows "Auto Speed Ramping" with upload zone
+- Updated types.ts: Replaced `sourceClipId`, `trimStart`, `trimEnd` with `trimDuration` field
+- Updated store.ts: Changed from dual-clip system (normal + reversed) to single V-ramp clip
+  - Added RAMP_START (4.0), RAMP_MID (0.6), RAMP_END (4.0) constants
+  - Created `createReverseSpeedRamp()` generating 3-point V-shape: 4x→0.6x→4x
+  - `addClip` now creates single clip instead of auto-creating reversed pair
+  - Replaced `setClipTrim` with `setClipTrimDuration`
+- Rewrote process API (route.ts) for combined forward+reverse processing:
+  1. Trim input to `trimDuration` seconds
+  2. Create forward segment with 4x→0.6x segmented speed ramp
+  3. Reverse trimmed segment (video+audio), apply 0.6x→4x speed ramp
+  4. Concatenate both segments into final V-ramp output
+- Updated upload-zone.tsx: Creates single clip with `trimDuration` (default 1.00s)
+- Updated page.tsx: New V-shaped SVG visualization showing forward (orange) and reversed (cyan) halves
+  - Header shows "Reverse Speed Ramp" with V-ramp badge
+  - Empty state explains "Upload → Get V-ramp clip"
+  - Combined clip shows gradient V-ramp labels
+- Updated clip-list.tsx: Single clip per upload with V-RAMP badge
+- Updated export-panel.tsx: Shows V-ramp type, trim duration, estimated output
+- Updated process-all.tsx: Works with single clip structure
+- Updated video-preview.tsx: Removed sourceClipId logic, shows "V-RAMP" label
+- Created trim-duration-control.tsx: Slider to adjust trim duration with preset buttons (0.5s, 1.0s, 1.5s, 2.0s, 3.0s)
+- Removed TimelineTrimmer reference, replaced with TrimDurationControl
+- Updated layout metadata for "Reverse Speed Ramp"
+- Lint passes clean
+- Page renders correctly with agent-browser verification
 
 Stage Summary:
-- Turbopack panic resolved by fixing directory permissions and next.config.ts
-- Server runs on port 3000, page serves 200 OK
-- All ID-related code is correct and should work for both normal and reversed clips
-- Dev server needs double-fork `( ( node ... & ) )` to survive between bash sessions
+- App restructured from 2-clip system to single combined "Reverse Speed Ramp" clip
+- Upload creates one clip that processes into forward(4x→0.6x) + reversed(0.6x→4x) combined video
+- Default trim: first 1.00 second of original video
+- V-shaped speed ramp visualization with forward (orange) and reversed (cyan) sections
+- Trim duration is adjustable via slider and presets

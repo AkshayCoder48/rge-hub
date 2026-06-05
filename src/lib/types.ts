@@ -2,7 +2,7 @@ export interface VideoClip {
   id: string;
   fileName: string;
   originalName: string;
-  duration: number;
+  duration: number; // Original full video duration
   width: number;
   height: number;
   fps: number;
@@ -11,10 +11,8 @@ export interface VideoClip {
   format: string;
   fileSize: number;
   url: string;
-  sourceClipId?: string; // Points to the ORIGINAL clip's ID for finding the uploaded file
-  trimStart: number;
-  trimEnd: number;
-  speedRamps: SpeedRampPoint[]; // Just 2 points: start speed → end speed
+  trimDuration: number; // How many seconds of the original to use (default: 1.00)
+  speedRamps: SpeedRampPoint[]; // V-shaped: 4x → 0.6x → 4x
   processedUrl?: string;
   status: 'idle' | 'ready' | 'processing' | 'done' | 'error';
   error?: string;
@@ -40,7 +38,7 @@ export interface AppState {
   removeClip: (id: string) => void;
   selectClip: (id: string | null) => void;
   updateClip: (id: string, updates: Partial<VideoClip>) => void;
-  setClipTrim: (id: string, trimStart: number, trimEnd: number) => void;
+  setClipTrimDuration: (id: string, trimDuration: number) => void;
   setProcessingState: (state: Partial<ProcessingState>) => void;
   setClipStatus: (id: string, status: VideoClip['status'], error?: string) => void;
   setClipProcessedUrl: (id: string, url: string) => void;

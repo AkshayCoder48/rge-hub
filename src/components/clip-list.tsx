@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useRef, useState } from 'react';
-import { useAppStore, formatDuration, formatFileSize, createSpeedRamp, NORMAL_RAMP } from '@/lib/store';
-import { Film, Trash2, Clock, MonitorPlay, Plus, Loader2, TrendingDown, TrendingUp } from 'lucide-react';
+import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { Film, Trash2, Clock, MonitorPlay, Plus, Loader2, Combine } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import type { VideoClip } from '@/lib/types';
 
@@ -38,13 +38,15 @@ export function ClipList() {
         if (!response.ok) throw new Error('Upload failed');
         const data = await response.json();
 
+        const trimDuration = Math.min(DEFAULT_TRIM_DURATION, data.duration);
+
         const clip: VideoClip = {
           id: data.id, fileName: data.fileName, originalName: data.originalName,
           duration: data.duration, width: data.width, height: data.height,
           fps: data.fps, codec: data.codec, bitrate: data.bitrate,
           format: data.format, fileSize: data.fileSize, url: data.url,
-          trimStart: 0, trimEnd: data.duration,
-          speedRamps: createSpeedRamp(NORMAL_RAMP[0], NORMAL_RAMP[1], data.duration),
+          trimDuration,
+          speedRamps: createReverseSpeedRamp(trimDuration),
           status: 'ready',
         };
         addClip(clip);
@@ -57,7 +59,7 @@ export function ClipList() {
     }
 
     if (successCount > 0) {
-      toast({ title: `${successCount} video${successCount > 1 ? 's' : ''} uploaded`, description: `${successCount * 2} clips created (4x→0.6x + 0.6x→4x).` });
+      toast({ title: `${successCount} video${successCount > 1 ? 's' : ''} uploaded`, description: `${successCount} reverse speed ramp clip${successCount > 1 ? 's' : ''} created.` });
     }
   };
 
@@ -74,8 +76,8 @@ export function ClipList() {
 
       <div className="space-y-2 max-h-[calc(100vh-320px)] overflow-y-auto pr-1 custom-scrollbar">
         {clips.map((clip) => {
-          const isReversed = !!clip.sourceClipId;
           const speedStart = clip.speedRamps[0]?.speed ?? 0;
+          const speedMid = clip.speedRamps[Math.floor(clip.speedRamps.length / 2)]?.speed ?? 0;
           const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? 0;
 
           return (
@@ -86,29 +88,25 @@ export function ClipList() {
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectClip(clip.id); }}
               className={`w-full text-left rounded-xl p-3 transition-all duration-200 group cursor-pointer ${
                 selectedClipId === clip.id
-                  ? isReversed ? 'bg-cyan-500/10 border border-cyan-500/30' : 'bg-orange-500/10 border border-orange-500/30'
+                  ? 'bg-gradient-to-r from-orange-500/10 to-cyan-500/10 border border-orange-500/30'
                   : 'bg-white/[0.02] border border-white/5 hover:bg-white/[0.05] hover:border-white/10'
               }`}
             >
               <div className="flex items-start gap-3">
-                <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
-                  isReversed ? 'bg-cyan-500/10' : 'bg-orange-500/10'
-                }`}>
-                  {isReversed ? <TrendingUp className="w-4 h-4 text-cyan-400/70" /> : <TrendingDown className="w-4 h-4 text-orange-400/70" />}
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-gradient-to-br from-orange-500/10 to-cyan-500/10">
+                  <Combine className="w-4 h-4 text-white/60" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium text-white/80 truncate">{clip.originalName}</p>
-                    {isReversed && (
-                      <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400/70 border border-cyan-500/20 font-medium">REVERSED</span>
-                    )}
+                    <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-gradient-to-r from-orange-500/10 to-cyan-500/10 text-white/50 border border-white/10 font-medium">V-RAMP</span>
                   </div>
                   <div className="flex items-center gap-3 mt-1">
-                    <span className={`text-xs font-mono font-medium ${isReversed ? 'text-cyan-400/60' : 'text-orange-400/60'}`}>
-                      {speedStart}x → {speedEnd}x
+                    <span className="text-xs font-mono font-medium bg-gradient-to-r from-orange-400/60 to-cyan-400/60 bg-clip-text text-transparent">
+                      {speedStart}x → {speedMid}x → {speedEnd}x
                     </span>
                     <span className="flex items-center gap-1 text-xs text-white/30">
-                      <Clock className="w-3 h-3" /> {formatDuration(clip.duration)}
+                      <Clock className="w-3 h-3" /> {clip.trimDuration.toFixed(2)}s
                     </span>
                     <span className="flex items-center gap-1 text-xs text-white/30">
                       <MonitorPlay className="w-3 h-3" /> {clip.width}x{clip.height}
@@ -144,7 +142,7 @@ export function ClipList() {
           {uploadingCount > 0 ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading...</> : <><Plus className="w-4 h-4" /> Add More Videos</>}
         </button>
         <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.webm,.mkv" multiple onChange={async (e) => { if (e.target.files?.length) { await handleFileUpload(e.target.files); e.target.value = ''; } }} className="hidden" />
-        <p className="text-[10px] text-white/15 text-center">Each video auto-creates 2 clips: 4x→0.6x + 0.6x→4x</p>
+        <p className="text-[10px] text-white/15 text-center">Each video creates 1 reverse speed ramp clip ({RAMP_START}x→{RAMP_MID}x→{RAMP_END}x)</p>
       </div>
     </div>
   );

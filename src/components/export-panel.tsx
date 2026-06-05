@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useAppStore, formatDuration } from '@/lib/store';
-import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, TrendingDown, TrendingUp } from 'lucide-react';
+import { useAppStore, formatDuration, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine } from 'lucide-react';
 
 interface ExportPanelProps { clipId: string; }
 
@@ -16,20 +16,25 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
 
   if (!clip) return null;
 
-  const isReversed = !!clip.sourceClipId;
-  const speedStart = clip.speedRamps[0]?.speed ?? 0;
-  const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? 0;
-  const trimDuration = clip.trimEnd - clip.trimStart;
-  const avgSpeed = (speedStart + speedEnd) / 2;
-  const estimatedDuration = trimDuration / avgSpeed;
+  const speedStart = clip.speedRamps[0]?.speed ?? RAMP_START;
+  const speedMid = clip.speedRamps[Math.floor(clip.speedRamps.length / 2)]?.speed ?? RAMP_MID;
+  const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? RAMP_END;
+  const trimDuration = clip.trimDuration;
+
+  // Estimate output duration:
+  // Forward part: average speed (4+0.6)/2 = 2.3, so 1s/2.3 ≈ 0.43s
+  // Reversed part: average speed (0.6+4)/2 = 2.3, so 1s/2.3 ≈ 0.43s
+  // Total ≈ 0.87s (rough estimate)
+  const avgSpeed = (speedStart + speedMid + speedEnd) / 3;
+  const estimatedDuration = (trimDuration / avgSpeed) * 2; // two parts
 
   const handleProcess = async () => {
     try {
       setClipStatus(clipId, 'processing');
-      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing...' });
+      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing reverse speed ramp...' });
 
       const progressInterval = setInterval(() => {
-        setProcessingState({ progress: Math.min((useAppStore.getState().processingState.progress || 0) + Math.random() * 10, 90) });
+        setProcessingState({ progress: Math.min((useAppStore.getState().processingState.progress || 0) + Math.random() * 8, 90) });
       }, 500);
 
       const response = await fetch('/api/process', {
@@ -37,10 +42,8 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           clipId: clip.id,
-          sourceClipId: clip.sourceClipId || undefined,
+          trimDuration: clip.trimDuration,
           speedRamps: clip.speedRamps,
-          trimStart: clip.trimStart,
-          trimEnd: clip.trimEnd,
           outputFormat,
         }),
       });
@@ -71,24 +74,24 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
 
       <div className="grid grid-cols-2 gap-3 mb-4 p-3 rounded-xl bg-white/[0.02] border border-white/5">
         <div className="flex items-center gap-2">
-          {isReversed ? <TrendingUp className="w-3.5 h-3.5 text-cyan-400/60" /> : <TrendingDown className="w-3.5 h-3.5 text-orange-400/60" />}
+          <Combine className="w-3.5 h-3.5 text-white/40" />
           <div>
             <p className="text-[10px] text-white/25 uppercase tracking-wider">Type</p>
-            <p className={`text-xs font-medium ${isReversed ? 'text-cyan-400/70' : 'text-orange-400/70'}`}>{isReversed ? 'Reversed' : 'Normal'}</p>
+            <p className="text-xs font-medium bg-gradient-to-r from-orange-400/70 to-cyan-400/70 bg-clip-text text-transparent">Reverse Speed Ramp</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Gauge className="w-3.5 h-3.5 text-cyan-400/60" />
+          <Gauge className="w-3.5 h-3.5 text-white/40" />
           <div>
             <p className="text-[10px] text-white/25 uppercase tracking-wider">Speed Ramp</p>
-            <p className="text-xs text-white/60">{speedStart}x → {speedEnd}x</p>
+            <p className="text-xs text-white/60">{speedStart}x → {speedMid}x → {speedEnd}x</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <Scissors className="w-3.5 h-3.5 text-orange-400/60" />
           <div>
             <p className="text-[10px] text-white/25 uppercase tracking-wider">Trim</p>
-            <p className="text-xs text-white/60">{formatDuration(clip.trimStart)} – {formatDuration(clip.trimEnd)}</p>
+            <p className="text-xs text-white/60">{trimDuration.toFixed(2)}s of original</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -114,9 +117,9 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
         <button onClick={handleProcess} disabled={isProcessing}
           className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${
             isProcessing ? 'bg-orange-500/10 text-orange-400/60 cursor-not-allowed'
-              : 'bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 shadow-lg shadow-orange-500/20'
+              : 'bg-gradient-to-r from-orange-500 to-cyan-500 text-white hover:from-orange-400 hover:to-cyan-400 shadow-lg shadow-orange-500/20'
           }`}>
-          {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Film className="w-4 h-4" /> Process Video</>}
+          {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Film className="w-4 h-4" /> Process V-Ramp</>}
         </button>
         {clip.processedUrl && (
           <>
