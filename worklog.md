@@ -36,3 +36,35 @@ Stage Summary:
 - Default trim: first 1.00 second of original video
 - V-shaped speed ramp visualization with forward (orange) and reversed (cyan) sections
 - Trim duration is adjustable via slider and presets
+
+---
+Task ID: 2
+Agent: main
+Task: Fix video stuttering - make it fully smooth
+
+Work Log:
+- Analyzed root causes of video stuttering:
+  1. Segmented speed ramping: 10 discrete segments with speed jumps between them
+  2. No frame interpolation: setpts just stretches frame timing without creating new frames
+  3. Segment concatenation artifacts: timestamp misalignments at segment boundaries
+- Tested minterpolate filter for motion-compensated frame interpolation → too slow (60+ seconds for 1s clip)
+- Tested framerate filter → also too slow
+- Implemented continuous mathematical setpts expression for smooth speed ramping:
+  - Derived integral formula for linear speed ramp: out(t) = D/Δs * ln(1 + Δs*t/(s₀*D))
+  - Forward (4x→0.6x): setpts=(D/(-3.4*TB))*log(max(0.0001,1+(-3.4)*(PTS-STARTPTS)*TB/(4*D)))
+  - Reversed (0.6x→4x): setpts=(D/(3.4*TB))*log(max(0.0001,1+3.4*(PTS-STARTPTS)*TB/(0.6*D)))
+  - Escaped commas in expression for FFmpeg filter syntax compatibility
+- Added fallback: fine-segmented approach (0.02s segments) if continuous setpts fails
+- Forced 60fps output with -r 60, -crf 18, -preset fast for consistent quality
+- Updated export-panel.tsx with accurate output duration using integral formula
+- Processing time improved: 3.8s (was 7.7s) - 2x faster!
+- Tested and verified: output video has correct duration (~1.12s for 1.0s input V-ramp)
+- Lint passes clean, no runtime errors
+
+Stage Summary:
+- Replaced segmented speed ramping (10 segments) with continuous mathematical setpts expression
+- Video no longer has discrete speed jumps between segments → smooth transitions
+- Processing is 2x faster (3.8s vs 7.7s for same clip)
+- minterpolate too slow for real-time use; relied on continuous expression + 60fps output instead
+- Fallback mechanism in place: if continuous setpts fails, uses fine-segmented approach
+- Accurate duration calculation in export panel using integral formula

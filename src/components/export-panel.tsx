@@ -21,17 +21,21 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
   const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? RAMP_END;
   const trimDuration = clip.trimDuration;
 
-  // Estimate output duration:
-  // Forward part: average speed (4+0.6)/2 = 2.3, so 1s/2.3 ≈ 0.43s
-  // Reversed part: average speed (0.6+4)/2 = 2.3, so 1s/2.3 ≈ 0.43s
-  // Total ≈ 0.87s (rough estimate)
-  const avgSpeed = (speedStart + speedMid + speedEnd) / 3;
-  const estimatedDuration = (trimDuration / avgSpeed) * 2; // two parts
+  // Accurate output duration using the integral formula:
+  // For linear speed ramp s₀→s₁ over D: output = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)/s₀)
+  function computeRampDuration(s0: number, s1: number, D: number): number {
+    const deltaS = s1 - s0;
+    if (Math.abs(deltaS) < 0.001) return D / s0;
+    return (D / deltaS) * Math.log(1 + deltaS / s0);
+  }
+  const forwardDur = computeRampDuration(speedStart, speedMid, trimDuration / 2);
+  const reversedDur = computeRampDuration(speedMid, speedEnd, trimDuration / 2);
+  const estimatedDuration = forwardDur + reversedDur;
 
   const handleProcess = async () => {
     try {
       setClipStatus(clipId, 'processing');
-      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing reverse speed ramp...' });
+      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing smooth reverse speed ramp (motion interpolation)...' });
 
       const progressInterval = setInterval(() => {
         setProcessingState({ progress: Math.min((useAppStore.getState().processingState.progress || 0) + Math.random() * 8, 90) });

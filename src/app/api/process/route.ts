@@ -32,7 +32,8 @@ async function findFileById(dir: string, id: string): Promise<string | null> {
 }
 
 function buildAtempoFilter(speed: number): string {
-  if (speed === 1) return '';
+  if (Math.abs(speed - 1) < 0.01) return '';
+  speed = Math.max(0.01, Math.min(speed, 100));
   const filters: string[] = [];
   let remaining = speed;
   while (remaining > 100) { filters.push('atempo=100.0'); remaining /= 100; }
@@ -41,24 +42,6 @@ function buildAtempoFilter(speed: number): string {
   return filters.join(',');
 }
 
-function interpolateSpeed(ramps: SpeedRampPoint[], time: number): number {
-  if (ramps.length === 0) return 1;
-  if (ramps.length === 1) return ramps[0].speed;
-  if (time <= ramps[0].time) return ramps[0].speed;
-  if (time >= ramps[ramps.length - 1].time) return ramps[ramps.length - 1].speed;
-  for (let i = 0; i < ramps.length - 1; i++) {
-    if (time >= ramps[i].time && time <= ramps[i + 1].time) {
-      const t = (time - ramps[i].time) / (ramps[i + 1].time - ramps[i].time);
-      const smoothT = t * t * (3 - 2 * t);
-      return ramps[i].speed + smoothT * (ramps[i + 1].speed - ramps[i].speed);
-    }
-  }
-  return 1;
-}
-
-/**
- * Run FFmpeg and return a promise.
- */
 function runFFmpeg(command: ReturnType<typeof ffmpeg>): Promise<void> {
   return new Promise((resolve, reject) => {
     command
@@ -73,68 +56,126 @@ function runFFmpeg(command: ReturnType<typeof ffmpeg>): Promise<void> {
 }
 
 /**
- * Process a video segment with segmented speed ramping.
- * Divides the input into small segments, applies different speeds, then concats.
+ * Compute the output duration for a linear speed ramp.
+ * For speed s₀→s₁ over input duration D:
+ *   out(D) = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)/s₀)  when s₁≠s₀
+ *   out(D) = D/s₀                                   when s₁≈s₀
  */
-async function processSegmentedSpeed(
+export function computeRampOutputDuration(s0: number, s1: number, D: number): number {
+  const deltaS = s1 - s0;
+  if (Math.abs(deltaS) < 0.001) return D / s0;
+  return (D / deltaS) * Math.log(1 + deltaS / s0);
+}
+
+/**
+ * Build a continuous setpts expression for linear speed ramping.
+ *
+ * For a linear speed ramp from s₀ to s₁ over D seconds of input:
+ *   speed(t) = s₀ + (s₁-s₀)*t/D
+ *   output_time(t) = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)*t/(s₀*D))
+ *   new_PTS = output_time(PTS*TB) / TB
+ *
+ * This produces butter-smooth speed transitions without discrete steps.
+ * Commas inside the expression are escaped with backslashes for FFmpeg filter syntax.
+ */
+function buildContinuousSetpts(s0: number, s1: number, D: number): string {
+  const deltaS = s1 - s0;
+  if (Math.abs(deltaS) < 0.001) return `PTS/${s0.toFixed(6)}`;
+
+  // inner = 1 + deltaS*(PTS-STARTPTS)*TB / (s0*D)
+  // We clamp inner > 0.0001 to avoid log(0) or log(negative)
+  const innerExpr = `1+${deltaS.toFixed(6)}*(PTS-STARTPTS)*TB/(${s0.toFixed(6)}*${D.toFixed(6)})`;
+  // Escape commas for FFmpeg filter syntax (commas separate filters)
+  const escapedInner = innerExpr.replace(/,/g, '\\,');
+  return `(${D.toFixed(6)}/(${deltaS.toFixed(6)}*TB))*log(max(0.0001\\,${escapedInner}))`;
+}
+
+/**
+ * Process a video with smooth continuous speed ramping.
+ *
+ * Uses a mathematically continuous setpts expression for smooth speed transitions
+ * instead of the old segmented approach with discrete speed jumps.
+ *
+ * The output is forced to 60fps which duplicates frames in slow sections
+ * and drops frames in fast sections, ensuring consistent playback.
+ */
+async function processContinuousSpeedRamp(
   inputPath: string,
   outputPath: string,
-  speedRamps: SpeedRampPoint[],
+  startSpeed: number,
+  endSpeed: number,
   inputDuration: number,
   outputExt: string
 ): Promise<void> {
-  const sorted = [...speedRamps].sort((a, b) => a.time - b.time);
-  const startTime = sorted[0].time;
-  const endTime = sorted[sorted.length - 1].time;
-  const totalDuration = endTime - startTime;
+  const s0 = Math.max(0.1, Math.min(startSpeed, 50));
+  const s1 = Math.max(0.1, Math.min(endSpeed, 50));
 
-  if (totalDuration <= 0) {
-    const avgSpeed = sorted.reduce((sum, r) => sum + r.speed, 0) / sorted.length;
-    await processUniformSpeed(inputPath, outputPath, avgSpeed, 0, inputDuration, outputExt);
-    return;
-  }
+  const setptsExpr = buildContinuousSetpts(s0, s1, inputDuration);
+  const videoOutputDuration = computeRampOutputDuration(s0, s1, inputDuration);
+  const audioSpeed = Math.max(0.1, Math.min(inputDuration / videoOutputDuration, 50));
 
-  const SEGMENT_DURATION = 0.3;
-  const numSegments = Math.max(10, Math.min(60, Math.ceil(totalDuration / SEGMENT_DURATION)));
-  const actualSegDuration = totalDuration / numSegments;
+  console.log(`Smooth ramp: ${s0}x → ${s1}x over ${inputDuration}s, output ~${videoOutputDuration.toFixed(3)}s, audioSpeed=${audioSpeed.toFixed(3)}x`);
 
-  console.log(`Speed ramping: ${numSegments} segments over ${totalDuration.toFixed(2)}s`);
+  let command = ffmpeg(inputPath);
+
+  // Video: continuous speed ramp using mathematical expression
+  command = command.videoFilters([`setpts=${setptsExpr}`]);
+
+  // Audio: match the video output duration
+  const atempo = buildAtempoFilter(audioSpeed);
+  if (atempo) command = command.audioFilters([atempo]);
+
+  command = command
+    .output(outputPath)
+    .outputOptions([
+      '-movflags', '+faststart',
+      '-pix_fmt', 'yuv420p',
+      '-r', '60',            // Force 60fps output for smooth playback
+      '-crf', '18',          // High quality encoding
+      '-preset', 'fast',     // Reasonable encoding speed
+    ]);
+
+  await runFFmpeg(command);
+}
+
+/**
+ * Fallback: segmented speed ramping with much finer segments (0.02s)
+ * Used only if continuous setpts fails.
+ */
+async function processFineSegmentedSpeed(
+  inputPath: string,
+  outputPath: string,
+  startSpeed: number,
+  endSpeed: number,
+  inputDuration: number,
+  outputExt: string
+): Promise<void> {
+  const s0 = Math.max(0.1, Math.min(startSpeed, 50));
+  const s1 = Math.max(0.1, Math.min(endSpeed, 50));
+
+  // Use very fine segments for smooth transitions
+  const SEGMENT_DURATION = 0.02; // 20ms per segment = 50 segments per second
+  const numSegments = Math.max(20, Math.ceil(inputDuration / SEGMENT_DURATION));
+  const actualSegDuration = inputDuration / numSegments;
+
+  console.log(`Fine segmented ramp: ${s0}x → ${s1}x, ${numSegments} segments over ${inputDuration}s`);
 
   const segments: { startTime: number; endTime: number; speed: number }[] = [];
   for (let i = 0; i < numSegments; i++) {
-    const segStart = startTime + i * actualSegDuration;
-    const segEnd = startTime + (i + 1) * actualSegDuration;
+    const segStart = i * actualSegDuration;
+    const segEnd = (i + 1) * actualSegDuration;
     const midTime = (segStart + segEnd) / 2;
-    const speed = interpolateSpeed(sorted, midTime);
-    segments.push({ startTime: segStart, endTime: Math.min(segEnd, endTime), speed: Math.max(0.1, Math.min(speed, 50)) });
-  }
-
-  // Merge similar segments
-  const MERGE_TOLERANCE = 0.05;
-  const mergedSegments: { startTime: number; endTime: number; speed: number }[] = [];
-  for (const seg of segments) {
-    const last = mergedSegments[mergedSegments.length - 1];
-    if (last && Math.abs(last.speed - seg.speed) / Math.max(last.speed, seg.speed) < MERGE_TOLERANCE) {
-      last.endTime = seg.endTime;
-    } else {
-      mergedSegments.push({ ...seg });
-    }
-  }
-
-  console.log(`After merging: ${mergedSegments.length} segments`);
-
-  if (mergedSegments.length === 1) {
-    const seg = mergedSegments[0];
-    await processUniformSpeed(inputPath, outputPath, seg.speed, seg.startTime, seg.endTime - seg.startTime, outputExt);
-    return;
+    const t = midTime / inputDuration;
+    const speed = s0 + (s1 - s0) * t;
+    segments.push({ startTime: segStart, endTime: Math.min(segEnd, inputDuration), speed: Math.max(0.1, speed) });
   }
 
   const segmentFiles: string[] = [];
   const jobId = uuidv4();
 
   try {
-    for (let i = 0; i < mergedSegments.length; i++) {
-      const seg = mergedSegments[i];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
       const segFile = path.join(TMP_DIR, `${jobId}_seg${i}.mp4`);
       segmentFiles.push(segFile);
 
@@ -145,7 +186,7 @@ async function processSegmentedSpeed(
       const videoFilters: string[] = [];
       const audioFilters: string[] = [];
 
-      if (seg.speed !== 1) {
+      if (Math.abs(seg.speed - 1) > 0.01) {
         videoFilters.push(`setpts=PTS/${seg.speed.toFixed(6)}`);
         const atempo = buildAtempoFilter(seg.speed);
         if (atempo) audioFilters.push(atempo);
@@ -156,7 +197,7 @@ async function processSegmentedSpeed(
 
       command = command
         .output(segFile)
-        .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p']);
+        .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-r', '60', '-crf', '18', '-preset', 'fast']);
 
       await runFFmpeg(command);
     }
@@ -165,15 +206,10 @@ async function processSegmentedSpeed(
     const concatContent = segmentFiles.map((f) => `file '${f}'`).join('\n');
     await writeFile(concatListPath, concatContent);
 
-    let concatCmd = ffmpeg(concatListPath)
+    const concatCmd = ffmpeg(concatListPath)
       .inputOptions(['-f', 'concat', '-safe', '0'])
-      .output(outputPath);
-
-    if (outputExt === '.mp4' || outputExt === '.mov') {
-      concatCmd = concatCmd.outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-c', 'copy']);
-    } else {
-      concatCmd = concatCmd.outputOptions(['-c', 'copy']);
-    }
+      .output(outputPath)
+      .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-c', 'copy']);
 
     await runFFmpeg(concatCmd);
   } finally {
@@ -182,43 +218,6 @@ async function processSegmentedSpeed(
     }
     try { await unlink(path.join(TMP_DIR, `${jobId}_concat.txt`)); } catch { /* ignore */ }
   }
-}
-
-async function processUniformSpeed(
-  inputPath: string,
-  outputPath: string,
-  speed: number,
-  trimStart: number,
-  trimDuration: number,
-  outputExt: string
-): Promise<void> {
-  speed = Math.max(0.1, Math.min(speed, 50));
-
-  let command = ffmpeg(inputPath);
-  if (trimStart > 0) command = command.seekInput(trimStart);
-  if (trimDuration > 0 && trimDuration < 9999) command = command.duration(trimDuration);
-
-  const videoFilters: string[] = [];
-  const audioFilters: string[] = [];
-
-  if (speed !== 1) {
-    videoFilters.push(`setpts=PTS/${speed.toFixed(6)}`);
-    const atempo = buildAtempoFilter(speed);
-    if (atempo) audioFilters.push(atempo);
-  }
-
-  if (videoFilters.length > 0) command = command.videoFilters(videoFilters);
-  if (audioFilters.length > 0) command = command.audioFilters(audioFilters);
-
-  command = command.output(outputPath);
-
-  if (outputExt === '.mp4' || outputExt === '.mov') {
-    command = command.outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p']);
-  } else if (outputExt === '.webm') {
-    command = command.outputOptions(['-c:v', 'libvpx-vp9', '-c:a', 'libopus']);
-  }
-
-  await runFFmpeg(command);
 }
 
 export async function POST(request: Request) {
@@ -232,7 +231,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'clipId is required' }, { status: 400 });
     }
 
-    // Find the uploaded file
     const inputPath = await findFileById(UPLOADS_DIR, clipId);
     if (!inputPath) {
       return NextResponse.json(
@@ -258,11 +256,11 @@ export async function POST(request: Request) {
     const jobId = uuidv4();
 
     // ============================================
-    // REVERSE SPEED RAMP PROCESSING
+    // SMOOTH REVERSE SPEED RAMP PROCESSING
     // ============================================
     // Step 1: Extract the first N seconds of the input video
-    // Step 2: Apply 4x→0.6x speed ramp to the forward segment
-    // Step 3: Reverse the trimmed segment, then apply 0.6x→4x speed ramp
+    // Step 2: Apply continuous 4x→0.6x speed ramp (smooth mathematical curve)
+    // Step 3: Reverse the trimmed segment, then apply continuous 0.6x→4x speed ramp
     // Step 4: Concatenate forward + reversed segments into final output
     // ============================================
 
@@ -282,15 +280,22 @@ export async function POST(request: Request) {
           .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p'])
       );
 
-      // Step 2: Process forward segment with 4x→0.6x speed ramp
-      console.log('Step 2: Processing forward segment (4x→0.6x)');
-      const forwardRamps: SpeedRampPoint[] = [
-        { time: 0, speed: 4.0 },
-        { time: effectiveTrimDuration, speed: 0.6 },
-      ];
-      await processSegmentedSpeed(trimmedFile, forwardFile, forwardRamps, effectiveTrimDuration, outputExt);
+      // Step 2: Forward segment with continuous 4x→0.6x speed ramp
+      console.log('Step 2: Processing smooth forward segment (4x→0.6x)');
+      try {
+        await processContinuousSpeedRamp(
+          trimmedFile, forwardFile,
+          4.0, 0.6, effectiveTrimDuration, outputExt
+        );
+      } catch (continuousErr) {
+        console.warn('Continuous setpts failed, falling back to fine-segmented:', continuousErr);
+        await processFineSegmentedSpeed(
+          trimmedFile, forwardFile,
+          4.0, 0.6, effectiveTrimDuration, outputExt
+        );
+      }
 
-      // Step 3: Reverse the trimmed segment, then apply 0.6x→4x speed ramp
+      // Step 3: Reverse the trimmed segment
       console.log('Step 3a: Reversing the trimmed segment');
       await runFFmpeg(
         ffmpeg(trimmedFile)
@@ -300,14 +305,22 @@ export async function POST(request: Request) {
           .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p'])
       );
 
-      console.log('Step 3b: Processing reversed segment (0.6x→4x)');
-      const reversedRamps: SpeedRampPoint[] = [
-        { time: 0, speed: 0.6 },
-        { time: effectiveTrimDuration, speed: 4.0 },
-      ];
-      await processSegmentedSpeed(reversedRawFile, reversedFile, reversedRamps, effectiveTrimDuration, outputExt);
+      // Step 4: Reversed segment with continuous 0.6x→4x speed ramp
+      console.log('Step 3b: Processing smooth reversed segment (0.6x→4x)');
+      try {
+        await processContinuousSpeedRamp(
+          reversedRawFile, reversedFile,
+          0.6, 4.0, effectiveTrimDuration, outputExt
+        );
+      } catch (continuousErr) {
+        console.warn('Continuous setpts failed for reversed, falling back to fine-segmented:', continuousErr);
+        await processFineSegmentedSpeed(
+          reversedRawFile, reversedFile,
+          0.6, 4.0, effectiveTrimDuration, outputExt
+        );
+      }
 
-      // Step 4: Concatenate forward + reversed segments
+      // Step 5: Concatenate forward + reversed segments
       console.log('Step 4: Concatenating forward + reversed segments');
       const concatListPath = path.join(TMP_DIR, `${jobId}_final_concat.txt`);
       const concatContent = [
@@ -330,7 +343,6 @@ export async function POST(request: Request) {
 
       await unlink(concatListPath);
     } finally {
-      // Cleanup temp files
       for (const f of [trimmedFile, forwardFile, reversedRawFile, reversedFile]) {
         try { await unlink(f); } catch { /* ignore */ }
       }
