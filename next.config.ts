@@ -10,6 +10,11 @@ const nextConfig: NextConfig = {
   outputFileTracingExcludes: {
     '*': ['agent-ctx'],
   },
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '100mb',
+    },
+  },
 };
 
 export default nextConfig;

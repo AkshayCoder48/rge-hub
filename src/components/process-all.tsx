@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { useAppStore } from '@/lib/store';
-import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine } from 'lucide-react';
+import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine, Archive, Download } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface ProcessAllProgress {
@@ -51,6 +51,7 @@ export function ProcessAll() {
             trimDuration: clip.trimDuration,
             speedRamps: clip.speedRamps,
             outputFormat: 'mp4',
+            motionBlur: clip.motionBlur,
           }),
         });
 
@@ -74,8 +75,79 @@ export function ProcessAll() {
     toast({ title: 'Batch processing complete', description: `${successCount} succeeded, ${failCount} failed.`, variant: failCount > 0 ? 'destructive' : 'default' });
   }, [processableClips, setClipStatus, setClipProcessedUrl, setProcessingState, toast]);
 
+  const doneClips = clips.filter((c) => c.status === 'done');
+
+  const handleDownloadZip = useCallback(async () => {
+    const doneClipIds = doneClips.map((c) => {
+      // Extract the processed file ID from the processedUrl
+      const url = c.processedUrl || '';
+      const match = url.match(/id=([\w-]+)/);
+      return match ? match[1] : c.id;
+    });
+    if (doneClipIds.length === 0) return;
+
+    try {
+      const response = await fetch('/api/download-zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: doneClipIds }),
+      });
+
+      if (!response.ok) throw new Error('Failed to create ZIP');
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'speed-ramp-clips.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ title: 'Download failed', description: err instanceof Error ? err.message : 'Failed to download ZIP', variant: 'destructive' });
+    }
+  }, [doneClips, toast]);
+
+  const handleDownloadAllZip = useCallback(async () => {
+    // Download ALL clips - both processed and original uploaded
+    if (clips.length === 0) return;
+
+    const allClipIds = clips.map((c) => {
+      // For processed clips, use the processed file ID
+      if (c.processedUrl) {
+        const match = c.processedUrl.match(/id=([\w-]+)/);
+        if (match) return match[1];
+      }
+      // For unprocessed clips, use the upload ID
+      return c.id;
+    });
+
+    try {
+      const response = await fetch('/api/download-zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: allClipIds }),
+      });
+
+      if (!response.ok) throw new Error('Failed to create ZIP');
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'all-video-clips.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ title: 'Download failed', description: err instanceof Error ? err.message : 'Failed to download ZIP', variant: 'destructive' });
+    }
+  }, [clips, toast]);
+
   if (clips.length === 0) return null;
-  const doneCount = clips.filter((c) => c.status === 'done').length;
+  const doneCount = doneClips.length;
 
   return (
     <div className="rounded-2xl bg-[#0f0f17] border border-white/5 p-5">
@@ -121,6 +193,23 @@ export function ProcessAll() {
           <><PlayCircle className="w-4 h-4" /> Process All ({processableClips.length})</>
         )}
       </button>
+
+      {/* Download buttons */}
+      <div className="mt-3 space-y-2">
+        {doneCount > 0 && (
+          <button onClick={handleDownloadZip}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all">
+            <Archive className="w-4 h-4" /> Download Processed ZIP ({doneCount})
+          </button>
+        )}
+
+        {clips.length > 0 && (
+          <button onClick={handleDownloadAllZip}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 transition-all">
+            <Download className="w-4 h-4" /> Download All as ZIP ({clips.length})
+          </button>
+        )}
+      </div>
 
       {processableClips.length === 0 && clips.length > 0 && (
         <p className="text-[10px] text-white/20 mt-2 text-center">All clips have been processed</p>

@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { useAppStore, formatDuration, DEFAULT_TRIM_DURATION } from '@/lib/store';
-import { Scissors, Clock } from 'lucide-react';
+import { Scissors, Clock, AlertTriangle } from 'lucide-react';
 
 interface TrimDurationControlProps {
   clipId: string;
@@ -51,8 +51,8 @@ export function TrimDurationControl({ clipId }: TrimDurationControlProps) {
 
         <div className="flex items-center justify-between px-1">
           <span className="text-[10px] text-white/20">0.1s</span>
-          <div className="flex items-center gap-1">
-            {[0.5, 1.0, 1.5, 2.0, 3.0].map((val) => (
+          <div className="flex items-center gap-1 flex-wrap">
+            {[0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0].map((val) => (
               <button
                 key={val}
                 onClick={() => setClipTrimDuration(clipId, Math.min(val, maxDuration))}
@@ -78,6 +78,20 @@ export function TrimDurationControl({ clipId }: TrimDurationControlProps) {
             Forward segment plays at 4x→0.6x, then reversed segment plays at 0.6x→4x. Both combined into one V-ramp clip.
           </p>
         </div>
+
+        {trimDuration > 10 && (
+          <div className="p-2.5 rounded-lg bg-amber-500/5 border border-amber-500/15 mt-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-[10px] text-amber-400/70 font-medium">Long clip — slower processing</p>
+                <p className="text-[9px] text-amber-400/40 mt-0.5 leading-relaxed">
+                  Trim durations over 10s use chunked processing to avoid memory issues. Processing will take longer but will work reliably.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

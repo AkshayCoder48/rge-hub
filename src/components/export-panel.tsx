@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useAppStore, formatDuration, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
-import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine } from 'lucide-react';
+import { useAppStore, formatDuration, RAMP_START, RAMP_MID, RAMP_END, DEFAULT_MOTION_BLUR } from '@/lib/store';
+import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine, Wind } from 'lucide-react';
+import type { MotionBlurSettings } from '@/lib/types';
 
 interface ExportPanelProps { clipId: string; }
 
@@ -20,6 +21,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
   const speedMid = clip.speedRamps[Math.floor(clip.speedRamps.length / 2)]?.speed ?? RAMP_MID;
   const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? RAMP_END;
   const trimDuration = clip.trimDuration;
+  const motionBlur: MotionBlurSettings = clip.motionBlur ?? { ...DEFAULT_MOTION_BLUR };
 
   // Accurate output duration using the integral formula:
   // For linear speed ramp s₀→s₁ over D: output = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)/s₀)
@@ -35,7 +37,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
   const handleProcess = async () => {
     try {
       setClipStatus(clipId, 'processing');
-      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing smooth reverse speed ramp (motion interpolation)...' });
+      setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing smooth reverse speed ramp...' });
 
       const progressInterval = setInterval(() => {
         setProcessingState({ progress: Math.min((useAppStore.getState().processingState.progress || 0) + Math.random() * 8, 90) });
@@ -49,6 +51,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
           trimDuration: clip.trimDuration,
           speedRamps: clip.speedRamps,
           outputFormat,
+          motionBlur,
         }),
       });
 
@@ -105,6 +108,15 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
             <p className="text-xs text-white/60">~{formatDuration(estimatedDuration)}</p>
           </div>
         </div>
+        {motionBlur.enabled && (
+          <div className="col-span-2 flex items-center gap-2">
+            <Wind className="w-3.5 h-3.5 text-purple-400/60" />
+            <div>
+              <p className="text-[10px] text-white/25 uppercase tracking-wider">Motion Blur</p>
+              <p className="text-xs text-purple-400/70">{motionBlur.frames} frames · {motionBlur.mode} mode</p>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2 mb-4">

@@ -1,16 +1,30 @@
 import { NextResponse } from 'next/server';
 import { ffmpeg } from '@/lib/ffmpeg-config';
-import { mkdir, readdir, stat, unlink, writeFile, access } from 'fs/promises';
+import { mkdir, readdir, stat, unlink, writeFile, access, copyFile } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const UPLOADS_DIR = '/home/z/my-project/uploads';
 const PROCESSED_DIR = '/home/z/my-project/processed';
 const TMP_DIR = '/home/z/my-project/tmp';
+const FFPROBE_PATH = '/usr/bin/ffprobe';
+
+// Maximum trim duration in seconds — longer clips require chunked processing
+const MAX_DIRECT_REVERSE_DURATION = 10; // seconds; above this, use chunked reverse
 
 interface SpeedRampPoint {
   time: number;
   speed: number;
+}
+
+interface MotionBlurSettings {
+  enabled: boolean;
+  frames: number;
+  mode: 'average' | 'light' | 'heavy';
 }
 
 interface ProcessRequest {
@@ -18,6 +32,7 @@ interface ProcessRequest {
   trimDuration: number;
   speedRamps: SpeedRampPoint[];
   outputFormat: string;
+  motionBlur?: MotionBlurSettings;
 }
 
 async function ensureDir(dir: string) {
@@ -31,6 +46,51 @@ async function findFileById(dir: string, id: string): Promise<string | null> {
   return match ? path.join(dir, match) : null;
 }
 
+/**
+ * Probe video file for streams and properties using ffprobe.
+ */
+async function probeVideo(filePath: string): Promise<{ hasAudio: boolean; duration: number; width: number; height: number; fps: number; pixFmt: string }> {
+  try {
+    const { stdout } = await execFileAsync(FFPROBE_PATH, [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_streams',
+      '-show_format',
+      filePath,
+    ]);
+
+    const info = JSON.parse(stdout);
+    const streams = info.streams || [];
+    const hasAudio = streams.some((s: Record<string, unknown>) => s.codec_type === 'audio');
+    const videoStream = streams.find((s: Record<string, unknown>) => s.codec_type === 'video');
+
+    let duration = 0;
+    if (info.format?.duration) {
+      duration = parseFloat(info.format.duration);
+    } else if (videoStream?.duration) {
+      duration = parseFloat(videoStream.duration as string);
+    }
+
+    const width = videoStream?.width || 1920;
+    const height = videoStream?.height || 1080;
+
+    let fps = 30;
+    if (videoStream?.r_frame_rate) {
+      const parts = (videoStream.r_frame_rate as string).split('/');
+      if (parts.length === 2 && parseInt(parts[1]) > 0) {
+        fps = Math.round(parseInt(parts[0]) / parseInt(parts[1]));
+      }
+    }
+
+    const pixFmt = (videoStream?.pix_fmt as string) || 'yuv420p';
+
+    return { hasAudio, duration, width, height, fps, pixFmt };
+  } catch (err) {
+    console.warn('ffprobe failed, using defaults:', err);
+    return { hasAudio: true, duration: 0, width: 1920, height: 1080, fps: 30, pixFmt: 'yuv420p' };
+  }
+}
+
 function buildAtempoFilter(speed: number): string {
   if (Math.abs(speed - 1) < 0.01) return '';
   speed = Math.max(0.01, Math.min(speed, 100));
@@ -42,24 +102,49 @@ function buildAtempoFilter(speed: number): string {
   return filters.join(',');
 }
 
-function runFFmpeg(command: ReturnType<typeof ffmpeg>): Promise<void> {
+function runFFmpeg(command: ReturnType<typeof ffmpeg>, timeoutMs = 600000): Promise<void> {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`FFmpeg timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
     command
       .on('start', (cmdLine: string) => console.log('FFmpeg:', cmdLine))
-      .on('end', () => resolve())
+      .on('end', () => { clearTimeout(timer); resolve(); })
       .on('error', (err: Error, _stdout: string, stderr: string) => {
+        clearTimeout(timer);
         console.error('FFmpeg error:', err.message, stderr);
-        reject(new Error(`FFmpeg failed: ${err.message}`));
+        const stderrLines = stderr.split('\n').filter((l: string) => l.trim());
+        const lastErr = stderrLines.filter((l: string) => l.includes('Error') || l.includes('error')).pop();
+        const detail = lastErr ? lastErr.trim() : err.message;
+        reject(new Error(`FFmpeg failed: ${detail}`));
       })
       .run();
   });
 }
 
 /**
+ * Build motion blur video filter chain using FFmpeg's tblend (temporal blend) filter.
+ */
+function buildMotionBlurFilters(settings: MotionBlurSettings): string[] {
+  if (!settings.enabled) return [];
+  const filters: string[] = [];
+  const passes = settings.mode === 'light' ? 1 : settings.mode === 'average' ? 2 : 3;
+  const prevWeight = Math.min(settings.frames / (settings.frames + 1), 0.85);
+  const currWeight = 1 - prevWeight;
+
+  for (let i = 0; i < passes; i++) {
+    if (settings.frames <= 2) {
+      filters.push(`tblend=all_expr='A/2+B/2'`);
+    } else {
+      filters.push(`tblend=all_expr='A*${currWeight.toFixed(3)}+B*${prevWeight.toFixed(3)}'`);
+    }
+  }
+  return filters;
+}
+
+/**
  * Compute the output duration for a linear speed ramp.
- * For speed s₀→s₁ over input duration D:
- *   out(D) = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)/s₀)  when s₁≠s₀
- *   out(D) = D/s₀                                   when s₁≈s₀
  */
 export function computeRampOutputDuration(s0: number, s1: number, D: number): number {
   const deltaS = s1 - s0;
@@ -69,35 +154,18 @@ export function computeRampOutputDuration(s0: number, s1: number, D: number): nu
 
 /**
  * Build a continuous setpts expression for linear speed ramping.
- *
- * For a linear speed ramp from s₀ to s₁ over D seconds of input:
- *   speed(t) = s₀ + (s₁-s₀)*t/D
- *   output_time(t) = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)*t/(s₀*D))
- *   new_PTS = output_time(PTS*TB) / TB
- *
- * This produces butter-smooth speed transitions without discrete steps.
- * Commas inside the expression are escaped with backslashes for FFmpeg filter syntax.
  */
 function buildContinuousSetpts(s0: number, s1: number, D: number): string {
   const deltaS = s1 - s0;
   if (Math.abs(deltaS) < 0.001) return `PTS/${s0.toFixed(6)}`;
-
-  // inner = 1 + deltaS*(PTS-STARTPTS)*TB / (s0*D)
-  // We clamp inner > 0.0001 to avoid log(0) or log(negative)
   const innerExpr = `1+${deltaS.toFixed(6)}*(PTS-STARTPTS)*TB/(${s0.toFixed(6)}*${D.toFixed(6)})`;
-  // Escape commas for FFmpeg filter syntax (commas separate filters)
   const escapedInner = innerExpr.replace(/,/g, '\\,');
   return `(${D.toFixed(6)}/(${deltaS.toFixed(6)}*TB))*log(max(0.0001\\,${escapedInner}))`;
 }
 
 /**
  * Process a video with smooth continuous speed ramping.
- *
- * Uses a mathematically continuous setpts expression for smooth speed transitions
- * instead of the old segmented approach with discrete speed jumps.
- *
- * The output is forced to 60fps which duplicates frames in slow sections
- * and drops frames in fast sections, ensuring consistent playback.
+ * Now accepts hasAudio flag to handle videos without audio.
  */
 async function processContinuousSpeedRamp(
   inputPath: string,
@@ -105,7 +173,8 @@ async function processContinuousSpeedRamp(
   startSpeed: number,
   endSpeed: number,
   inputDuration: number,
-  outputExt: string
+  outputExt: string,
+  hasAudio: boolean = true
 ): Promise<void> {
   const s0 = Math.max(0.1, Math.min(startSpeed, 50));
   const s1 = Math.max(0.1, Math.min(endSpeed, 50));
@@ -114,33 +183,182 @@ async function processContinuousSpeedRamp(
   const videoOutputDuration = computeRampOutputDuration(s0, s1, inputDuration);
   const audioSpeed = Math.max(0.1, Math.min(inputDuration / videoOutputDuration, 50));
 
-  console.log(`Smooth ramp: ${s0}x → ${s1}x over ${inputDuration}s, output ~${videoOutputDuration.toFixed(3)}s, audioSpeed=${audioSpeed.toFixed(3)}x`);
+  console.log(`Smooth ramp: ${s0}x → ${s1}x over ${inputDuration}s, output ~${videoOutputDuration.toFixed(3)}s, audioSpeed=${audioSpeed.toFixed(3)}x, hasAudio=${hasAudio}`);
 
   let command = ffmpeg(inputPath);
-
-  // Video: continuous speed ramp using mathematical expression
   command = command.videoFilters([`setpts=${setptsExpr}`]);
 
-  // Audio: match the video output duration
-  const atempo = buildAtempoFilter(audioSpeed);
-  if (atempo) command = command.audioFilters([atempo]);
+  if (hasAudio) {
+    const atempo = buildAtempoFilter(audioSpeed);
+    if (atempo) command = command.audioFilters([atempo]);
+  }
 
-  command = command
-    .output(outputPath)
-    .outputOptions([
-      '-movflags', '+faststart',
-      '-pix_fmt', 'yuv420p',
-      '-r', '60',            // Force 60fps output for smooth playback
-      '-crf', '18',          // High quality encoding
-      '-preset', 'fast',     // Reasonable encoding speed
-    ]);
+  const outputOpts = [
+    '-movflags', '+faststart',
+    '-pix_fmt', 'yuv420p',
+    '-r', '60',
+    '-crf', '18',
+    '-preset', 'fast',
+  ];
+
+  if (hasAudio) {
+    outputOpts.push('-c:a', 'aac', '-b:a', '128k');
+  } else {
+    outputOpts.push('-an');
+  }
+
+  command = command.output(outputPath).outputOptions(outputOpts);
 
   await runFFmpeg(command);
 }
 
 /**
+ * Apply motion blur to an existing video file as a post-processing step.
+ */
+async function applyMotionBlur(
+  inputPath: string,
+  outputPath: string,
+  settings: MotionBlurSettings,
+  hasAudio: boolean = true
+): Promise<void> {
+  const blurFilters = buildMotionBlurFilters(settings);
+  if (blurFilters.length === 0) {
+    await copyFile(inputPath, outputPath);
+    return;
+  }
+
+  console.log(`Applying motion blur: ${settings.mode} mode, ${settings.frames} frames, ${blurFilters.length} filter(s), hasAudio=${hasAudio}`);
+
+  // Add format=yuv420p before blur filters for compatibility
+  const allFilters = ['format=yuv420p', ...blurFilters];
+
+  let command = ffmpeg(inputPath);
+  command = command.videoFilters(allFilters);
+
+  const outputOpts = [
+    '-movflags', '+faststart',
+    '-pix_fmt', 'yuv420p',
+    '-c:v', 'libx264',
+    '-crf', '18',
+    '-preset', 'fast',
+  ];
+
+  if (hasAudio) {
+    outputOpts.push('-c:a', 'aac', '-b:a', '128k');
+  } else {
+    outputOpts.push('-an');
+  }
+
+  command = command.output(outputPath).outputOptions(outputOpts);
+
+  await runFFmpeg(command);
+}
+
+/**
+ * Reverse a video using the simple in-memory `reverse` filter.
+ * Only suitable for short clips (< MAX_DIRECT_REVERSE_DURATION seconds).
+ */
+async function reverseVideoDirect(inputPath: string, outputPath: string, hasAudio: boolean = true): Promise<void> {
+  const command = ffmpeg(inputPath)
+    .videoFilters('reverse');
+
+  if (hasAudio) {
+    command.audioFilters('areverse');
+  }
+
+  const outputOpts = ['-movflags', '+faststart', '-pix_fmt', 'yuv420p'];
+  if (hasAudio) {
+    outputOpts.push('-c:a', 'aac', '-b:a', '128k');
+  } else {
+    outputOpts.push('-an');
+  }
+
+  command.output(outputPath).outputOptions(outputOpts);
+  await runFFmpeg(command);
+}
+
+/**
+ * Reverse a video using chunked processing to avoid OOM on long clips.
+ */
+async function reverseVideoChunked(inputPath: string, outputPath: string, duration: number, hasAudio: boolean = true): Promise<void> {
+  const CHUNK_DURATION = 5; // seconds — safe for memory, ~150 frames at 30fps
+  const numChunks = Math.ceil(duration / CHUNK_DURATION);
+  const jobId = uuidv4();
+
+  console.log(`Chunked reverse: ${duration.toFixed(2)}s → ${numChunks} chunks of ${CHUNK_DURATION}s, hasAudio=${hasAudio}`);
+
+  const chunkFiles: string[] = [];
+  const reversedChunkFiles: string[] = [];
+
+  try {
+    // Step 1: Extract chunks
+    for (let i = 0; i < numChunks; i++) {
+      const startTime = i * CHUNK_DURATION;
+      const chunkDur = Math.min(CHUNK_DURATION, duration - startTime);
+      const chunkFile = path.join(TMP_DIR, `${jobId}_chunk_${i}.mp4`);
+      chunkFiles.push(chunkFile);
+
+      await runFFmpeg(
+        ffmpeg(inputPath)
+          .seekInput(startTime)
+          .duration(chunkDur)
+          .output(chunkFile)
+          .outputOptions([
+            '-movflags', '+faststart',
+            '-pix_fmt', 'yuv420p',
+            '-c:v', 'libx264',
+            '-crf', '18',
+            '-preset', 'fast',
+            '-r', '30', // consistent frame rate for clean reverse
+          ])
+      );
+    }
+
+    // Step 2: Reverse each chunk individually (safe memory usage)
+    for (let i = 0; i < numChunks; i++) {
+      const reversedChunkFile = path.join(TMP_DIR, `${jobId}_rchunk_${i}.mp4`);
+      // Push in reverse order so concatenation is correct
+      reversedChunkFiles.unshift(reversedChunkFile);
+
+      const chunkCmd = ffmpeg(chunkFiles[i]).videoFilters('reverse');
+      if (hasAudio) {
+        chunkCmd.audioFilters('areverse');
+      }
+
+      const outputOpts = ['-movflags', '+faststart', '-pix_fmt', 'yuv420p'];
+      if (hasAudio) {
+        outputOpts.push('-c:a', 'aac', '-b:a', '128k');
+      } else {
+        outputOpts.push('-an');
+      }
+
+      chunkCmd.output(reversedChunkFile).outputOptions(outputOpts);
+      await runFFmpeg(chunkCmd);
+    }
+
+    // Step 3: Concatenate all reversed chunks (already in reverse order)
+    const concatListPath = path.join(TMP_DIR, `${jobId}_reverse_concat.txt`);
+    const concatContent = reversedChunkFiles.map((f) => `file '${f}'`).join('\n');
+    await writeFile(concatListPath, concatContent);
+
+    await runFFmpeg(
+      ffmpeg(concatListPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .output(outputPath)
+        .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-c', 'copy'])
+    );
+
+    await unlink(concatListPath);
+  } finally {
+    // Cleanup all temp files
+    for (const f of [...chunkFiles, ...reversedChunkFiles]) {
+      try { await unlink(f); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
  * Fallback: segmented speed ramping with much finer segments (0.02s)
- * Used only if continuous setpts fails.
  */
 async function processFineSegmentedSpeed(
   inputPath: string,
@@ -148,17 +366,17 @@ async function processFineSegmentedSpeed(
   startSpeed: number,
   endSpeed: number,
   inputDuration: number,
-  outputExt: string
+  outputExt: string,
+  hasAudio: boolean = true
 ): Promise<void> {
   const s0 = Math.max(0.1, Math.min(startSpeed, 50));
   const s1 = Math.max(0.1, Math.min(endSpeed, 50));
 
-  // Use very fine segments for smooth transitions
-  const SEGMENT_DURATION = 0.02; // 20ms per segment = 50 segments per second
+  const SEGMENT_DURATION = 0.02;
   const numSegments = Math.max(20, Math.ceil(inputDuration / SEGMENT_DURATION));
   const actualSegDuration = inputDuration / numSegments;
 
-  console.log(`Fine segmented ramp: ${s0}x → ${s1}x, ${numSegments} segments over ${inputDuration}s`);
+  console.log(`Fine segmented ramp: ${s0}x → ${s1}x, ${numSegments} segments over ${inputDuration}s, hasAudio=${hasAudio}`);
 
   const segments: { startTime: number; endTime: number; speed: number }[] = [];
   for (let i = 0; i < numSegments; i++) {
@@ -188,16 +406,23 @@ async function processFineSegmentedSpeed(
 
       if (Math.abs(seg.speed - 1) > 0.01) {
         videoFilters.push(`setpts=PTS/${seg.speed.toFixed(6)}`);
-        const atempo = buildAtempoFilter(seg.speed);
-        if (atempo) audioFilters.push(atempo);
+        if (hasAudio) {
+          const atempo = buildAtempoFilter(seg.speed);
+          if (atempo) audioFilters.push(atempo);
+        }
       }
 
       if (videoFilters.length > 0) command = command.videoFilters(videoFilters);
       if (audioFilters.length > 0) command = command.audioFilters(audioFilters);
 
+      const outputOpts = ['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-r', '60', '-crf', '18', '-preset', 'fast'];
+      if (!hasAudio) {
+        outputOpts.push('-an');
+      }
+
       command = command
         .output(segFile)
-        .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-r', '60', '-crf', '18', '-preset', 'fast']);
+        .outputOptions(outputOpts);
 
       await runFFmpeg(command);
     }
@@ -225,7 +450,7 @@ export async function POST(request: Request) {
 
   try {
     const body: ProcessRequest = await request.json();
-    const { clipId, trimDuration = 1.0, speedRamps, outputFormat = 'mp4' } = body;
+    const { clipId, trimDuration = 1.0, speedRamps, outputFormat = 'mp4', motionBlur } = body;
 
     if (!clipId) {
       return NextResponse.json({ error: 'clipId is required' }, { status: 400 });
@@ -240,8 +465,13 @@ export async function POST(request: Request) {
     }
 
     const effectiveTrimDuration = Math.max(0.1, trimDuration);
+    const enableMotionBlur = motionBlur?.enabled === true;
 
-    console.log(`Process: clipId=${clipId}, trimDuration=${effectiveTrimDuration}s, inputFile=${inputPath}`);
+    console.log(`Process: clipId=${clipId}, trimDuration=${effectiveTrimDuration}s, motionBlur=${enableMotionBlur ? `${motionBlur.mode}(${motionBlur.frames}f)` : 'off'}`);
+
+    // Probe the video to detect audio streams
+    const probe = await probeVideo(inputPath);
+    console.log(`Video probe: hasAudio=${probe.hasAudio}, duration=${probe.duration.toFixed(2)}s, ${probe.width}x${probe.height}, ${probe.fps}fps, pix_fmt=${probe.pixFmt}`);
 
     await ensureDir(PROCESSED_DIR);
     await ensureDir(TMP_DIR);
@@ -260,14 +490,17 @@ export async function POST(request: Request) {
     // ============================================
     // Step 1: Extract the first N seconds of the input video
     // Step 2: Apply continuous 4x→0.6x speed ramp (smooth mathematical curve)
-    // Step 3: Reverse the trimmed segment, then apply continuous 0.6x→4x speed ramp
-    // Step 4: Concatenate forward + reversed segments into final output
+    // Step 3: Reverse the trimmed segment (chunked for long clips, direct for short)
+    // Step 4: Apply continuous 0.6x→4x speed ramp to reversed segment
+    // Step 5: Concatenate forward + reversed segments into final output
+    // Step 6 (optional): Apply motion blur as post-processing
     // ============================================
 
     const trimmedFile = path.join(TMP_DIR, `${jobId}_trimmed.mp4`);
     const forwardFile = path.join(TMP_DIR, `${jobId}_forward.mp4`);
     const reversedRawFile = path.join(TMP_DIR, `${jobId}_reversed_raw.mp4`);
     const reversedFile = path.join(TMP_DIR, `${jobId}_reversed.mp4`);
+    const concatFile = path.join(TMP_DIR, `${jobId}_concat.mp4`);
 
     try {
       // Step 1: Trim the input video to the specified duration
@@ -285,38 +518,41 @@ export async function POST(request: Request) {
       try {
         await processContinuousSpeedRamp(
           trimmedFile, forwardFile,
-          4.0, 0.6, effectiveTrimDuration, outputExt
+          4.0, 0.6, effectiveTrimDuration, outputExt,
+          probe.hasAudio
         );
       } catch (continuousErr) {
         console.warn('Continuous setpts failed, falling back to fine-segmented:', continuousErr);
         await processFineSegmentedSpeed(
           trimmedFile, forwardFile,
-          4.0, 0.6, effectiveTrimDuration, outputExt
+          4.0, 0.6, effectiveTrimDuration, outputExt,
+          probe.hasAudio
         );
       }
 
       // Step 3: Reverse the trimmed segment
-      console.log('Step 3a: Reversing the trimmed segment');
-      await runFFmpeg(
-        ffmpeg(trimmedFile)
-          .videoFilters('reverse')
-          .audioFilters('areverse')
-          .output(reversedRawFile)
-          .outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p'])
-      );
+      if (effectiveTrimDuration > MAX_DIRECT_REVERSE_DURATION) {
+        console.log(`Step 3a: Chunked reverse (${effectiveTrimDuration.toFixed(1)}s > ${MAX_DIRECT_REVERSE_DURATION}s threshold)`);
+        await reverseVideoChunked(trimmedFile, reversedRawFile, effectiveTrimDuration, probe.hasAudio);
+      } else {
+        console.log('Step 3a: Direct reverse (short clip)');
+        await reverseVideoDirect(trimmedFile, reversedRawFile, probe.hasAudio);
+      }
 
       // Step 4: Reversed segment with continuous 0.6x→4x speed ramp
       console.log('Step 3b: Processing smooth reversed segment (0.6x→4x)');
       try {
         await processContinuousSpeedRamp(
           reversedRawFile, reversedFile,
-          0.6, 4.0, effectiveTrimDuration, outputExt
+          0.6, 4.0, effectiveTrimDuration, outputExt,
+          probe.hasAudio
         );
       } catch (continuousErr) {
         console.warn('Continuous setpts failed for reversed, falling back to fine-segmented:', continuousErr);
         await processFineSegmentedSpeed(
           reversedRawFile, reversedFile,
-          0.6, 4.0, effectiveTrimDuration, outputExt
+          0.6, 4.0, effectiveTrimDuration, outputExt,
+          probe.hasAudio
         );
       }
 
@@ -331,7 +567,7 @@ export async function POST(request: Request) {
 
       let concatCmd = ffmpeg(concatListPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
-        .output(outputPath);
+        .output(concatFile);
 
       if (outputExt === '.mp4' || outputExt === '.mov') {
         concatCmd = concatCmd.outputOptions(['-movflags', '+faststart', '-pix_fmt', 'yuv420p', '-c', 'copy']);
@@ -340,10 +576,17 @@ export async function POST(request: Request) {
       }
 
       await runFFmpeg(concatCmd);
-
       await unlink(concatListPath);
+
+      // Step 6 (optional): Apply motion blur
+      if (enableMotionBlur && motionBlur) {
+        console.log(`Step 5: Applying motion blur (${motionBlur.mode}, ${motionBlur.frames} frames)`);
+        await applyMotionBlur(concatFile, outputPath, motionBlur, probe.hasAudio);
+      } else {
+        await copyFile(concatFile, outputPath);
+      }
     } finally {
-      for (const f of [trimmedFile, forwardFile, reversedRawFile, reversedFile]) {
+      for (const f of [trimmedFile, forwardFile, reversedRawFile, reversedFile, concatFile]) {
         try { await unlink(f); } catch { /* ignore */ }
       }
     }
@@ -351,7 +594,7 @@ export async function POST(request: Request) {
     const outputStat = await stat(outputPath);
     const processingTime = Date.now() - startTime;
 
-    console.log(`Processing complete in ${processingTime}ms`);
+    console.log(`Processing complete in ${processingTime}ms (motion blur: ${enableMotionBlur ? 'on' : 'off'})`);
 
     return NextResponse.json({
       id: outputId,
@@ -359,6 +602,7 @@ export async function POST(request: Request) {
       outputSize: outputStat.size,
       processingTime,
       outputFormat: outputExt.replace('.', ''),
+      motionBlurApplied: enableMotionBlur,
     }, { status: 200 });
   } catch (error) {
     console.error('Process error:', error);

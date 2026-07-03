@@ -1,11 +1,20 @@
 import { create } from 'zustand';
-import type { AppState, VideoClip, SpeedRampPoint } from './types';
+import type { AppState, VideoClip, SpeedRampPoint, InterpolationClip, InterpolationState, InterpolationMode, MotionBlurClip, MotionBlurSettings, MotionBlurProcessingState } from './types';
 
 // Speed ramp configuration: V-shaped 4x → 0.6x → 4x
 export const RAMP_START = 4.0;
 export const RAMP_MID = 0.6;
 export const RAMP_END = 4.0;
 export const DEFAULT_TRIM_DURATION = 1.00; // seconds of original video to use
+export const DEFAULT_INTERPOLATION_FPS = 120;
+
+export const DEFAULT_MOTION_BLUR: MotionBlurSettings = {
+  enabled: false,
+  frames: 2,
+  mode: 'average',
+};
+
+export const DEFAULT_INTERPOLATION_MODE: InterpolationMode = 'mci';
 
 /**
  * Create a V-shaped speed ramp: 4x → 0.6x → 4x
@@ -70,6 +79,13 @@ export const useAppStore = create<AppState>((set) => ({
     ),
   })),
 
+  setClipMotionBlur: (id, settings) => set((state) => ({
+    clips: state.clips.map(c => c.id === id
+      ? { ...c, motionBlur: { ...c.motionBlur, ...settings } }
+      : c
+    ),
+  })),
+
   setProcessingState: (newState) => set((state) => ({
     processingState: { ...state.processingState, ...newState },
   })),
@@ -83,4 +99,108 @@ export const useAppStore = create<AppState>((set) => ({
   })),
 
   clearAllClips: () => set({ clips: [], selectedClipId: null }),
+
+  // Interpolation clips
+  interpolationClips: [],
+  selectedInterpolationClipId: null,
+
+  selectInterpolationClip: (id) => set({ selectedInterpolationClipId: id }),
+
+  addInterpolationClip: (clip) => set((state) => ({
+    interpolationClips: [...state.interpolationClips, clip],
+    selectedInterpolationClipId: clip.id,
+  })),
+
+  removeInterpolationClip: (id) => set((state) => ({
+    interpolationClips: state.interpolationClips.filter(c => c.id !== id),
+    selectedInterpolationClipId: state.selectedInterpolationClipId === id
+      ? (state.interpolationClips.find(c => c.id !== id)?.id || null)
+      : state.selectedInterpolationClipId,
+  })),
+
+  setInterpolationClipStatus: (id, status, error) => set((state) => ({
+    interpolationClips: state.interpolationClips.map(c => c.id === id ? { ...c, status, error } : c),
+  })),
+
+  setInterpolationClipProcessedUrl: (id, url) => set((state) => ({
+    interpolationClips: state.interpolationClips.map(c => c.id === id ? { ...c, processedUrl: url } : c),
+  })),
+
+  setInterpolationClipTargetFps: (id, fps) => set((state) => ({
+    interpolationClips: state.interpolationClips.map(c => c.id === id ? { ...c, targetFps: fps } : c),
+  })),
+
+  setInterpolationClipMode: (id, mode) => set((state) => ({
+    interpolationClips: state.interpolationClips.map(c => c.id === id ? { ...c, interpolationMode: mode } : c),
+  })),
+
+  setInterpolationClipMotionBlur: (id, settings) => set((state) => ({
+    interpolationClips: state.interpolationClips.map(c => c.id === id
+      ? { ...c, motionBlur: { ...c.motionBlur, ...settings } }
+      : c
+    ),
+  })),
+
+  clearAllInterpolationClips: () => set({ interpolationClips: [], selectedInterpolationClipId: null }),
+
+  // Interpolation processing state
+  interpolationState: {
+    isProcessing: false,
+    progress: 0,
+    currentClipId: null,
+    message: '',
+  },
+
+  setInterpolationState: (newState) => set((state) => ({
+    interpolationState: { ...state.interpolationState, ...newState },
+  })),
+
+  // Motion blur clips (standalone)
+  motionBlurClips: [],
+  selectedMotionBlurClipId: null,
+
+  selectMotionBlurClip: (id) => set({ selectedMotionBlurClipId: id }),
+
+  addMotionBlurClip: (clip) => set((state) => ({
+    motionBlurClips: [...state.motionBlurClips, clip],
+    selectedMotionBlurClipId: clip.id,
+  })),
+
+  removeMotionBlurClip: (id) => set((state) => ({
+    motionBlurClips: state.motionBlurClips.filter(c => c.id !== id),
+    selectedMotionBlurClipId: state.selectedMotionBlurClipId === id
+      ? (state.motionBlurClips.find(c => c.id !== id)?.id || null)
+      : state.selectedMotionBlurClipId,
+  })),
+
+  setMotionBlurClipStatus: (id, status, error) => set((state) => ({
+    motionBlurClips: state.motionBlurClips.map(c => c.id === id ? { ...c, status, error } : c),
+  })),
+
+  setMotionBlurClipProcessedUrl: (id, url) => set((state) => ({
+    motionBlurClips: state.motionBlurClips.map(c => c.id === id ? { ...c, processedUrl: url } : c),
+  })),
+
+  setMotionBlurClipSettings: (id, settings) => set((state) => ({
+    motionBlurClips: state.motionBlurClips.map(c => c.id === id ? { ...c, ...settings } : c),
+  })),
+
+  clearAllMotionBlurClips: () => set({ motionBlurClips: [], selectedMotionBlurClipId: null }),
+
+  // Motion blur processing state
+  motionBlurState: {
+    isProcessing: false,
+    progress: 0,
+    currentClipId: null,
+    message: '',
+  },
+
+  setMotionBlurState: (newState) => set((state) => ({
+    motionBlurState: { ...state.motionBlurState, ...newState },
+  })),
+
+  // Tab navigation
+  activeTab: 'speedramp',
+
+  setActiveTab: (tab) => set({ activeTab: tab }),
 }));

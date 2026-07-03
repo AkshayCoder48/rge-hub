@@ -9,9 +9,13 @@ import { ExportPanel } from '@/components/export-panel';
 import { VideoPreview } from '@/components/video-preview';
 import { TrimDurationControl } from '@/components/trim-duration-control';
 import { ProcessAll } from '@/components/process-all';
+import { BottomNav } from '@/components/bottom-nav';
+import { InterpolationPage } from '@/components/interpolation-page';
+import { MotionBlurPage } from '@/components/motion-blur-page';
+import { MotionBlurControl } from '@/components/motion-blur-control';
 import { Zap, Film, Sparkles, MousePointerClick, TrendingDown, TrendingUp, Combine } from 'lucide-react';
 
-export default function Home() {
+function SpeedRampPage() {
   const clips = useAppStore((s) => s.clips);
   const selectedClipId = useAppStore((s) => s.selectedClipId);
   const selectedClip = useAppStore((s) => s.clips.find((c) => c.id === s.selectedClipId));
@@ -21,7 +25,7 @@ export default function Home() {
   const speedEnd = selectedClip?.speedRamps[selectedClip?.speedRamps.length - 1]?.speed ?? RAMP_END;
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0a0a0f] relative overflow-hidden">
+    <div className="min-h-screen flex flex-col bg-[#0a0a0f] relative overflow-hidden pb-20">
       {/* Background effects */}
       <div className="absolute inset-0 z-0">
         <div className="absolute inset-0 opacity-[0.03]" style={{
@@ -234,6 +238,7 @@ export default function Home() {
 
                     <VideoPreview clipId={selectedClipId} />
                     <TrimDurationControl clipId={selectedClipId} />
+                    <MotionBlurControl clipId={selectedClipId} type="speedramp" />
                     <ProcessingStatus />
                     <ExportPanel clipId={selectedClipId} />
                   </>
@@ -254,16 +259,6 @@ export default function Home() {
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="relative z-10 mt-auto border-t border-white/[0.04]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] text-white/15">Reverse Speed Ramp · {RAMP_START}x→{RAMP_MID}x→{RAMP_END}x V-shape</p>
-            <span className="text-[10px] text-white/10">Built with Next.js & FFmpeg</span>
-          </div>
-        </div>
-      </footer>
-
       <style jsx global>{`
         @keyframes float-slow { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(20px, -20px); } }
         @keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -278,6 +273,19 @@ export default function Home() {
         input[type='range']::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.06); }
         input[type='range']::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #f97316; border: none; }
       `}</style>
+    </div>
+  );
+}
+
+export default function Home() {
+  const activeTab = useAppStore((s) => s.activeTab);
+
+  return (
+    <div className="min-h-screen bg-[#0a0a0f]">
+      {activeTab === 'speedramp' && <SpeedRampPage />}
+      {activeTab === 'interpolation' && <InterpolationPage />}
+      {activeTab === 'motionblur' && <MotionBlurPage />}
+      <BottomNav />
     </div>
   );
 }
