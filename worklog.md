@@ -568,3 +568,39 @@ Stage Summary:
 - Added output file validation and better error messages
 - All three API routes now probe video before processing for robustness
 - Interpolation verified as real (minterpolate creates actual intermediate frames, not duplicates)
+
+---
+Task ID: 6
+Agent: main
+Task: Push project to Vercel (rge-auto-speedramper.vercel.app) and fix deployment issues
+
+Work Log:
+- Created Vercel project "rge-auto-speedramper" using CLI
+- Fixed build error: installed missing `adm-zip` package
+- Removed `output: "standalone"` from next.config.ts (incompatible with Vercel builder)
+- Fixed build script: removed standalone-specific `cp` commands
+- Set framework preset to "nextjs" via Vercel API (was incorrectly "Other" causing 404)
+- Fixed 404 error on main URL by correcting framework detection
+- Fixed upload error "ENOENT: no such file or directory, mkdir /home/z" by:
+  - Creating centralized path config module (src/lib/paths.ts)
+  - Using /tmp/speedramper as base directory on Vercel (only writable dir)
+  - Updated ALL 13 API route files to import paths from centralized module
+  - Replaced hardcoded /home/z/my-project/* paths and process.cwd() paths
+- Removed @ffmpeg-installer/ffmpeg and @ffprobe-installer/ffprobe (incompatible with Turbopack)
+- Created scripts/download-ffmpeg.js to download static FFmpeg binary during Vercel build
+- Added vercel.json with function config (maxDuration: 300s, memory: 1024MB)
+- Fixed memory limit error (3008MB exceeds hobby plan, reduced to 1024MB)
+- Added bin/** to includeFiles in vercel.json for ffmpeg binary access
+- Cleaned up .gitignore: added uploads/, processed/, tmp/, agent-ctx/, tool-results/
+- Removed large video files from git tracking
+- Deployed successfully - site returns HTTP 200
+
+Stage Summary:
+- Site live at https://rge-auto-speedramper.vercel.app (HTTP 200)
+- Upload API endpoint accessible at /api/analyze
+- All API routes use centralized path configuration
+- FFmpeg will be downloaded as static binary during Vercel build
+- Local dev still works with /usr/bin/ffmpeg paths
+- Unresolved: FFmpeg binary download on Vercel may not work if download-ffmpeg.js fails (the script handles this gracefully - app UI still works, just video processing won't)
+- Unresolved: Vercel /tmp is ephemeral - uploaded files are lost between function calls (stateless)
+- Unresolved: Vercel function timeout limits may affect long video processing
