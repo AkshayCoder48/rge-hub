@@ -1,5 +1,5 @@
 import path from 'path';
-import { mkdirSync } from 'fs';
+import { mkdirSync, existsSync } from 'fs';
 
 /**
  * Centralized path configuration for file storage.
@@ -40,39 +40,28 @@ export function ensureDirs(): void {
 
 /**
  * Get FFmpeg binary path.
- * On Vercel, use the @ffmpeg-installer/ffmpeg package.
- * Locally, use the system-installed ffmpeg.
+ * On Vercel, uses a static binary downloaded during build (bin/ffmpeg).
+ * Locally, uses the system-installed ffmpeg.
  */
-let _ffmpegPath: string | null = null;
 export function getFfmpegPath(): string {
-  if (_ffmpegPath !== null) return _ffmpegPath;
   if (IS_VERCEL) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const mod = require('@ffmpeg-installer/ffmpeg');
-      _ffmpegPath = mod.path || mod.FFmpegPath || 'ffmpeg';
-    } catch {
-      _ffmpegPath = 'ffmpeg';
-    }
-  } else {
-    _ffmpegPath = '/usr/bin/ffmpeg';
+    const staticPath = path.join(process.cwd(), 'bin', 'ffmpeg');
+    if (existsSync(staticPath)) return staticPath;
+    return process.env.FFMPEG_PATH || 'ffmpeg';
   }
-  return _ffmpegPath;
+  return '/usr/bin/ffmpeg';
 }
 
-let _ffprobePath: string | null = null;
+/**
+ * Get FFprobe binary path.
+ * On Vercel, uses a static binary downloaded during build (bin/ffprobe).
+ * Locally, uses the system-installed ffprobe.
+ */
 export function getFfprobePath(): string {
-  if (_ffprobePath !== null) return _ffprobePath;
   if (IS_VERCEL) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const mod = require('@ffprobe-installer/ffprobe');
-      _ffprobePath = mod.path || mod.FFprobePath || 'ffprobe';
-    } catch {
-      _ffprobePath = 'ffprobe';
-    }
-  } else {
-    _ffprobePath = '/usr/bin/ffprobe';
+    const staticPath = path.join(process.cwd(), 'bin', 'ffprobe');
+    if (existsSync(staticPath)) return staticPath;
+    return process.env.FFPROBE_PATH || 'ffprobe';
   }
-  return _ffprobePath;
+  return '/usr/bin/ffprobe';
 }
