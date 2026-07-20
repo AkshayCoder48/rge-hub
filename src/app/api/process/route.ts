@@ -1,17 +1,13 @@
 import { NextResponse } from 'next/server';
 import { ffmpeg } from '@/lib/ffmpeg-config';
-import { mkdir, readdir, stat, unlink, writeFile, access, copyFile } from 'fs/promises';
+import { readdir, stat, unlink, writeFile, access, copyFile } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, ensureDirs, getFfprobePath } from '@/lib/paths';
 
 const execFileAsync = promisify(execFile);
-
-const UPLOADS_DIR = '/home/z/my-project/uploads';
-const PROCESSED_DIR = '/home/z/my-project/processed';
-const TMP_DIR = '/home/z/my-project/tmp';
-const FFPROBE_PATH = '/usr/bin/ffprobe';
 
 // Maximum trim duration in seconds — longer clips require chunked processing
 const MAX_DIRECT_REVERSE_DURATION = 10; // seconds; above this, use chunked reverse
@@ -35,10 +31,6 @@ interface ProcessRequest {
   motionBlur?: MotionBlurSettings;
 }
 
-async function ensureDir(dir: string) {
-  try { await access(dir); } catch { await mkdir(dir, { recursive: true }); }
-}
-
 async function findFileById(dir: string, id: string): Promise<string | null> {
   try { await access(dir); } catch { return null; }
   const files = await readdir(dir);
@@ -51,7 +43,7 @@ async function findFileById(dir: string, id: string): Promise<string | null> {
  */
 async function probeVideo(filePath: string): Promise<{ hasAudio: boolean; duration: number; width: number; height: number; fps: number; pixFmt: string }> {
   try {
-    const { stdout } = await execFileAsync(FFPROBE_PATH, [
+    const { stdout } = await execFileAsync(getFfprobePath(), [
       '-v', 'quiet',
       '-print_format', 'json',
       '-show_streams',
@@ -449,6 +441,7 @@ export async function POST(request: Request) {
   const startTime = Date.now();
 
   try {
+    ensureDirs();
     const body: ProcessRequest = await request.json();
     const { clipId, trimDuration = 1.0, speedRamps, outputFormat = 'mp4', motionBlur } = body;
 
@@ -472,9 +465,6 @@ export async function POST(request: Request) {
     // Probe the video to detect audio streams
     const probe = await probeVideo(inputPath);
     console.log(`Video probe: hasAudio=${probe.hasAudio}, duration=${probe.duration.toFixed(2)}s, ${probe.width}x${probe.height}, ${probe.fps}fps, pix_fmt=${probe.pixFmt}`);
-
-    await ensureDir(PROCESSED_DIR);
-    await ensureDir(TMP_DIR);
 
     const outputId = uuidv4();
     const outputExt = outputFormat === 'original'

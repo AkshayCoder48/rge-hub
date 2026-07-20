@@ -1,27 +1,19 @@
 import { NextResponse } from 'next/server';
 import { ffmpeg } from '@/lib/ffmpeg-config';
-import { mkdir, readdir, stat, access, unlink } from 'fs/promises';
+import { readdir, stat, access, unlink } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, ensureDirs, getFfprobePath } from '@/lib/paths';
 
 const execFileAsync = promisify(execFile);
-
-const UPLOADS_DIR = '/home/z/my-project/uploads';
-const PROCESSED_DIR = '/home/z/my-project/processed';
-const TMP_DIR = '/home/z/my-project/tmp';
-const FFPROBE_PATH = '/usr/bin/ffprobe';
 
 interface MotionBlurRequest {
   clipId: string;
   filterType: 'tblend' | 'tmix'; // Which FFmpeg filter to use
   frames: number; // 2-16, number of frames to blend
   intensity: 'light' | 'average' | 'heavy'; // Filter passes
-}
-
-async function ensureDir(dir: string) {
-  try { await access(dir); } catch { await mkdir(dir, { recursive: true }); }
 }
 
 async function findFileById(dir: string, id: string): Promise<string | null> {
@@ -37,7 +29,7 @@ async function findFileById(dir: string, id: string): Promise<string | null> {
  */
 async function probeVideo(filePath: string): Promise<{ hasAudio: boolean; duration: number; width: number; height: number; fps: number; pixFmt: string }> {
   try {
-    const { stdout } = await execFileAsync(FFPROBE_PATH, [
+    const { stdout } = await execFileAsync(getFfprobePath(), [
       '-v', 'quiet',
       '-print_format', 'json',
       '-show_streams',
@@ -190,6 +182,7 @@ export async function POST(request: Request) {
   const startTime = Date.now();
 
   try {
+    ensureDirs();
     const body: MotionBlurRequest = await request.json();
     const { clipId, filterType = 'tblend', frames = 2, intensity = 'average' } = body;
 
@@ -232,9 +225,6 @@ export async function POST(request: Request) {
     // Probe the video to detect audio streams and properties
     const probe = await probeVideo(inputPath);
     console.log(`Video probe: hasAudio=${probe.hasAudio}, duration=${probe.duration.toFixed(2)}s, ${probe.width}x${probe.height}, ${probe.fps}fps, pix_fmt=${probe.pixFmt}`);
-
-    await ensureDir(PROCESSED_DIR);
-    await ensureDir(TMP_DIR);
 
     const outputId = uuidv4();
     const outputFileName = `${outputId}.mp4`;

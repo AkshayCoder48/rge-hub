@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir, unlink } from 'fs/promises';
+import { writeFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { getVideoInfo } from '@/lib/ffmpeg';
 import { extractVideosFromZip, isVideoFile } from '@/lib/zip-handler';
-
-const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+import { UPLOADS_DIR, ensureDirs } from '@/lib/paths';
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,10 +16,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Ensure uploads directory exists
-    if (!existsSync(UPLOADS_DIR)) {
-      await mkdir(UPLOADS_DIR, { recursive: true });
-    }
+    // Ensure directories exist
+    ensureDirs();
 
     // Save ZIP file temporarily
     const zipId = uuidv4();

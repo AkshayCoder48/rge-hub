@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { existsSync } from 'fs';
 import path from 'path';
-
-const PROCESSED_DIR = path.join(process.cwd(), 'processed');
+import { PROCESSED_DIR } from '@/lib/paths';
 
 export async function GET(
   request: NextRequest,

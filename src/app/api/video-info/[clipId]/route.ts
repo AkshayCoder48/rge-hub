@@ -2,9 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { existsSync } from 'fs';
 import path from 'path';
 import { getVideoInfo } from '@/lib/ffmpeg';
-
-const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
-const PROCESSED_DIR = path.join(process.cwd(), 'processed');
+import { UPLOADS_DIR, PROCESSED_DIR } from '@/lib/paths';
 
 export async function GET(
   request: NextRequest,

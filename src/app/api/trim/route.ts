@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { existsSync } from 'fs';
 import path from 'path';
 import { trimClip } from '@/lib/ffmpeg';
-
-const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+import { UPLOADS_DIR, ensureDirs } from '@/lib/paths';
 
 export async function POST(request: NextRequest) {
   try {
+    ensureDirs();
     const body = await request.json();
     const { clipId, filePath, trimStart, trimEnd } = body;
 

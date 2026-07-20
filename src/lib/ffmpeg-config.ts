@@ -1,7 +1,8 @@
 import ffmpeg from 'fluent-ffmpeg';
+import { getFfmpegPath, getFfprobePath } from './paths';
 
-// fluent-ffmpeg will use the system ffmpeg/ffprobe from PATH
-ffmpeg.setFfprobePath('/usr/bin/ffprobe');
-ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+// Set ffmpeg/ffprobe paths based on environment (local vs Vercel)
+ffmpeg.setFfmpegPath(getFfmpegPath());
+ffmpeg.setFfprobePath(getFfprobePath());
 
 export { ffmpeg };

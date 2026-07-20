@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { createZipFromFiles } from '@/lib/zip-handler';
-
-const PROCESSED_DIR = path.join(process.cwd(), 'processed');
+import { PROCESSED_DIR, ensureDirs } from '@/lib/paths';
 
 interface ClipExportInfo {
   clipId: string;
@@ -23,9 +22,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing or empty clipIds array' }, { status: 400 });
     }
 
-    if (!existsSync(PROCESSED_DIR)) {
-      mkdirSync(PROCESSED_DIR, { recursive: true });
-    }
+    ensureDirs();
 
     const fileEntries: { filePath: string; nameInZip: string }[] = [];
     const missingClips: string[] = [];

@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import { readdir, stat, readFile, access } from 'fs/promises';
 import path from 'path';
-
-const UPLOADS_DIR = '/home/z/my-project/uploads';
-const PROCESSED_DIR = '/home/z/my-project/processed';
+import { UPLOADS_DIR, PROCESSED_DIR } from '@/lib/paths';
 
 const MIME_TYPES: Record<string, string> = {
   '.mp4': 'video/mp4',

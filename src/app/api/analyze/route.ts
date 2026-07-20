@@ -1,22 +1,13 @@
 import { NextResponse } from 'next/server';
 import { ffmpeg } from '@/lib/ffmpeg-config';
-import { writeFile, mkdir } from 'fs/promises';
-import { access } from 'fs/promises';
+import { writeFile } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
-
-const UPLOADS_DIR = '/home/z/my-project/uploads';
-
-async function ensureDir(dir: string) {
-  try {
-    await access(dir);
-  } catch {
-    await mkdir(dir, { recursive: true });
-  }
-}
+import { UPLOADS_DIR, ensureDirs } from '@/lib/paths';
 
 export async function POST(request: Request) {
   try {
+    ensureDirs();
     const formData = await request.formData();
     const file = formData.get('file');
 
@@ -37,8 +28,6 @@ export async function POST(request: Request) {
     const id = uuidv4();
     const ext = path.extname(file.name) || '.mp4';
     const fileName = `${id}${ext}`;
-
-    await ensureDir(UPLOADS_DIR);
 
     const filePath = path.join(UPLOADS_DIR, fileName);
     const buffer = Buffer.from(await file.arrayBuffer());

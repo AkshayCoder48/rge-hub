@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import path from 'path';
 import { generateThumbnail } from '@/lib/ffmpeg';
-
-const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
-const PROCESSED_DIR = path.join(process.cwd(), 'processed');
+import { UPLOADS_DIR, PROCESSED_DIR, ensureDirs } from '@/lib/paths';
 
 export async function GET(
   request: NextRequest,
@@ -13,9 +11,7 @@ export async function GET(
   try {
     const { clipId } = await params;
 
-    if (!existsSync(PROCESSED_DIR)) {
-      mkdirSync(PROCESSED_DIR, { recursive: true });
-    }
+    ensureDirs();
 
     // Check if thumbnail already exists
     const thumbPath = path.join(PROCESSED_DIR, `${clipId}_thumb.jpg`);

@@ -1,15 +1,12 @@
 import { NextResponse } from 'next/server';
-import { readdir, access, readFile, stat, mkdir } from 'fs/promises';
+import { readdir, access, readFile, stat } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { PROCESSED_DIR, UPLOADS_DIR, TMP_DIR, ensureDirs } from '@/lib/paths';
 
 const execFileAsync = promisify(execFile);
-
-const PROCESSED_DIR = '/home/z/my-project/processed';
-const UPLOADS_DIR = '/home/z/my-project/uploads';
-const TMP_DIR = '/home/z/my-project/tmp';
 
 async function findFileById(dir: string, id: string): Promise<string | null> {
   try { await access(dir); } catch { return null; }
@@ -59,8 +56,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // Ensure tmp dir exists
-    try { await access(TMP_DIR); } catch { await mkdir(TMP_DIR, { recursive: true }); }
+    // Ensure dirs exist
+    ensureDirs();
 
     // Create ZIP using the system `zip` command (reliable, no ESM issues)
     const zipId = uuidv4();
