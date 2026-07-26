@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { UPLOADS_DIR, PROCESSED_DIR } from '@/lib/paths';
 
 function deleteFilesInDirectory(dirPath: string): { deletedCount: number; freedSpace: number } {
   let deletedCount = 0;
@@ -33,21 +34,16 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { type } = body as { type: 'processed' | 'all' };
 
-    const projectRoot = process.cwd();
     let totalDeleted = 0;
     let totalFreed = 0;
 
     if (type === 'processed') {
-      const processedDir = path.join(projectRoot, 'processed');
-      const result = deleteFilesInDirectory(processedDir);
+      const result = deleteFilesInDirectory(PROCESSED_DIR);
       totalDeleted += result.deletedCount;
       totalFreed += result.freedSpace;
     } else if (type === 'all') {
-      const uploadsDir = path.join(projectRoot, 'uploads');
-      const processedDir = path.join(projectRoot, 'processed');
-
-      const uploadsResult = deleteFilesInDirectory(uploadsDir);
-      const processedResult = deleteFilesInDirectory(processedDir);
+      const uploadsResult = deleteFilesInDirectory(UPLOADS_DIR);
+      const processedResult = deleteFilesInDirectory(PROCESSED_DIR);
 
       totalDeleted += uploadsResult.deletedCount + processedResult.deletedCount;
       totalFreed += uploadsResult.freedSpace + processedResult.freedSpace;

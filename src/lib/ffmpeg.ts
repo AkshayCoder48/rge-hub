@@ -17,6 +17,7 @@ import {
   generateSetptsExpression,
   generateReverseSetptsExpression,
 } from "./speed-ramp";
+import { getFfmpegPath, getFfprobePath } from "./paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -47,7 +48,7 @@ export interface ProcessResult {
  * Get video metadata using ffprobe (enhanced with audio/pixel info)
  */
 export async function getVideoInfo(filePath: string): Promise<VideoInfo> {
-  const { stdout } = await execFileAsync("ffprobe", [
+  const { stdout } = await execFileAsync(getFfprobePath(), [
     "-v",
     "quiet",
     "-print_format",
@@ -119,7 +120,7 @@ export async function getVideoInfo(filePath: string): Promise<VideoInfo> {
  */
 function runFFmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", args);
+    const proc = spawn(getFfmpegPath(), args);
 
     let stderrOutput = "";
     proc.stderr.on("data", (data: Buffer) => {

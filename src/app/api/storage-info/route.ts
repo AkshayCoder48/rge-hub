@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { UPLOADS_DIR, PROCESSED_DIR } from '@/lib/paths';
 
 function getDirectoryStats(dirPath: string): { size: number; count: number } {
   let totalSize = 0;
@@ -28,12 +29,8 @@ function getDirectoryStats(dirPath: string): { size: number; count: number } {
 }
 
 export async function GET() {
-  const projectRoot = process.cwd();
-  const uploadsDir = path.join(projectRoot, 'uploads');
-  const processedDir = path.join(projectRoot, 'processed');
-
-  const uploadsStats = getDirectoryStats(uploadsDir);
-  const processedStats = getDirectoryStats(processedDir);
+  const uploadsStats = getDirectoryStats(UPLOADS_DIR);
+  const processedStats = getDirectoryStats(PROCESSED_DIR);
 
   return NextResponse.json({
     uploadsSize: uploadsStats.size,
