@@ -1,19 +1,17 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useAppStore, formatDuration, RAMP_START, RAMP_MID, RAMP_END, DEFAULT_MOTION_BLUR } from '@/lib/store';
-import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine, Wind } from 'lucide-react';
-import type { MotionBlurSettings } from '@/lib/types';
+import { useAppStore, formatDuration, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine } from 'lucide-react';
 
 interface ExportPanelProps { clipId: string; }
 
 export function ExportPanel({ clipId }: ExportPanelProps) {
   const clip = useAppStore((s) => s.clips.find((c) => c.id === clipId));
   const setClipStatus = useAppStore((s) => s.setClipStatus);
-  const setClipProcessedUrl = useAppStore((s) => s.setClipProcessedUrl);
+  const setClipProcessedBlob = useAppStore((s) => s.setClipProcessedBlob);
   const setProcessingState = useAppStore((s) => s.setProcessingState);
   const processingState = useAppStore((s) => s.processingState);
-  const [outputFormat, setOutputFormat] = useState<'mp4' | 'mov' | 'webm'>('mp4');
 
   if (!clip) return null;
 
@@ -21,10 +19,8 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
   const speedMid = clip.speedRamps[Math.floor(clip.speedRamps.length / 2)]?.speed ?? RAMP_MID;
   const speedEnd = clip.speedRamps[clip.speedRamps.length - 1]?.speed ?? RAMP_END;
   const trimDuration = clip.trimDuration;
-  const motionBlur: MotionBlurSettings = clip.motionBlur ?? { ...DEFAULT_MOTION_BLUR };
 
-  // Accurate output duration using the integral formula:
-  // For linear speed ramp s₀→s₁ over D: output = (D/(s₁-s₀)) * ln(1 + (s₁-s₀)/s₀)
+  // Accurate output duration using the integral formula
   function computeRampDuration(s0: number, s1: number, D: number): number {
     const deltaS = s1 - s0;
     if (Math.abs(deltaS) < 0.001) return D / s0;
@@ -35,6 +31,11 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
   const estimatedDuration = forwardDur + reversedDur;
 
   const handleProcess = async () => {
+    if (!clip.originalFile) {
+      setClipStatus(clipId, 'error', 'Original file not available. Please re-upload the video.');
+      return;
+    }
+
     try {
       setClipStatus(clipId, 'processing');
       setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: 'Processing smooth reverse speed ramp...' });
@@ -43,23 +44,32 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
         setProcessingState({ progress: Math.min((useAppStore.getState().processingState.progress || 0) + Math.random() * 8, 90) });
       }, 500);
 
-      const response = await fetch('/api/process', {
+      // Send original file + trimDuration to /api/speedramp
+      const formData = new FormData();
+      formData.append('file', clip.originalFile);
+      formData.append('trimDuration', String(clip.trimDuration));
+
+      const response = await fetch('/api/speedramp', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clipId: clip.id,
-          trimDuration: clip.trimDuration,
-          speedRamps: clip.speedRamps,
-          outputFormat,
-          motionBlur,
-        }),
+        body: formData,
       });
 
       clearInterval(progressInterval);
-      if (!response.ok) { const e = await response.json().catch(() => ({ error: 'Failed' })); throw new Error(e.error || 'Failed'); }
 
-      const data = await response.json();
-      setClipProcessedUrl(clipId, data.outputUrl);
+      if (!response.ok) {
+        let errorMsg = 'Failed to process video';
+        try {
+          const errorData = await response.json();
+          errorMsg = errorData.error || errorMsg;
+        } catch {
+          // Response might not be JSON if it's an error
+        }
+        throw new Error(errorMsg);
+      }
+
+      // Receive the processed video as a Blob
+      const blob = await response.blob();
+      setClipProcessedBlob(clipId, blob);
       setClipStatus(clipId, 'done');
       setProcessingState({ isProcessing: false, progress: 100, currentClipId: null, message: 'Complete!' });
     } catch (err) {
@@ -69,7 +79,23 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
     }
   };
 
-  const handleClearResult = () => { setClipProcessedUrl(clipId, ''); setClipStatus(clipId, 'ready'); };
+  const handleDownload = () => {
+    if (!clip.processedBlob) return;
+    const url = URL.createObjectURL(clip.processedBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `speedramp_${clip.originalName.replace(/\.[^/.]+$/, '')}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleClearResult = () => {
+    setClipProcessedBlob(clipId, undefined as any);
+    setClipStatus(clipId, 'ready');
+  };
+
   const isProcessing = processingState.isProcessing && processingState.currentClipId === clipId;
 
   return (
@@ -108,25 +134,6 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
             <p className="text-xs text-white/60">~{formatDuration(estimatedDuration)}</p>
           </div>
         </div>
-        {motionBlur.enabled && (
-          <div className="col-span-2 flex items-center gap-2">
-            <Wind className="w-3.5 h-3.5 text-purple-400/60" />
-            <div>
-              <p className="text-[10px] text-white/25 uppercase tracking-wider">Motion Blur</p>
-              <p className="text-xs text-purple-400/70">{motionBlur.frames} frames · {motionBlur.mode} mode</p>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-2 mb-4">
-        <span className="text-xs text-white/30 mr-1">Format:</span>
-        {(['mp4', 'mov', 'webm'] as const).map((fmt) => (
-          <button key={fmt} onClick={() => setOutputFormat(fmt)} disabled={isProcessing}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              outputFormat === fmt ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' : 'bg-white/[0.03] text-white/30 border border-white/5 hover:text-white/50'
-            }`}>{fmt.toUpperCase()}</button>
-        ))}
       </div>
 
       <div className="flex gap-2">
@@ -137,12 +144,12 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
           }`}>
           {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Film className="w-4 h-4" /> Process V-Ramp</>}
         </button>
-        {clip.processedUrl && (
+        {clip.processedBlob && (
           <>
-            <a href={clip.processedUrl} target="_blank" rel="noopener noreferrer"
+            <button onClick={handleDownload}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all">
               <Download className="w-4 h-4" /> Download
-            </a>
+            </button>
             <button onClick={handleClearResult} className="px-3 py-2.5 rounded-xl text-xs text-white/20 hover:text-white/40 hover:bg-white/5 transition-all">Clear</button>
           </>
         )}

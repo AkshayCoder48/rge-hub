@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { useAppStore } from '@/lib/store';
-import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine, Archive, Download } from 'lucide-react';
+import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine, Download } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface ProcessAllProgress {
@@ -15,7 +15,7 @@ interface ProcessAllProgress {
 export function ProcessAll() {
   const clips = useAppStore((s) => s.clips);
   const setClipStatus = useAppStore((s) => s.setClipStatus);
-  const setClipProcessedUrl = useAppStore((s) => s.setClipProcessedUrl);
+  const setClipProcessedBlob = useAppStore((s) => s.setClipProcessedBlob);
   const setProcessingState = useAppStore((s) => s.setProcessingState);
   const processingState = useAppStore((s) => s.processingState);
   const { toast } = useToast();
@@ -26,6 +26,18 @@ export function ProcessAll() {
 
   const handleProcessAll = useCallback(async () => {
     if (processableClips.length === 0) return;
+
+    // Check all clips have originalFile
+    const clipsWithoutFile = processableClips.filter((c) => !c.originalFile);
+    if (clipsWithoutFile.length > 0) {
+      toast({
+        title: 'Some clips missing original files',
+        description: `${clipsWithoutFile.length} clip(s) need to be re-uploaded.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setIsProcessingAll(true);
 
     const items = processableClips.map((c) => ({
@@ -43,22 +55,26 @@ export function ProcessAll() {
       setProcessingState({ isProcessing: true, progress: Math.round((i / processableClips.length) * 100), currentClipId: clip.id, message: `Processing ${i + 1}/${processableClips.length}` });
 
       try {
-        const response = await fetch('/api/process', {
+        const formData = new FormData();
+        formData.append('file', clip.originalFile!);
+        formData.append('trimDuration', String(clip.trimDuration));
+
+        const response = await fetch('/api/speedramp', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clipId: clip.id,
-            trimDuration: clip.trimDuration,
-            speedRamps: clip.speedRamps,
-            outputFormat: 'mp4',
-            motionBlur: clip.motionBlur,
-          }),
+          body: formData,
         });
 
-        if (!response.ok) { const e = await response.json().catch(() => ({ error: 'Failed' })); throw new Error(e.error || 'Failed'); }
+        if (!response.ok) {
+          let errorMsg = 'Failed to process video';
+          try {
+            const errorData = await response.json();
+            errorMsg = errorData.error || errorMsg;
+          } catch { /* ignore */ }
+          throw new Error(errorMsg);
+        }
 
-        const data = await response.json();
-        setClipProcessedUrl(clip.id, data.outputUrl);
+        const blob = await response.blob();
+        setClipProcessedBlob(clip.id, blob);
         setClipStatus(clip.id, 'done');
         setProgressItems((prev) => prev.map((p) => p.clipId === clip.id ? { ...p, status: 'done' } : p));
         successCount++;
@@ -73,81 +89,28 @@ export function ProcessAll() {
     setProcessingState({ isProcessing: false, progress: 100, currentClipId: null, message: '' });
     setIsProcessingAll(false);
     toast({ title: 'Batch processing complete', description: `${successCount} succeeded, ${failCount} failed.`, variant: failCount > 0 ? 'destructive' : 'default' });
-  }, [processableClips, setClipStatus, setClipProcessedUrl, setProcessingState, toast]);
+  }, [processableClips, setClipStatus, setClipProcessedBlob, setProcessingState, toast]);
 
-  const doneClips = clips.filter((c) => c.status === 'done');
+  const handleDownloadAll = useCallback(async () => {
+    const doneClips = clips.filter((c) => c.status === 'done' && c.processedBlob);
+    if (doneClips.length === 0) return;
 
-  const handleDownloadZip = useCallback(async () => {
-    const doneClipIds = doneClips.map((c) => {
-      // Extract the processed file ID from the processedUrl
-      const url = c.processedUrl || '';
-      const match = url.match(/id=([\w-]+)/);
-      return match ? match[1] : c.id;
-    });
-    if (doneClipIds.length === 0) return;
-
-    try {
-      const response = await fetch('/api/download-zip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: doneClipIds }),
-      });
-
-      if (!response.ok) throw new Error('Failed to create ZIP');
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'speed-ramp-clips.zip';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      toast({ title: 'Download failed', description: err instanceof Error ? err.message : 'Failed to download ZIP', variant: 'destructive' });
-    }
-  }, [doneClips, toast]);
-
-  const handleDownloadAllZip = useCallback(async () => {
-    // Download ALL clips - both processed and original uploaded
-    if (clips.length === 0) return;
-
-    const allClipIds = clips.map((c) => {
-      // For processed clips, use the processed file ID
-      if (c.processedUrl) {
-        const match = c.processedUrl.match(/id=([\w-]+)/);
-        if (match) return match[1];
+    for (const clip of doneClips) {
+      if (clip.processedBlob) {
+        const url = URL.createObjectURL(clip.processedBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `speedramp_${clip.originalName.replace(/\.[^/.]+$/, '')}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       }
-      // For unprocessed clips, use the upload ID
-      return c.id;
-    });
-
-    try {
-      const response = await fetch('/api/download-zip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: allClipIds }),
-      });
-
-      if (!response.ok) throw new Error('Failed to create ZIP');
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'all-video-clips.zip';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      toast({ title: 'Download failed', description: err instanceof Error ? err.message : 'Failed to download ZIP', variant: 'destructive' });
     }
-  }, [clips, toast]);
+  }, [clips]);
 
   if (clips.length === 0) return null;
-  const doneCount = doneClips.length;
+  const doneCount = clips.filter((c) => c.status === 'done' && c.processedBlob).length;
 
   return (
     <div className="rounded-2xl bg-[#0f0f17] border border-white/5 p-5">
@@ -194,22 +157,13 @@ export function ProcessAll() {
         )}
       </button>
 
-      {/* Download buttons */}
-      <div className="mt-3 space-y-2">
-        {doneCount > 0 && (
-          <button onClick={handleDownloadZip}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all">
-            <Archive className="w-4 h-4" /> Download Processed ZIP ({doneCount})
-          </button>
-        )}
-
-        {clips.length > 0 && (
-          <button onClick={handleDownloadAllZip}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20 hover:bg-purple-500/20 transition-all">
-            <Download className="w-4 h-4" /> Download All as ZIP ({clips.length})
-          </button>
-        )}
-      </div>
+      {/* Download all button */}
+      {doneCount > 0 && (
+        <button onClick={handleDownloadAll}
+          className="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all">
+          <Download className="w-4 h-4" /> Download All ({doneCount})
+        </button>
+      )}
 
       {processableClips.length === 0 && clips.length > 0 && (
         <p className="text-[10px] text-white/20 mt-2 text-center">All clips have been processed</p>

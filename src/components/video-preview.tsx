@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useAppStore, formatDuration } from '@/lib/store';
 import { Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, Download } from 'lucide-react';
 
@@ -15,10 +15,40 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
   const [showOriginal, setShowOriginal] = useState(false);
   const [playbackState, setPlaybackState] = useState<'playing' | 'paused' | 'loading'>('paused');
   const [timeDisplay, setTimeDisplay] = useState({ current: 0, duration: 0 });
+  const [videoUrl, setVideoUrl] = useState('');
+  const [originalVideoUrl, setOriginalVideoUrl] = useState('');
 
-  const hasProcessed = !!clip?.processedUrl && clip?.status === 'done';
-  const originalUrl = clip?.url || '';
-  const videoSrc = clip ? (showOriginal ? originalUrl : (clip.processedUrl || originalUrl)) : '';
+  // Create object URLs from File/Blob objects for video playback.
+  // This syncs browser API state (URL.createObjectURL) with React state,
+  // which is a legitimate use of setState in effects.
+  useEffect(() => {
+    let url = '';
+    if (clip?.processedBlob && clip?.status === 'done') {
+      url = URL.createObjectURL(clip.processedBlob);
+    } else if (clip?.originalFile) {
+      url = URL.createObjectURL(clip.originalFile);
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setVideoUrl(url);
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [clip?.originalFile, clip?.processedBlob, clip?.status]);
+
+  useEffect(() => {
+    let url = '';
+    if (clip?.originalFile) {
+      url = URL.createObjectURL(clip.originalFile);
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOriginalVideoUrl(url);
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [clip?.originalFile]);
+
+  const hasProcessed = !!clip?.processedBlob && clip?.status === 'done';
+  const displayUrl = showOriginal ? originalVideoUrl : videoUrl;
 
   const handlePlayPause = useCallback(() => {
     const video = videoRef.current;
@@ -61,6 +91,18 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
     if (video) { video.currentTime = 0; video.play().catch(() => setPlaybackState('paused')); }
   }, []);
 
+  const handleDownload = useCallback(() => {
+    if (!clip?.processedBlob) return;
+    const url = URL.createObjectURL(clip.processedBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `speedramp_${clip.originalName.replace(/\.[^/.]+$/, '')}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [clip]);
+
   if (!clip) return null;
   const progress = timeDisplay.duration > 0 ? (timeDisplay.current / timeDisplay.duration) * 100 : 0;
 
@@ -86,10 +128,10 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
       </div>
 
       <div className="relative mt-3 mx-4 rounded-xl overflow-hidden bg-black aspect-video">
-        <video ref={videoRef} src={videoSrc} className="w-full h-full object-contain" preload="metadata" playsInline
+        <video ref={videoRef} src={displayUrl} className="w-full h-full object-contain" preload="metadata" playsInline
           onClick={handlePlayPause} onTimeUpdate={handleTimeUpdate} onPlay={handlePlay} onPause={handlePause}
           onWaiting={handleWaiting} onCanPlay={handleCanPlay} />
-        {playbackState === 'paused' && (
+        {playbackState === 'paused' && displayUrl && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/30 cursor-pointer" onClick={handlePlayPause}>
             <div className="w-14 h-14 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all">
               <Play className="w-6 h-6 text-white ml-1" />
@@ -137,11 +179,11 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
             </button>
           </div>
           <div className="flex items-center gap-2">
-            {hasProcessed && clip.processedUrl && (
-              <a href={clip.processedUrl} target="_blank" rel="noopener noreferrer"
+            {hasProcessed && (
+              <button onClick={handleDownload}
                 className="p-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400/60 hover:text-cyan-400 transition-all">
                 <Download className="w-4 h-4" />
-              </a>
+              </button>
             )}
             <button onClick={handleFullscreen} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-white/60 hover:text-white/90 transition-all">
               <Maximize className="w-4 h-4" />

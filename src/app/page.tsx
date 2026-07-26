@@ -9,13 +9,9 @@ import { ExportPanel } from '@/components/export-panel';
 import { VideoPreview } from '@/components/video-preview';
 import { TrimDurationControl } from '@/components/trim-duration-control';
 import { ProcessAll } from '@/components/process-all';
-import { BottomNav } from '@/components/bottom-nav';
-import { InterpolationPage } from '@/components/interpolation-page';
-import { MotionBlurPage } from '@/components/motion-blur-page';
-import { MotionBlurControl } from '@/components/motion-blur-control';
 import { Zap, Film, Sparkles, MousePointerClick, TrendingDown, TrendingUp, Combine } from 'lucide-react';
 
-function SpeedRampPage() {
+export default function Home() {
   const clips = useAppStore((s) => s.clips);
   const selectedClipId = useAppStore((s) => s.selectedClipId);
   const selectedClip = useAppStore((s) => s.clips.find((c) => c.id === s.selectedClipId));
@@ -25,7 +21,7 @@ function SpeedRampPage() {
   const speedEnd = selectedClip?.speedRamps[selectedClip?.speedRamps.length - 1]?.speed ?? RAMP_END;
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0a0a0f] relative overflow-hidden pb-20">
+    <div className="min-h-screen flex flex-col bg-[#0a0a0f] relative overflow-hidden">
       {/* Background effects */}
       <div className="absolute inset-0 z-0">
         <div className="absolute inset-0 opacity-[0.03]" style={{
@@ -238,7 +234,6 @@ function SpeedRampPage() {
 
                     <VideoPreview clipId={selectedClipId} />
                     <TrimDurationControl clipId={selectedClipId} />
-                    <MotionBlurControl clipId={selectedClipId} type="speedramp" />
                     <ProcessingStatus />
                     <ExportPanel clipId={selectedClipId} />
                   </>
@@ -273,19 +268,6 @@ function SpeedRampPage() {
         input[type='range']::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.06); }
         input[type='range']::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #f97316; border: none; }
       `}</style>
-    </div>
-  );
-}
-
-export default function Home() {
-  const activeTab = useAppStore((s) => s.activeTab);
-
-  return (
-    <div className="min-h-screen bg-[#0a0a0f]">
-      {activeTab === 'speedramp' && <SpeedRampPage />}
-      {activeTab === 'interpolation' && <InterpolationPage />}
-      {activeTab === 'motionblur' && <MotionBlurPage />}
-      <BottomNav />
     </div>
   );
 }
