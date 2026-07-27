@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: speed-ramper
+    runtime: docker
+    plan: free # 750 hours/month free tier
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+    # Render free tier has 512MB RAM and limited CPU
+    # For video processing, this is sufficient for short clips

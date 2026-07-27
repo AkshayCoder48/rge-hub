@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+dev.log
+*.log
+uploads/
+processed/
+tmp/
+bin/
+agent-ctx/
+mini-services/
+.DS_Store
