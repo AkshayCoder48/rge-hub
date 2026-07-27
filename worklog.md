@@ -158,3 +158,40 @@ Stage Summary:
 - All APIs tested and working locally
 - Project is ready for Vercel deployment
 - NOTE: Vercel Hobby plan limitations (4.5MB body, 10s timeout) may still restrict video uploads — Pro plan recommended for production
+
+---
+Task ID: 6
+Agent: main
+Task: Create README.md and deploy to Vercel
+
+Work Log:
+- Created comprehensive README.md with:
+  - Feature overview (3 modes, video processing, full API, batch processing, polished UI)
+  - Quick start guide
+  - Complete API reference with curl examples for all 3 modes
+  - Configuration parameters table (15+ params)
+  - How it works: speed ramp math formulas, processing pipeline breakdown
+  - Project architecture tree with all source files
+  - Tech stack table
+  - Deployment guides for Vercel, Render/Docker, local
+  - Processing performance benchmarks
+  - Environment configuration
+- Deployed to Vercel using provided token (vcp_...)
+  - Build succeeded in 49 seconds
+  - `prisma generate && next build` ran correctly
+  - ffmpeg-static was properly bundled as serverExternalPackage
+  - Production URL: https://my-project-gules-phi-34.vercel.app
+- Verified Vercel deployment:
+  - Homepage renders correctly (full HTML, all components visible)
+  - GET /api/speedramp returns complete API documentation
+  - POST /api/analyze works (returns metadata, some fields unknown due to ffmpeg fallback on Vercel)
+  - POST /api/speedramp works (processed video returned in 1.08s, valid MP4 output)
+- Fixed vercel.json memory warning (removed memory setting that's ignored on Active CPU billing)
+- Committed README.md to git
+
+Stage Summary:
+- README.md created with full documentation
+- Vercel deployment SUCCESSFUL and LIVE
+- Both upload and process APIs verified working on Vercel
+- Production URL: https://my-project-gules-phi-34.vercel.app
+- All blockers fixed: vercel-build script, vercel.json, ffmpeg-static bundling
