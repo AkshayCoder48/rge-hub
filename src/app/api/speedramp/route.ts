@@ -2,9 +2,9 @@ import { NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { spawn } from 'child_process';
-import { mkdirSync, unlinkSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import { readFile, stat } from 'fs/promises';
-import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath } from '@/lib/paths';
+import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath, hasFfprobe } from '@/lib/paths';
 
 // ============================================
 // SPEED RAMP API - Full Parameter Configuration
@@ -12,6 +12,16 @@ import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath } fr
 //
 // POST /api/speedramp
 // Accepts: FormData with "file" + "config" (JSON string)
+//
+// Works on ALL platforms:
+// - Vercel: Uses ffmpeg-static npm package (no system ffmpeg needed)
+// - Render/Docker: Uses system ffmpeg from Docker image
+// - Local: Uses system ffmpeg or ffmpeg-static fallback
+//
+// Vercel-specific notes:
+// - Hobby plan: 4.5MB body limit, 10s execution → may fail for larger videos
+// - Pro plan: 50MB body limit, 60s execution → works for most clips
+// - Recommended: Deploy on Render/Docker for video processing
 //
 // Config parameters:
 //   mode:           "vramp" | "linear" | "custom"  (default: "vramp")
@@ -35,8 +45,12 @@ import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath } fr
 // Returns: API documentation and parameter schema
 // ============================================
 
-// Next.js App Router: allow up to 5 minutes for processing
-export const maxDuration = 300;
+// Next.js App Router: maxDuration for Vercel Pro/Enterprise
+// - Hobby: 10s (hard limit, cannot override)
+// - Pro: 60s (can override up to 300s)
+// - Enterprise: up to 900s
+// For Docker/Render: no limit
+export const maxDuration = 60;
 
 // ---- Config Types ----
 
@@ -120,37 +134,97 @@ function runFFmpeg(args: string[], timeoutMs = 120000): Promise<void> {
 }
 
 async function probeVideo(filePath: string) {
-  try {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
+  // Try ffprobe first (available on Docker/Render/local)
+  if (hasFfprobe()) {
+    try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFile);
+      const ffprobePath = getFfprobePath()!;
 
-    const { stdout } = await execFileAsync(getFfprobePath(), [
-      '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', filePath,
-    ]);
+      const { stdout } = await execFileAsync(ffprobePath, [
+        '-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', filePath,
+      ]);
 
-    const info = JSON.parse(stdout);
-    const streams = info.streams || [];
-    const hasAudio = streams.some((s: Record<string, unknown>) => s.codec_type === 'audio');
-    const vs = streams.find((s: Record<string, unknown>) => s.codec_type === 'video');
+      const info = JSON.parse(stdout);
+      const streams = info.streams || [];
+      const hasAudio = streams.some((s: Record<string, unknown>) => s.codec_type === 'audio');
+      const vs = streams.find((s: Record<string, unknown>) => s.codec_type === 'video');
 
-    let duration = 0;
-    if (info.format?.duration) duration = parseFloat(info.format.duration);
-    else if (vs?.duration) duration = parseFloat(vs.duration as string);
+      let duration = 0;
+      if (info.format?.duration) duration = parseFloat(info.format.duration);
+      else if (vs?.duration) duration = parseFloat(vs.duration as string);
 
-    const width = vs?.width || 1920;
-    const height = vs?.height || 1080;
-    let fps = 30;
-    if (vs?.r_frame_rate) {
-      const parts = (vs.r_frame_rate as string).split('/');
-      if (parts.length === 2 && parseInt(parts[1]) > 0) fps = Math.round(parseInt(parts[0]) / parseInt(parts[1]));
+      const width = vs?.width || 1920;
+      const height = vs?.height || 1080;
+      let fps = 30;
+      if (vs?.r_frame_rate) {
+        const parts = (vs.r_frame_rate as string).split('/');
+        if (parts.length === 2 && parseInt(parts[1]) > 0) fps = Math.round(parseInt(parts[0]) / parseInt(parts[1]));
+      }
+      const pixFmt = (vs?.pix_fmt as string) || 'yuv420p';
+      const codec = (vs?.codec_name as string) || 'h264';
+
+      return { hasAudio, duration, width, height, fps, pixFmt, codec };
+    } catch (err) {
+      console.warn('ffprobe failed, trying ffmpeg probe:', err);
     }
-    const pixFmt = (vs?.pix_fmt as string) || 'yuv420p';
-    const codec = (vs?.codec_name as string) || 'h264';
+  }
+
+  // Fallback: Use ffmpeg itself to probe (works on Vercel where ffprobe is unavailable)
+  // ffmpeg -i <file> -hide_banner outputs stream info to stderr and exits with code 1
+  try {
+    const ffmpegPath = getFfmpegPath();
+    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const proc = spawn(ffmpegPath, ['-i', filePath, '-hide_banner']);
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+      // ffmpeg -i exits with code 1 (no output specified), but stderr contains all info
+      proc.on('close', (code) => {
+        // Code 1 is expected when no output file is specified
+        resolve({ stdout, stderr });
+      });
+      proc.on('error', (err) => reject(err));
+    });
+
+    // Parse ffmpeg stderr output to extract video info
+    const stderr = result.stderr;
+    let duration = 0;
+    let width = 1920, height = 1080;
+    let fps = 30;
+    let pixFmt = 'yuv420p';
+    let codec = 'h264';
+    let hasAudio = false;
+
+    // Duration: "Duration: 00:00:03.00, start: ..."
+    const durMatch = stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+    if (durMatch) {
+      duration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+    }
+
+    // Video stream: "Stream #0:0(und): Video: h264, yuv420p, 320x240 ..."
+    const videoMatch = stderr.match(/Stream\s*#\d+:\d+[\w()]*:\s*Video:\s*(\w+),\s*(\w+),\s*(\d+)x(\d+)/);
+    if (videoMatch) {
+      codec = videoMatch[1];
+      pixFmt = videoMatch[2];
+      width = parseInt(videoMatch[3]);
+      height = parseInt(videoMatch[4]);
+    }
+
+    // FPS: "24 fps", "30 tbr", "60 tbr", "r_frame_rate=30/1"
+    const fpsMatch = stderr.match(/(\d+)\s*(fps|tbr)\b/);
+    if (fpsMatch) fps = parseInt(fpsMatch[1]);
+    const rFrameMatch = stderr.match(/r_frame_rate\s*=\s*(\d+)\/(\d+)/);
+    if (rFrameMatch && parseInt(rFrameMatch[2]) > 0) fps = Math.round(parseInt(rFrameMatch[1]) / parseInt(rFrameMatch[2]));
+
+    // Audio stream detection
+    hasAudio = /Stream\s*#\d+:\d+[\w()]*:\s*Audio:/i.test(stderr);
 
     return { hasAudio, duration, width, height, fps, pixFmt, codec };
   } catch (err) {
-    console.warn('ffprobe failed, using defaults:', err);
+    console.warn('FFmpeg probe also failed, using defaults:', err);
     return { hasAudio: true, duration: 0, width: 1920, height: 1080, fps: 30, pixFmt: 'yuv420p', codec: 'h264' };
   }
 }
@@ -527,9 +601,14 @@ export async function POST(request: Request) {
   const startTime = Date.now();
 
   try {
+    // Ensure directories exist
     for (const dir of [UPLOADS_DIR, PROCESSED_DIR, TMP_DIR]) {
       mkdirSync(dir, { recursive: true });
     }
+
+    // Check FFmpeg availability BEFORE processing
+    const ffmpegPath = getFfmpegPath();
+    console.log(`[SpeedRamp] Using ffmpeg at: ${ffmpegPath}`);
 
     const formData = await request.formData();
     const file = formData.get('file');
@@ -557,9 +636,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: `Invalid file type: ${file.type}` }, { status: 400 });
     }
 
-    // File size limit check (500MB max)
-    if (file.size > 500 * 1024 * 1024) {
-      return NextResponse.json({ error: `File too large (${Math.round(file.size / 1024 / 1024)}MB). Maximum is 500MB.` }, { status: 400 });
+    // File size limit with Vercel-specific messaging
+    // Vercel Hobby: 4.5MB limit, Pro: 50MB
+    const isVercel = !!process.env.VERCEL;
+    const maxFileSize = isVercel ? 50 * 1024 * 1024 : 500 * 1024 * 1024; // 50MB on Vercel, 500MB elsewhere
+    const fileSizeMB = Math.round(file.size / 1024 / 1024);
+
+    if (file.size > maxFileSize) {
+      if (isVercel) {
+        return NextResponse.json({
+          error: `File too large (${fileSizeMB}MB). Vercel serverless has a request body size limit. Maximum on Pro plan is 50MB. For larger videos, deploy on Render or Docker.`,
+          hint: 'Deploy on Render (free tier) or Docker for unlimited video processing.',
+        }, { status: 400 });
+      }
+      return NextResponse.json({ error: `File too large (${fileSizeMB}MB). Maximum is 500MB.` }, { status: 400 });
     }
 
     const jobId = uuidv4();
@@ -574,15 +664,7 @@ export async function POST(request: Request) {
     const probe = await probeVideo(inputPath);
     console.log(`[SpeedRamp] mode=${config.mode}, trim=${config.trimDuration}s, speeds=${config.startSpeed}x→${config.rampMid}x→${config.rampEnd}x, reverse=${config.reverse}, fps=${config.outputFps}, crf=${config.crf}, preset=${config.preset}, audio=${config.audioMode}, format=${config.outputFormat}, input=${probe.width}x${probe.height}@${probe.fps}fps, ${probe.duration}s`);
 
-    // Adjust FFmpeg timeout based on video duration (larger videos need more time)
-    const estimatedComplexity = config.reverse ? 4 : 2; // number of expected encode passes
-    const baseTimeout = Math.max(60, probe.duration * estimatedComplexity * 15) * 1000; // 15s per second of video per encode pass
-    const maxTimeout = 240000; // 4 minutes max per individual FFmpeg call
-
-    // Override runFFmpeg's default timeout for this processing
-    const origRunFFmpeg = runFFmpeg;
-
-    // Process with adaptive timeout
+    // Process video
     const outputFile = await processSpeedRamp(inputPath, config, probe, jobId);
 
     // Clean up input file
