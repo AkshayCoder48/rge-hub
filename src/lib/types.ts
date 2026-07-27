@@ -3,6 +3,25 @@ export interface SpeedRampPoint {
   speed: number;
 }
 
+export interface SpeedRampConfig {
+  mode: 'vramp' | 'linear' | 'custom';
+  trimDuration?: number;
+  trimStart?: number;
+  startSpeed?: number;
+  endSpeed?: number;
+  rampMid?: number;
+  rampEnd?: number;
+  speedPoints?: SpeedRampPoint[];
+  reverse?: boolean;
+  outputFps?: number;
+  crf?: number;
+  preset?: string;
+  audioMode?: 'auto' | 'strip' | 'adjust';
+  outputFormat?: string;
+  outputScale?: string | null;
+  codec?: string;
+}
+
 export interface ProcessingState {
   isProcessing: boolean;
   progress: number;
@@ -24,6 +43,7 @@ export interface VideoClip {
   fileSize: number;
   trimDuration: number;
   speedRamps: SpeedRampPoint[];
+  config: SpeedRampConfig; // Full config for processing
   processedUrl?: string;
   processedBlob?: Blob; // Client-side only: holds processed video blob for download
   status: 'idle' | 'ready' | 'processing' | 'done' | 'error';
@@ -40,6 +60,7 @@ export interface AppState {
   removeClip: (id: string) => void;
   selectClip: (id: string | null) => void;
   setClipTrimDuration: (id: string, trimDuration: number) => void;
+  setClipConfig: (id: string, config: SpeedRampConfig) => void;
   setProcessingState: (state: Partial<ProcessingState>) => void;
   setClipStatus: (id: string, status: VideoClip['status'], error?: string) => void;
   setClipProcessedUrl: (id: string, url: string) => void;

@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useRef } from 'react';
 import { Upload, Film, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useAppStore, createReverseSpeedRamp, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { useAppStore, createReverseSpeedRamp, DEFAULT_CONFIG, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import type { VideoClip } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
 
@@ -79,6 +79,7 @@ export function UploadZone() {
             fileSize: data.fileSize,
             trimDuration,
             speedRamps: createReverseSpeedRamp(trimDuration),
+            config: { ...DEFAULT_CONFIG, trimDuration },
             hasAudio: data.hasAudio,
             originalFile: file, // Store the original File object for re-uploading during process
             status: 'ready',

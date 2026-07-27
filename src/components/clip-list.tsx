@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useState } from 'react';
-import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DEFAULT_CONFIG, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import { Film, Trash2, Clock, MonitorPlay, Plus, Loader2, Combine } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import type { VideoClip } from '@/lib/types';
@@ -47,6 +47,7 @@ export function ClipList() {
           format: data.format, fileSize: data.fileSize,
           trimDuration,
           speedRamps: createReverseSpeedRamp(trimDuration),
+          config: { ...DEFAULT_CONFIG, trimDuration },
           hasAudio: data.hasAudio,
           originalFile: file, // Store the original File object for re-uploading during process
           status: 'ready',

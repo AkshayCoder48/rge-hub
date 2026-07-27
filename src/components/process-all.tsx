@@ -57,7 +57,10 @@ export function ProcessAll() {
       try {
         const formData = new FormData();
         formData.append('file', clip.originalFile!);
-        formData.append('trimDuration', String(clip.trimDuration));
+        formData.append('config', JSON.stringify({
+          ...clip.config,
+          trimDuration: clip.trimDuration,
+        }));
 
         const response = await fetch('/api/speedramp', {
           method: 'POST',

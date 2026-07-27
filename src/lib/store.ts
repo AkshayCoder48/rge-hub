@@ -1,16 +1,32 @@
 import { create } from 'zustand';
-import type { AppState, VideoClip, SpeedRampPoint } from './types';
+import type { AppState, VideoClip, SpeedRampPoint, SpeedRampConfig } from './types';
 
-// Speed ramp configuration: V-shaped 4x → 0.6x → 4x
+// Default speed ramp configuration
+export const DEFAULT_CONFIG: SpeedRampConfig = {
+  mode: 'vramp',
+  trimDuration: 1.0,
+  trimStart: 0,
+  startSpeed: 4.0,
+  endSpeed: 0.6,
+  rampMid: 0.6,
+  rampEnd: 4.0,
+  reverse: true,
+  outputFps: 60,
+  crf: 18,
+  preset: 'fast',
+  audioMode: 'auto',
+  outputFormat: 'mp4',
+  outputScale: null,
+  codec: 'libx264',
+};
+
 export const RAMP_START = 4.0;
 export const RAMP_MID = 0.6;
 export const RAMP_END = 4.0;
-export const DEFAULT_TRIM_DURATION = 1.00; // seconds of original video to use
+export const DEFAULT_TRIM_DURATION = 1.00;
 
 /**
  * Create a V-shaped speed ramp: 4x → 0.6x → 4x
- * First half: deceleration (forward video)
- * Second half: acceleration (reversed video)
  */
 export function createReverseSpeedRamp(trimDuration: number): SpeedRampPoint[] {
   const halfDuration = trimDuration / 2;
@@ -19,6 +35,31 @@ export function createReverseSpeedRamp(trimDuration: number): SpeedRampPoint[] {
     { time: halfDuration, speed: RAMP_MID },
     { time: trimDuration, speed: RAMP_END },
   ];
+}
+
+/**
+ * Create speed ramp points from a config object
+ */
+export function createSpeedRampFromConfig(config: SpeedRampConfig, trimDuration: number): SpeedRampPoint[] {
+  const td = config.trimDuration ?? trimDuration;
+
+  switch (config.mode) {
+    case 'vramp':
+      return [
+        { time: 0, speed: config.startSpeed ?? RAMP_START },
+        { time: td / 2, speed: config.rampMid ?? RAMP_MID },
+        { time: td, speed: config.rampEnd ?? RAMP_END },
+      ];
+    case 'linear':
+      return [
+        { time: 0, speed: config.startSpeed ?? RAMP_START },
+        { time: td, speed: config.endSpeed ?? 0.6 },
+      ];
+    case 'custom':
+      return config.speedPoints ?? createReverseSpeedRamp(td);
+    default:
+      return createReverseSpeedRamp(td);
+  }
 }
 
 export function formatDuration(seconds: number): string {
@@ -61,7 +102,24 @@ export const useAppStore = create<AppState>((set) => ({
 
   setClipTrimDuration: (id, trimDuration) => set((state) => ({
     clips: state.clips.map(c => c.id === id
-      ? { ...c, trimDuration, speedRamps: createReverseSpeedRamp(trimDuration) }
+      ? {
+        ...c,
+        trimDuration,
+        speedRamps: createReverseSpeedRamp(trimDuration),
+        config: { ...c.config, trimDuration },
+      }
+      : c
+    ),
+  })),
+
+  setClipConfig: (id, config) => set((state) => ({
+    clips: state.clips.map(c => c.id === id
+      ? {
+        ...c,
+        config,
+        trimDuration: config.trimDuration ?? c.trimDuration,
+        speedRamps: createSpeedRampFromConfig(config, config.trimDuration ?? c.trimDuration),
+      }
       : c
     ),
   })),
