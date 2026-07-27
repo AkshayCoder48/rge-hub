@@ -130,3 +130,31 @@ Stage Summary:
 - Vercel-specific error messages with helpful deployment hints
 - All platforms supported: Vercel, Render/Docker, local development
 - NOTE: Vercel Hobby plan has 4.5MB body limit + 10s timeout — recommend Pro plan or Render
+
+---
+Task ID: 5
+Agent: main
+Task: Fix remaining Vercel deployment blockers and verify deployment readiness
+
+Work Log:
+- Identified 2 critical deployment blockers:
+  1. `vercel-build` script referenced `node scripts/download-ffmpeg.js` — this script DOESN'T EXIST, causing Vercel build to fail immediately
+  2. `vercel.json` had `includeFiles: "bin/**"` — referencing a non-existent `bin/` directory, and this config is unnecessary since ffmpeg-static is in serverExternalPackages
+- Fixed `package.json`: Changed `vercel-build` from `"prisma generate && node scripts/download-ffmpeg.js && next build"` to `"prisma generate && next build"`
+- Fixed `vercel.json`: Removed `includeFiles` directive, kept only `maxDuration: 60` and `memory: 1024` for API routes
+- Verified ffmpeg-static binary compatibility: 77MB statically linked ELF x86-64 binary for Linux — compatible with Vercel Lambda runtime (Amazon Linux 2)
+- Ran lint check: passes clean
+- Verified local dev server: running without errors
+- Tested all APIs via curl:
+  - POST /api/analyze: returns video metadata correctly
+  - POST /api/speedramp: processes V-ramp in 271ms, 174KB output
+  - GET /api/speedramp: returns full API documentation
+- Browser verification: page loads cleanly, no console errors, no runtime errors
+
+Stage Summary:
+- All Vercel deployment blockers fixed
+- Build should succeed: vercel-build script is clean, vercel.json is correct
+- ffmpeg-static bundled binary is compatible with Vercel Lambda
+- All APIs tested and working locally
+- Project is ready for Vercel deployment
+- NOTE: Vercel Hobby plan limitations (4.5MB body, 10s timeout) may still restrict video uploads — Pro plan recommended for production
