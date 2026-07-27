@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  serverExternalPackages: ['fluent-ffmpeg'],
+  serverExternalPackages: ['sharp'],
   outputFileTracingExcludes: {
     '*': ['agent-ctx'],
   },

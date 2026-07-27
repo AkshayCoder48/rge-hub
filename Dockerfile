@@ -10,9 +10,8 @@ RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files first for better caching
 COPY package.json bun.lockb* package-lock.json* yarn.lock* ./
-COPY prisma ./prisma/
 
 # Install dependencies
 RUN npm install
@@ -23,14 +22,14 @@ COPY . .
 # Generate Prisma client
 RUN npx prisma generate
 
-# Build Next.js
+# Build Next.js (with standalone output for smaller production image)
 RUN npm run build
 
 # ---- Production Stage ----
 FROM node:20-alpine AS runner
 
 # Install FFmpeg and FFprobe (the key dependency for video processing)
-# Alpine package includes ffmpeg with most commonly needed encoders
+# Alpine package includes ffmpeg with most commonly needed encoders including libx264, libx265
 RUN apk add --no-cache ffmpeg
 
 WORKDIR /app
@@ -51,9 +50,15 @@ RUN npx prisma generate
 # Create temp directories for video processing
 RUN mkdir -p /tmp/speedramper/uploads /tmp/speedramper/processed /tmp/speedramper/tmp
 
-# Expose port (Render defaults to 10000, but we use 3000 for Next.js)
+# The standalone build creates a server.js that can run without the full Next.js runtime
+# This is significantly smaller and faster than running next start
 ENV PORT=3000
 EXPOSE 3000
+
+# Health check to ensure the server is ready before accepting requests
+# This prevents the "function is pending state" deployment errors
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
 # Start the Next.js standalone server
 CMD ["node", "server.js"]

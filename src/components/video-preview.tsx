@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useAppStore, formatDuration } from '@/lib/store';
-import { Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, Download } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, Download, Film } from 'lucide-react';
 
 interface VideoPreviewProps {
   clipId: string;
@@ -15,20 +15,18 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
   const [showOriginal, setShowOriginal] = useState(false);
   const [playbackState, setPlaybackState] = useState<'playing' | 'paused' | 'loading'>('paused');
   const [timeDisplay, setTimeDisplay] = useState({ current: 0, duration: 0 });
-  const [videoUrl, setVideoUrl] = useState('');
-  const [originalVideoUrl, setOriginalVideoUrl] = useState('');
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [originalVideoUrl, setOriginalVideoUrl] = useState<string | null>(null);
 
   // Create object URLs from File/Blob objects for video playback.
-  // This syncs browser API state (URL.createObjectURL) with React state,
-  // which is a legitimate use of setState in effects.
   useEffect(() => {
-    let url = '';
+    let url: string | null = null;
     if (clip?.processedBlob && clip?.status === 'done') {
       url = URL.createObjectURL(clip.processedBlob);
     } else if (clip?.originalFile) {
       url = URL.createObjectURL(clip.originalFile);
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- URL.createObjectURL is a browser API that needs cleanup
     setVideoUrl(url);
     return () => {
       if (url) URL.revokeObjectURL(url);
@@ -36,11 +34,11 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
   }, [clip?.originalFile, clip?.processedBlob, clip?.status]);
 
   useEffect(() => {
-    let url = '';
+    let url: string | null = null;
     if (clip?.originalFile) {
       url = URL.createObjectURL(clip.originalFile);
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- URL.createObjectURL is a browser API that needs cleanup
     setOriginalVideoUrl(url);
     return () => {
       if (url) URL.revokeObjectURL(url);
@@ -128,9 +126,18 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
       </div>
 
       <div className="relative mt-3 mx-4 rounded-xl overflow-hidden bg-black aspect-video">
-        <video ref={videoRef} src={displayUrl} className="w-full h-full object-contain" preload="metadata" playsInline
-          onClick={handlePlayPause} onTimeUpdate={handleTimeUpdate} onPlay={handlePlay} onPause={handlePause}
-          onWaiting={handleWaiting} onCanPlay={handleCanPlay} />
+        {displayUrl ? (
+          <video ref={videoRef} src={displayUrl} className="w-full h-full object-contain" preload="metadata" playsInline
+            onClick={handlePlayPause} onTimeUpdate={handleTimeUpdate} onPlay={handlePlay} onPause={handlePause}
+            onWaiting={handleWaiting} onCanPlay={handleCanPlay} />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <div className="text-center">
+              <Film className="w-8 h-8 text-white/10 mx-auto mb-2" />
+              <p className="text-xs text-white/20">Video preview loading...</p>
+            </div>
+          </div>
+        )}
         {playbackState === 'paused' && displayUrl && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/30 cursor-pointer" onClick={handlePlayPause}>
             <div className="w-14 h-14 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all">
