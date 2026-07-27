@@ -43,6 +43,10 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
       return;
     }
 
+    // AbortController for timeout handling - 5 minute max
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+
     try {
       setClipStatus(clipId, 'processing');
       setProcessingState({ isProcessing: true, progress: 0, currentClipId: clipId, message: `Processing ${config.mode} speed ramp...` });
@@ -62,9 +66,9 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
         rampEnd: config.rampEnd,
         speedPoints: config.speedPoints,
         reverse: config.reverse ?? true,
-        outputFps: config.outputFps ?? 60,
-        crf: config.crf ?? 18,
-        preset: config.preset ?? 'fast',
+        outputFps: config.outputFps ?? 30,
+        crf: config.crf ?? 23,
+        preset: config.preset ?? 'ultrafast',
         audioMode: config.audioMode ?? 'auto',
         outputFormat: config.outputFormat ?? 'mp4',
         outputScale: config.outputScale,
@@ -78,9 +82,11 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
       const response = await fetch('/api/speedramp', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
 
       clearInterval(progressInterval);
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         let errorMsg = 'Failed to process video';
@@ -96,7 +102,15 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
       setClipStatus(clipId, 'done');
       setProcessingState({ isProcessing: false, progress: 100, currentClipId: null, message: 'Complete!' });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed';
+      clearTimeout(timeoutId);
+      let message = 'Failed to process video';
+      if (err instanceof Error) {
+        if (err.name === 'AbortError') {
+          message = 'Processing timed out after 5 minutes. Try using "ultrafast" preset, 30fps, and smaller trim duration for faster processing.';
+        } else {
+          message = err.message;
+        }
+      }
       setClipStatus(clipId, 'error', message);
       setProcessingState({ isProcessing: false, progress: 0, currentClipId: null, message: '' });
     }
@@ -254,7 +268,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="text-[10px] text-white/25 uppercase tracking-wider block mb-1">Quality (CRF)</label>
-              <select value={config.crf ?? 18}
+              <select value={config.crf ?? 23}
                 onChange={(e) => updateConfig('crf', parseInt(e.target.value))}
                 className="w-full px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5 text-xs text-white/60 focus:border-orange-500/30 focus:outline-none">
                 <option value="0">0 (Lossless)</option>
@@ -266,7 +280,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
             </div>
             <div>
               <label className="text-[10px] text-white/25 uppercase tracking-wider block mb-1">FPS</label>
-              <select value={config.outputFps ?? 60}
+              <select value={config.outputFps ?? 30}
                 onChange={(e) => updateConfig('outputFps', parseInt(e.target.value))}
                 className="w-full px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5 text-xs text-white/60 focus:border-cyan-500/30 focus:outline-none">
                 <option value="24">24</option>
@@ -277,7 +291,7 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
             </div>
             <div>
               <label className="text-[10px] text-white/25 uppercase tracking-wider block mb-1">Preset</label>
-              <select value={config.preset ?? 'fast'}
+              <select value={config.preset ?? 'ultrafast'}
                 onChange={(e) => updateConfig('preset', e.target.value)}
                 className="w-full px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5 text-xs text-white/60 focus:border-cyan-500/30 focus:outline-none">
                 <option value="ultrafast">Ultrafast</option>
