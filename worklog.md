@@ -195,3 +195,28 @@ Stage Summary:
 - Both upload and process APIs verified working on Vercel
 - Production URL: https://my-project-gules-phi-34.vercel.app
 - All blockers fixed: vercel-build script, vercel.json, ffmpeg-static bundling
+
+---
+Task ID: 7
+Agent: main
+Task: Remove 1-second limit for clips under 10s + Deploy to new Vercel project
+
+Work Log:
+- Found 1-second limit hardcoded in: store.ts (DEFAULT_TRIM_DURATION=1.0), upload-zone.tsx (Math.min(1.0, duration)), clip-list.tsx (same), speedramp/route.ts (DEFAULT_CONFIG.trimDuration=1.0), page.tsx description
+- Changed DEFAULT_TRIM_DURATION from 1.0 to 10.0 in store.ts
+- Added MAX_AUTO_TRIM_DURATION=10.0 constant with comment explaining behavior
+- Updated upload-zone.tsx: trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION) — clips under 10s use full duration, longer clips cap at 10s
+- Updated clip-list.tsx: same trim calculation
+- Updated trim-duration-control.tsx: imports MAX_AUTO_TRIM_DURATION
+- Updated page.tsx: description now says "Clips under 10s use full duration, longer clips default to first 10s"
+- Updated speedramp/route.ts: DEFAULT_CONFIG.trimDuration changed to 10.0, API docs examples updated
+- Removed .vercel directory and deployed to new project "speedramp-pro"
+- New deployment URL: https://speedramp-pro.vercel.app (200 OK, API verified)
+- Build completed in ~1 minute, all routes working
+
+Stage Summary:
+- 1-second limit completely removed for clips under 10 seconds
+- Clips under 10s now use full video duration automatically
+- Clips over 10s default to 10s trim (user can adjust via slider)
+- New Vercel project deployed: https://speedramp-pro.vercel.app
+- API confirmed: trimDuration default is now 10 (was 1)

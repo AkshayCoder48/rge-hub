@@ -4,7 +4,7 @@ import type { AppState, VideoClip, SpeedRampPoint, SpeedRampConfig } from './typ
 // Default speed ramp configuration
 export const DEFAULT_CONFIG: SpeedRampConfig = {
   mode: 'vramp',
-  trimDuration: 1.0,
+  trimDuration: 10.0,
   trimStart: 0,
   startSpeed: 4.0,
   endSpeed: 0.6,
@@ -23,7 +23,8 @@ export const DEFAULT_CONFIG: SpeedRampConfig = {
 export const RAMP_START = 4.0;
 export const RAMP_MID = 0.6;
 export const RAMP_END = 4.0;
-export const DEFAULT_TRIM_DURATION = 1.00;
+export const DEFAULT_TRIM_DURATION = 10.00;
+export const MAX_AUTO_TRIM_DURATION = 10.00; // For clips under 10s, use full duration; for longer clips, cap at 10s
 
 /**
  * Create a V-shaped speed ramp: 4x → 0.6x → 4x

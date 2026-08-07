@@ -80,7 +80,7 @@ interface SpeedRampConfig {
 
 const DEFAULT_CONFIG: Required<SpeedRampConfig> = {
   mode: 'vramp',
-  trimDuration: 1.0,
+  trimDuration: 10.0,
   trimStart: 0,
   startSpeed: 4.0,
   endSpeed: 0.6,
@@ -850,7 +850,7 @@ export async function GET() {
     examples: {
       vramp: {
         description: 'Default V-ramp: 4x→0.6x→4x',
-        curl: `curl -X POST /api/speedramp -F "file=@video.mp4" -F "config={\\"mode\\":\\"vramp\\",\\"trimDuration\\":1.0}"`,
+        curl: `curl -X POST /api/speedramp -F "file=@video.mp4" -F "config={\\"mode\\":\\"vramp\\",\\"trimDuration\\":10.0}"`,
       },
       linear: {
         description: 'Linear 2x→0.5x',
@@ -862,7 +862,7 @@ export async function GET() {
       },
       simple: {
         description: 'Simplest call',
-        curl: `curl -X POST /api/speedramp -F "file=@video.mp4" -F "trimDuration=1.0"`,
+        curl: `curl -X POST /api/speedramp -F "file=@video.mp4" -F "trimDuration=10.0"`,
       },
       fastProcessing: {
         description: 'Fastest processing (ultrafast + 30fps)',

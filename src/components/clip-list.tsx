@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useState } from 'react';
-import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DEFAULT_CONFIG, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DEFAULT_CONFIG, MAX_AUTO_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import { Film, Trash2, Clock, MonitorPlay, Plus, Loader2, Combine } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import type { VideoClip } from '@/lib/types';
@@ -38,7 +38,8 @@ export function ClipList() {
         if (!response.ok) throw new Error('Upload failed');
         const data = await response.json();
 
-        const trimDuration = Math.min(DEFAULT_TRIM_DURATION, data.duration);
+        // For clips under 10s, use full video duration; for longer clips, cap at 10s
+        const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
 
         const clip: VideoClip = {
           id: data.id, fileName: data.fileName, originalName: data.originalName,

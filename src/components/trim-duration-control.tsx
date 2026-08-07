@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback } from 'react';
-import { useAppStore, formatDuration, DEFAULT_TRIM_DURATION } from '@/lib/store';
+import { useAppStore, formatDuration, MAX_AUTO_TRIM_DURATION } from '@/lib/store';
 import { Scissors, Clock, AlertTriangle } from 'lucide-react';
 
 interface TrimDurationControlProps {
@@ -15,7 +15,7 @@ export function TrimDurationControl({ clipId }: TrimDurationControlProps) {
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     if (!isNaN(val) && val > 0) {
-      setClipTrimDuration(clipId, Math.min(val, clip?.duration ?? DEFAULT_TRIM_DURATION));
+      setClipTrimDuration(clipId, Math.min(val, clip?.duration ?? MAX_AUTO_TRIM_DURATION));
     }
   }, [clipId, clip?.duration, setClipTrimDuration]);
 

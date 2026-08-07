@@ -1,1 +1,17 @@
-{}
+{
+  "services": {
+    "speed-ramper": {
+      "root": ".",
+      "framework": "nextjs"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "type": "service",
+        "service": "speed-ramper"
+      }
+    }
+  ]
+}

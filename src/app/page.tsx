@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { useAppStore, RAMP_START, RAMP_MID, RAMP_END, DEFAULT_TRIM_DURATION } from '@/lib/store';
+import { useAppStore, RAMP_START, RAMP_MID, RAMP_END, MAX_AUTO_TRIM_DURATION } from '@/lib/store';
 import { UploadZone } from '@/components/upload-zone';
 import { ClipList } from '@/components/clip-list';
 import { ProcessingStatus } from '@/components/processing-status';
@@ -81,7 +81,7 @@ export default function Home() {
                   Upload → Get <span className="bg-gradient-to-r from-orange-400 to-cyan-400 bg-clip-text text-transparent">V-ramp clip</span>
                 </h2>
                 <p className="text-sm text-white/30 leading-relaxed max-w-md mx-auto">
-                  Upload a video and automatically get a reverse speed ramp: first {DEFAULT_TRIM_DURATION}s plays at {RAMP_START}x→{RAMP_MID}x (decelerate), then reverses at {RAMP_MID}x→{RAMP_END}x (accelerate). Combined into one clip.
+                  Upload a video and automatically get a reverse speed ramp. Clips under {MAX_AUTO_TRIM_DURATION}s use full duration, longer clips default to first {MAX_AUTO_TRIM_DURATION}s. Plays at {RAMP_START}x→{RAMP_MID}x (decelerate), then reverses at {RAMP_MID}x→{RAMP_END}x (accelerate). Combined into one clip.
                 </p>
                 <div className="flex items-center justify-center gap-6 mt-2">
                   <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-orange-500/5 border border-orange-500/15">

@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useRef } from 'react';
 import { Upload, Film, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useAppStore, createReverseSpeedRamp, DEFAULT_CONFIG, DEFAULT_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
+import { useAppStore, createReverseSpeedRamp, DEFAULT_CONFIG, MAX_AUTO_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import type { VideoClip } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
 
@@ -63,7 +63,8 @@ export function UploadZone() {
           }
 
           const data = await response.json();
-          const trimDuration = Math.min(DEFAULT_TRIM_DURATION, data.duration);
+          // For clips under 10s, use full video duration; for longer clips, cap at 10s
+          const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
 
           const clip: VideoClip = {
             id: data.id,
