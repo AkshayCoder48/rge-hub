@@ -83,6 +83,7 @@ export class VideoMotionBlurProcessor {
     // Decoded frame queue for coordinating decoder → blur → encoder
     let pendingDecodeCount = 0;
     let decodeResolve: (() => void) | null = null;
+    let decodeReject: ((err: Error) => void) | null = null;
     const decodeQueue: VideoFrame[] = [];
 
     // Encoded chunk queue for coordinating encoder → muxer
@@ -187,7 +188,6 @@ export class VideoMotionBlurProcessor {
       muxer = new MP4MuxerWrapper(width, height, encoderCodec, fps, config.outputFormat, totalFrames);
 
       // === Create decoder ===
-      let decoderKeyframeReceived = false;
 
       decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
@@ -208,7 +208,12 @@ export class VideoMotionBlurProcessor {
           }
         },
         error: (e: DOMException) => {
-          console.error('Decoder error:', e);
+          console.error('Decoder error:', e.message);
+          // Propagate decoder error to the processing loop
+          if (decodeReject) {
+            decodeReject(new Error(`VideoDecoder error: ${e.message}`));
+            decodeReject = null;
+          }
         },
       });
 
@@ -242,16 +247,22 @@ export class VideoMotionBlurProcessor {
 
       // === STAGE 5: Process samples ===
       // For each encoded sample: decode → blur → encode
+      // CRITICAL: The first chunk decoded MUST be a keyframe.
+      // Skip non-keyframe samples until the first keyframe is found.
 
-      for (let i = 0; i < samples.length; i++) {
+      let firstKeyFrameIdx = samples.findIndex((s) => s.isKeyFrame);
+      if (firstKeyFrameIdx === -1) {
+        throw new Error('No keyframe found in video. Cannot decode.');
+      }
+
+      for (let i = firstKeyFrameIdx; i < samples.length; i++) {
         checkCancelled();
 
         const sample = samples[i];
         const chunk = MP4Demuxer.sampleToChunk(sample);
 
         // Track progress (split across stages)
-        const overallPercent = (i / samples.length) * 90; // 90% for processing, 10% for finalization
-        const stagePercent = (i / samples.length) * 100;
+        const overallPercent = ((i - firstKeyFrameIdx) / (samples.length - firstKeyFrameIdx)) * 90;
 
         // Alternate progress between decoding and encoding for smooth display
         if (i % 2 === 0) {
@@ -260,19 +271,15 @@ export class VideoMotionBlurProcessor {
           emitProgress('blurring', overallPercent, i, totalFrames);
         }
 
-        // For the first keyframe, we need to ensure the decoder is ready
-        if (sample.isKeyFrame && !decoderKeyframeReceived) {
-          decoderKeyframeReceived = true;
-        }
-
         // Decode the sample
         pendingDecodeCount++;
         decoder.decode(chunk);
 
         // Wait for the decoded frame to be processed
         if (pendingDecodeCount > 0) {
-          await new Promise<void>((resolve) => {
+          await new Promise<void>((resolve, reject) => {
             decodeResolve = resolve;
+            decodeReject = reject;
           });
         }
 

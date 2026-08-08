@@ -85,16 +85,28 @@ export class MP4Demuxer {
                 const sps = avcc.PS as Uint8Array;
                 const pps = avcc.PS2 as Uint8Array;
                 if (sps && pps) {
-                  const bytes = new Uint8Array(7 + sps.length + pps.length);
-                  bytes[0] = 1;
-                  bytes[1] = avcc.AVCProfileIndication;
-                  bytes[2] = avcc.profile_compatibility;
-                  bytes[3] = avcc.AVCLevelIndication;
-                  bytes[4] = 0xFF;
-                  bytes[5] = 0xE1;
-                  bytes.set(sps, 6);
-                  bytes[6 + sps.length] = 1;
-                  bytes.set(pps, 7 + sps.length);
+                  // Build AVCC (AVCConfigurationBox) bytes for WebCodecs VideoDecoder description
+                  // Format: version(1) + profile(1) + compatibility(1) + level(1) +
+                  //         lengthSizeMinusOne(1) + numSPS(1) + spsLength(2) + sps + numPPS(1) + ppsLength(2) + pps
+                  const bytes = new Uint8Array(8 + sps.length + pps.length);
+                  let offset = 0;
+                  bytes[offset++] = 1; // configurationVersion
+                  bytes[offset++] = avcc.AVCProfileIndication;
+                  bytes[offset++] = avcc.profile_compatibility;
+                  bytes[offset++] = avcc.AVCLevelIndication;
+                  bytes[offset++] = 0xFF; // lengthSizeMinusOne = 3 (4-byte NALU lengths), with 6 reserved bits set to 1
+                  bytes[offset++] = 0xE1; // numOfSequenceParameterSets = 1, with 3 reserved bits set to 1
+                  // SPS length (big-endian 16-bit)
+                  bytes[offset++] = (sps.length >> 8) & 0xFF;
+                  bytes[offset++] = sps.length & 0xFF;
+                  bytes.set(sps, offset);
+                  offset += sps.length;
+                  // numOfPictureParameterSets
+                  bytes[offset++] = 1;
+                  // PPS length (big-endian 16-bit)
+                  bytes[offset++] = (pps.length >> 8) & 0xFF;
+                  bytes[offset++] = pps.length & 0xFF;
+                  bytes.set(pps, offset);
                   videoDescription = bytes;
                 }
               }

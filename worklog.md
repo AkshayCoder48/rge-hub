@@ -360,3 +360,35 @@ Stage Summary:
 - Both Speed Ramp (server-side FFmpeg) and Motion Blur (client-side WebCodecs) available via tabs
 - All processing is local for motion blur — video never leaves the browser
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+Task ID: 9
+Agent: main
+Task: Fix VideoDecoder key frame error and hydration mismatch
+
+Work Log:
+- Fixed VideoDecoder "key frame required after configure()" error:
+  - Root cause 1: First chunk decoded must be a keyframe. Added logic to skip non-keyframe samples until first keyframe is found.
+  - Root cause 2: AVCC description bytes were incorrectly built - missing SPS/PPS length prefixes (2-byte big-endian). Fixed the byte construction in mp4-demuxer.ts.
+  - Root cause 3: getDecoderConfig() now properly handles H.264 codec strings and only sets description for avc1 codecs.
+- Fixed hydration mismatch in VideoUploader:
+  - Changed from useState(() => isWebCodecsSupported()) to useEffect-based detection
+  - Added `mounted` state to only show WebCodecs error after client hydration
+  - Server and client now render identical initial HTML
+- Fixed timestamp preservation in TemporalBlurProcessor:
+  - getBlendedFrame() now passes VideoFrameInit with timestamp and duration from the current source frame
+  - Previously all output frames had timestamp=0, breaking the muxer
+- Improved decoder error propagation:
+  - Added decodeReject handler to propagate VideoDecoder errors to the processing loop
+  - Prevents the promise from hanging indefinitely on decoder errors
+- Improved encoder config:
+  - Explicitly set format='avc' for H.264 encoder output (required for mp4-muxer)
+  - Removed invalid 'ivf' format for VP9/VP8 (not needed for mp4 muxer)
+- Deployed to https://speedramp-pro.vercel.app (200 OK)
+
+Stage Summary:
+- VideoDecoder H.264 description field now correctly includes AVCC box with SPS/PPS length prefixes
+- First chunk decoded is guaranteed to be a keyframe
+- Hydration mismatch fully resolved
+- Timestamps preserved through the blur→encode→mux pipeline
+- Decoder errors properly propagated to caller

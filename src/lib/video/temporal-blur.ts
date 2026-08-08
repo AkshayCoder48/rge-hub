@@ -115,13 +115,8 @@ export class TemporalBlurProcessor {
   /**
    * Blend all frames in the buffer and return the result as a new VideoFrame.
    *
-   * The blending uses weighted alpha compositing:
-   * - Clear the canvas
-   * - For each frame (oldest to newest), draw it with its weighted alpha
-   * - If blurStrength < 1, interpolate between the newest frame and the blend
-   * - Capture the canvas as a new VideoFrame
-   *
    * CRITICAL: The returned VideoFrame must be closed by the caller when done.
+   * The returned frame preserves the timestamp and duration from the most recent input frame.
    *
    * @returns A new VideoFrame containing the blended result
    */
@@ -136,12 +131,11 @@ export class TemporalBlurProcessor {
 
     // If only one frame or blur disabled, just capture the current frame
     if (this.frameBuffer.length === 1 || this.config.blurStrength <= 0) {
+      // Preserve timestamp from the source frame
       return new VideoFrame(currentFrame);
     }
 
     // --- Step 1: Weighted alpha compositing of all frames ---
-    // Draw each frame from oldest to newest with its respective weight as globalAlpha
-    // Since weights sum to 1.0, this produces a properly weighted blend
     this.ctx.clearRect(0, 0, width, height);
 
     for (let i = 0; i < this.frameBuffer.length; i++) {
@@ -151,28 +145,27 @@ export class TemporalBlurProcessor {
     this.ctx.globalAlpha = 1.0;
 
     // --- Step 2: Apply blur strength interpolation ---
-    // blurStrength controls how much the blend replaces the original:
-    //   result = original * (1 - strength) + blended * strength
-    // When strength=1, we use the full blend (maximum blur)
-    // When strength=0, we use the original frame (no blur)
     if (this.config.blurStrength < 1) {
-      // Copy the blended result to temp canvas
       this.tempCtx.clearRect(0, 0, width, height);
       this.tempCtx.drawImage(this.canvas, 0, 0);
 
-      // Draw the current (unblurred) frame as the base
       this.ctx.clearRect(0, 0, width, height);
       this.ctx.globalAlpha = 1.0;
       this.ctx.drawImage(currentFrame, 0, 0, width, height);
 
-      // Overlay the blended result at blurStrength opacity
       this.ctx.globalAlpha = this.config.blurStrength;
       this.ctx.drawImage(this.tempCanvas, 0, 0, width, height);
       this.ctx.globalAlpha = 1.0;
     }
 
     // Capture the final result as a new VideoFrame
-    return new VideoFrame(this.canvas, 0, 0, width, height);
+    // IMPORTANT: Pass the timestamp and duration from the current source frame
+    // to preserve correct timing in the output video
+    const frameInit: VideoFrameInit = {
+      timestamp: currentFrame.timestamp,
+      duration: currentFrame.duration ?? undefined,
+    };
+    return new VideoFrame(this.canvas, frameInit);
   }
 
   /**

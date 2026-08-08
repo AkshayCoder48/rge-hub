@@ -139,6 +139,8 @@ export async function findSupportedEncoderCodec(
 /**
  * Determine the decoder config for a given codec.
  * Maps codec strings to the correct WebCodecs decoder configuration.
+ * For H.264 (avc1), the description field is REQUIRED — it contains
+ * the AVCC configuration box bytes (SPS+PPS).
  */
 export function getDecoderConfig(
   codec: string,
@@ -146,17 +148,35 @@ export function getDecoderConfig(
   height: number,
   description?: Uint8Array
 ): VideoDecoderConfig {
-  return {
-    codec,
+  // Normalize codec string for WebCodecs
+  // mp4box.js may return "avc1.64001f" or similar, which is valid for WebCodecs
+  // But ensure we have a proper codec string
+  let normalizedCodec = codec;
+  if (codec.startsWith('avc') && !codec.startsWith('avc1.')) {
+    // Convert "avc3.X" to "avc1.X" for WebCodecs compatibility
+    normalizedCodec = 'avc1.' + codec.substring(4);
+  }
+
+  const config: VideoDecoderConfig = {
+    codec: normalizedCodec,
     codedWidth: width,
     codedHeight: height,
-    description,
   };
+
+  // For H.264, the description field is REQUIRED
+  // It must contain the AVCC (AVCDecoderConfigurationRecord) bytes
+  if (normalizedCodec.startsWith('avc1') && description) {
+    config.description = description;
+  }
+
+  return config;
 }
 
 /**
  * Determine the encoder config for a given codec.
  * Maps codec strings to the correct WebCodecs encoder configuration.
+ * For H.264 with mp4-muxer, format='avc' is required to produce
+ * AVCC-formatted output (length-prefixed NALUs).
  */
 export function getEncoderConfig(
   codec: string,
@@ -165,21 +185,25 @@ export function getEncoderConfig(
   framerate: number,
   bitrate: number
 ): VideoEncoderConfig {
-  // For H.264, specify AVC (H.264) format
   const isAvc = codec.startsWith('avc1');
   const isVp9 = codec.startsWith('vp09');
   const isVp8 = codec === 'vp8';
 
-  return {
+  const config: VideoEncoderConfig = {
     codec,
     width,
     height,
     framerate,
     bitrate,
-    ...(isAvc && { format: 'avc' as const }),
-    ...(isVp9 && { format: 'ivf' as const }),
-    ...(isVp8 && { format: 'ivf' as const }),
   };
+
+  // For H.264, specify 'avc' format (AVCC length-prefixed NALUs)
+  // This is required for mp4-muxer to properly handle the output
+  if (isAvc) {
+    (config as Record<string, unknown>).format = 'avc';
+  }
+
+  return config;
 }
 
 /**

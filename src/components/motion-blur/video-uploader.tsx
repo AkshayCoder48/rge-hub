@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Upload, Film, AlertCircle, ShieldCheck, FileVideo } from 'lucide-react';
 import { isWebCodecsSupported, MP4Demuxer } from '@/lib/video';
 import type { VideoMetadata } from '@/lib/video';
@@ -30,7 +30,13 @@ export function VideoUploader({ onFileSelected }: VideoUploaderProps) {
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [webCodecsSupported] = useState(() => isWebCodecsSupported());
+  const [webCodecsSupported, setWebCodecsSupported] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    setWebCodecsSupported(isWebCodecsSupported());
+  }, []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -106,8 +112,8 @@ export function VideoUploader({ onFileSelected }: VideoUploaderProps) {
     [handleFiles]
   );
 
-  // WebCodecs not supported error
-  if (!webCodecsSupported) {
+  // WebCodecs not supported error (only show after client hydration)
+  if (mounted && !webCodecsSupported) {
     return (
       <div className="w-full max-w-2xl mx-auto">
         <div className="rounded-2xl bg-[#0f0f17] border border-red-500/20 p-8 md:p-12 flex flex-col items-center justify-center gap-4">
