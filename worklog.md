@@ -220,3 +220,143 @@ Stage Summary:
 - Clips over 10s default to 10s trim (user can adjust via slider)
 - New Vercel project deployed: https://speedramp-pro.vercel.app
 - API confirmed: trimDuration default is now 10 (was 1)
+
+---
+Task ID: 8
+Agent: video-engine
+Task: Create client-side video motion blur processing engine (WebCodecs API)
+
+Work Log:
+- Created 8 files in src/lib/video/ implementing a complete client-side video motion blur processor
+- All processing uses WebCodecs API (VideoDecoder, VideoEncoder, VideoFrame) — zero backend API routes
+- Files created:
+  1. types.ts — Shared interfaces: MotionBlurConfig, VideoMetadata, ProcessingProgress, ProcessingResult, DemuxResult, SampleInfo, AudioTrackData, DEFAULT_MOTION_BLUR_CONFIG
+  2. codec-detection.ts — WebCodecs availability check, codec support testing (H.264 → VP9 → VP8 priority chain), encoder/decoder config generation, muxer codec mapping
+  3. bitrate-calculator.ts — Resolution-tiered bitrate calculation (480p: 2-4Mbps, 720p: 4-8Mbps, 1080p: 8-15Mbps, 4K: 20-40Mbps) with quality multiplier (performance=0.6, balanced=1.0, quality=1.5) and FPS scaling
+  4. mp4-demuxer.ts — MP4Demuxer class using mp4box.js: extracts track info (codec, width, height, fps, duration, AVCC description), collects video/audio samples, converts to EncodedVideoChunk, includes static extractMetadata() for lightweight probing
+  5. temporal-blur.ts — TemporalBlurProcessor class: Canvas 2D weighted alpha compositing, rolling frame buffer bounded to blurAmount, linear weight generation (normalized sum=1), blurStrength interpolation between original and blended frames, proper VideoFrame.close() lifecycle management
+  6. mp4-muxer-wrapper.ts — MP4MuxerWrapper class using mp4-muxer: configures video track with codec/width/height, addVideoChunk() and addVideoChunkRaw() methods, 'in-memory' fastStart for moov-before-mdat, finalize() returns Blob
+  7. video-processor.ts — VideoMotionBlurProcessor orchestrator: full pipeline demux→decode→blur→encode→mux, AbortController cancellation, progress reporting with stage/percent/elapsed/estimatedRemaining, VideoEncoder.isConfigSupported() and VideoDecoder.isConfigSupported() verification before configuration, comprehensive finally-block cleanup
+  8. index.ts — Barrel export re-exporting all types, classes, and functions
+- Key design decisions:
+  - NO hardcoded 1280x720, 30fps, or 5Mbps — all values derived from source video
+  - Rolling frame buffer never grows beyond blurAmount (bounded memory)
+  - Every VideoFrame is closed after use (no leaks)
+  - Timestamps preserved through the pipeline
+  - Codec fallback chain ensures broad browser compatibility
+  - Blur strength allows fine control: 0=no blur, 1=full temporal blend
+- Lint check passes clean
+- No API routes created — purely client-side processing
+
+Stage Summary:
+- 8 production-ready TypeScript files in src/lib/video/
+- Full WebCodecs pipeline: demux → decode → blur → encode → mux
+- Uses mp4box.js for demuxing, mp4-muxer for muxing (both already in package.json)
+- Resolution-aware bitrate calculation with quality presets
+- Proper memory management with VideoFrame.close() lifecycle
+- Cancellation support via AbortController
+- Barrel export via index.ts for clean imports
+
+---
+Task ID: 9
+Agent: ui-components
+Task: Create client-side UI components for Video Motion Blur feature
+
+Work Log:
+- Created 6 React components in src/components/motion-blur/:
+  1. video-uploader.tsx — Drag-and-drop + file picker upload zone
+     - Visual drag feedback with orange accent
+     - Accepts .mp4, .webm, .mov
+     - Uses MP4Demuxer.extractMetadata() for lightweight metadata extraction
+     - Shows file metadata (filename, duration, resolution, fps, file size) after upload
+     - WebCodecs unsupported error state with red accent
+     - Privacy notice: "Your video is processed locally in your browser"
+     - Loading spinner during metadata extraction
+  2. blur-controls.tsx — Settings panel for motion blur configuration
+     - Blur Amount: slider 1-10 with numbered tick marks, default 5
+     - Blur Strength: slider 0-100% (mapped to 0-1 internally), default 80%
+     - Quality: select dropdown (Performance/Balanced/Quality) with description
+     - Output Format: select dropdown (MP4/WebM)
+     - Orange→cyan gradient "Apply Motion Blur" button, disabled when processing
+  3. processing-progress.tsx — Progress display during video processing
+     - Stage indicator with emoji icons (Demuxing/Decoding/Applying Motion Blur/Encoding/Finalizing/Complete)
+     - Gradient progress bar (orange→cyan)
+     - Frame counter (Frame X / Total)
+     - Elapsed and estimated remaining time in formatted display
+     - "Please keep this tab open" warning with amber accent
+     - Cancel button that calls onCancel()
+  4. video-preview.tsx — Side-by-side video preview
+     - Original video from File URL (left/top)
+     - Processed video from Blob URL (right/bottom)
+     - Responsive: side-by-side on desktop (sm:grid-cols-2), stacked on mobile
+     - Proper Blob URL memory cleanup via useMemo + useEffect revocation
+     - Cyan accent border on processed video panel
+  5. output-panel.tsx — Post-processing result panel
+     - "Motion Blur Complete!" heading with cyan CheckCircle2 icon
+     - Input→Output filename transformation with arrow
+     - Output file details (size, resolution, fps, duration)
+     - Cyan gradient Download button
+     - "Process Another Video" reset button
+  6. motion-blur-app.tsx — Main orchestrator with state machine
+     - Phase state machine: upload → configure → processing → done
+     - On file selected: extract metadata, move to configure phase
+     - On apply: create VideoMotionBlurProcessor, call process() with progress callback
+     - On complete: store result, move to done phase
+     - On cancel: call processor.cancel(), go back to configure
+     - On reset: cleanup all state, go back to upload phase
+     - Error handling with toast notifications (AbortError for cancel, other errors)
+     - File info summary in configure phase with "Change video" link
+- Updated page.tsx to render MotionBlurApp as the main page
+  - Dark theme bg-[#0a0a0f] with orange/cyan gradient accents
+  - Hero section with feature badges (Temporal Frame Blend, WebCodecs Powered, 100% Private)
+  - Header with gradient title and capability badges
+  - Footer with privacy notice
+  - Global styles: custom scrollbar, range slider styling, fade-in animation
+- Lint check passes clean (0 errors, 0 warnings)
+- Dev server running and serving pages correctly (GET / 200)
+
+Stage Summary:
+- 6 production-ready React components in src/components/motion-blur/
+- All components use 'use client' directive
+- All processing is CLIENT-SIDE — no API routes
+- Dark theme design matching existing project style (bg-[#0a0a0f], orange/cyan accents, rounded-2xl cards)
+- Proper memory management: all Blob URLs revoked on cleanup
+- Graceful error handling with toast notifications
+- Responsive design with mobile-first approach
+- State machine orchestrator with 4 phases (upload/configure/processing/done)
+
+---
+Task ID: 8
+Agent: main
+Task: Build client-side Video Motion Blur feature and deploy
+
+Work Log:
+- Installed mp4box@2.4.1 and mp4-muxer@5.2.2 npm packages
+- Built core video processing engine in src/lib/video/:
+  - types.ts: MotionBlurConfig, VideoMetadata, ProcessingProgress, ProcessingResult, DEFAULT_MOTION_BLUR_CONFIG
+  - codec-detection.ts: isWebCodecsSupported(), findSupportedDecoderCodec(), findSupportedEncoderCodec(), codec priority chain (H.264→VP9→VP8)
+  - bitrate-calculator.ts: calculateBitrate() with resolution-tiered strategy (no hardcoded 5Mbps)
+  - mp4-demuxer.ts: MP4Demuxer class with demux() and extractMetadata(), using mp4box.js createFile()
+  - temporal-blur.ts: TemporalBlurProcessor with rolling frame buffer, weighted alpha compositing
+  - mp4-muxer-wrapper.ts: MP4MuxerWrapper using mp4-muxer with ArrayBufferTarget
+  - video-processor.ts: VideoMotionBlurProcessor orchestrating demux→decode→blur→encode→mux pipeline
+  - index.ts: Barrel exports
+- Built UI components in src/components/motion-blur/:
+  - video-uploader.tsx: Drag-and-drop with WebCodecs check and privacy notice
+  - blur-controls.tsx: Blur Amount (1-10), Blur Strength (0-100%), Quality dropdown, Output Format
+  - processing-progress.tsx: Stage indicator, progress bar, frame counter, cancel button
+  - video-preview.tsx: Side-by-side original/processed video preview
+  - output-panel.tsx: Download button, process another video, file info
+  - motion-blur-app.tsx: 4-phase state machine (upload→configure→processing→done)
+- Built speed-ramp-app.tsx: Wrapper for original Speed Ramp feature
+- Rebuilt page.tsx: Tabbed interface with "Speed Ramp" and "Motion Blur" tabs
+- Fixed mp4box import: default export doesn't exist, used named import { createFile } from 'mp4box'
+- Cleaned up all lint warnings
+- Browser tested: both tabs work, no errors
+- Deployed to https://speedramp-pro.vercel.app (200 OK)
+
+Stage Summary:
+- Complete client-side motion blur feature with WebCodecs pipeline
+- Both Speed Ramp (server-side FFmpeg) and Motion Blur (client-side WebCodecs) available via tabs
+- All processing is local for motion blur — video never leaves the browser
+- Deployed live at https://speedramp-pro.vercel.app
