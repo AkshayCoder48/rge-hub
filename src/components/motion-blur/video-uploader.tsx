@@ -113,9 +113,10 @@ export function VideoUploader({ onFileSelected }: VideoUploaderProps) {
   );
 
   // WebCodecs not supported error (only show after client hydration)
+  // Using mounted gate to prevent SSR hydration mismatch — server never renders this
   if (mounted && !webCodecsSupported) {
     return (
-      <div className="w-full max-w-2xl mx-auto">
+      <div className="w-full max-w-2xl mx-auto" suppressHydrationWarning>
         <div className="rounded-2xl bg-[#0f0f17] border border-red-500/20 p-8 md:p-12 flex flex-col items-center justify-center gap-4">
           <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center">
             <AlertCircle className="w-8 h-8 text-red-400" />

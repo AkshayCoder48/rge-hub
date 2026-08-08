@@ -159,6 +159,16 @@ export class VideoMotionBlurProcessor {
       const bitrate = calculateBitrate(width, height, fps, config.quality);
 
       // === STAGE 3: Set up decoder ===
+      // For H.264 (AVC) codecs, the description field (AVCC config record) is REQUIRED.
+      // Without it, VideoDecoder will throw: "A key frame is required after configure() or flush().
+      // If you're using AVC formatted H.264 you must fill out the description field."
+      if (sourceCodec.startsWith('avc') && !description) {
+        throw new Error(
+          'H.264 video requires AVCC decoder configuration record, but it was not found in the file. ' +
+          'This is required by the WebCodecs VideoDecoder. The video may be corrupted or use an unsupported container format.'
+        );
+      }
+
       const decoderConfig = getDecoderConfig(sourceCodec, width, height, description);
 
       // Verify decoder config is supported

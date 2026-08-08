@@ -33,6 +33,7 @@ export class MP4Demuxer {
       let videoDuration = 0;
       let videoTotalFrames = 0;
       let videoDescription: Uint8Array | undefined;
+      let videoDescriptionExtracted = false;
 
       let audioCodec = '';
       let audioSampleRate = 44100;
@@ -77,40 +78,9 @@ export class MP4Demuxer {
               videoDuration = Math.round((track.duration / track.timescale) * 1_000_000);
             }
 
-            // Extract AVCC description for H.264
-            if (track.codec?.startsWith('avc')) {
-              const sd = track.sampleDescriptions?.[0];
-              if (sd?.avcC) {
-                const avcc = sd.avcC;
-                const sps = avcc.PS as Uint8Array;
-                const pps = avcc.PS2 as Uint8Array;
-                if (sps && pps) {
-                  // Build AVCC (AVCConfigurationBox) bytes for WebCodecs VideoDecoder description
-                  // Format: version(1) + profile(1) + compatibility(1) + level(1) +
-                  //         lengthSizeMinusOne(1) + numSPS(1) + spsLength(2) + sps + numPPS(1) + ppsLength(2) + pps
-                  const bytes = new Uint8Array(8 + sps.length + pps.length);
-                  let offset = 0;
-                  bytes[offset++] = 1; // configurationVersion
-                  bytes[offset++] = avcc.AVCProfileIndication;
-                  bytes[offset++] = avcc.profile_compatibility;
-                  bytes[offset++] = avcc.AVCLevelIndication;
-                  bytes[offset++] = 0xFF; // lengthSizeMinusOne = 3 (4-byte NALU lengths), with 6 reserved bits set to 1
-                  bytes[offset++] = 0xE1; // numOfSequenceParameterSets = 1, with 3 reserved bits set to 1
-                  // SPS length (big-endian 16-bit)
-                  bytes[offset++] = (sps.length >> 8) & 0xFF;
-                  bytes[offset++] = sps.length & 0xFF;
-                  bytes.set(sps, offset);
-                  offset += sps.length;
-                  // numOfPictureParameterSets
-                  bytes[offset++] = 1;
-                  // PPS length (big-endian 16-bit)
-                  bytes[offset++] = (pps.length >> 8) & 0xFF;
-                  bytes[offset++] = pps.length & 0xFF;
-                  bytes.set(pps, offset);
-                  videoDescription = bytes;
-                }
-              }
-            }
+            // NOTE: AVCC description extraction is done in onSamples callback
+            // where sample.description gives us access to the parsed avcC box.
+            // The onReady info.tracks don't expose sampleDescriptions directly.
             mp4file.setExtractionOptions(track.id, null, { nbSamples: 1024 });
           }
 
@@ -136,6 +106,44 @@ export class MP4Demuxer {
           const isKeyFrame = !!sample.is_sync;
 
           if (trackId === videoTrackId) {
+            // Extract AVCC description from the first video sample's description entry
+            // mp4box.js provides sample.description which is the sample entry (e.g., avc1SampleEntry)
+            // with an avcC property containing the parsed AVCConfigurationBox
+            if (!videoDescriptionExtracted && sample.description?.avcC) {
+              videoDescriptionExtracted = true;
+              const avcc = sample.description.avcC;
+              // avcc.SPS and avcc.PPS are ParameterSetArrays
+              // Each item is { length: number, data: Uint8Array }
+              const spsEntry = avcc.SPS?.[0];
+              const ppsEntry = avcc.PPS?.[0];
+              if (spsEntry?.data && ppsEntry?.data) {
+                const sps = spsEntry.data as Uint8Array;
+                const pps = ppsEntry.data as Uint8Array;
+                // Build AVCC (AVCDecoderConfigurationRecord) bytes for WebCodecs VideoDecoder description
+                // Format: version(1) + profile(1) + compatibility(1) + level(1) +
+                //         lengthSizeMinusOne(1) + numSPS(1) + spsLength(2) + sps + numPPS(1) + ppsLength(2) + pps
+                const bytes = new Uint8Array(8 + sps.length + pps.length);
+                let offset = 0;
+                bytes[offset++] = 1; // configurationVersion
+                bytes[offset++] = avcc.AVCProfileIndication;
+                bytes[offset++] = avcc.profile_compatibility;
+                bytes[offset++] = avcc.AVCLevelIndication;
+                bytes[offset++] = 0xFF; // lengthSizeMinusOne = 3 (4-byte NALU lengths), with 6 reserved bits set to 1
+                bytes[offset++] = 0xE1; // numOfSequenceParameterSets = 1, with 3 reserved bits set to 1
+                // SPS length (big-endian 16-bit)
+                bytes[offset++] = (sps.length >> 8) & 0xFF;
+                bytes[offset++] = sps.length & 0xFF;
+                bytes.set(sps, offset);
+                offset += sps.length;
+                // numOfPictureParameterSets
+                bytes[offset++] = 1;
+                // PPS length (big-endian 16-bit)
+                bytes[offset++] = (pps.length >> 8) & 0xFF;
+                bytes[offset++] = pps.length & 0xFF;
+                bytes.set(pps, offset);
+                videoDescription = bytes;
+              }
+            }
             videoSamples.push({ data: sampleData, timestamp, duration, isKeyFrame });
           } else if (trackId === audioTrackId) {
             audioSamples.push({ data: sampleData, timestamp, duration, isKeyFrame });
@@ -157,6 +165,13 @@ export class MP4Demuxer {
 
       setTimeout(() => { if (!resolved) finish(); }, 30_000);
     });
+  }
+
+  /**
+   * Dispose of any resources held by the demuxer.
+   */
+  dispose(): void {
+    // No persistent resources to clean up — demuxer is stateless after demux() completes
   }
 
   /**
