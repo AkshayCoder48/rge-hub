@@ -775,3 +775,42 @@ Stage Summary:
 - All OnyxBase API keys kept server-side (never exposed to browser)
 - Session management via httpOnly cookies + OnyxBase KV
 - Deployed live at https://speedramp-pro.vercel.app
+---
+Task ID: 14
+Agent: main
+Task: Remove API key sign-in, fix email OTP, use OnyxBase native auth (email+password)
+
+Work Log:
+- Researched correct OnyxBase API via https://onyxbase-phi.vercel.app/llms.txt:
+  - Registration: POST /api/auth/register {name, email, password} → returns {apiKey, userId, name, email}
+  - Login: POST /api/auth/login {email, password} → returns {apiKey, userId, name, email, plan}
+  - Users do NOT need to provide API keys — OnyxBase manages auth with email+password
+  - Email: POST /api/email/send with {credential, to, subject, body, htmlBody} — verified working
+- Sent test email to k77893301@gmail.com via OnyxBase Email Automation API — delivered successfully (request_id: req__lvcgp4refx_-dzquavrjw, status: sent)
+- Added registerByEmailPassword() and loginByEmailPassword() to onyxbase.ts — call OnyxBase's native auth endpoints
+- Rewrote /api/auth/register route: calls OnyxBase register {name, email, password} → gets apiKey → creates platform profile → creates session
+- Rewrote /api/auth/login route: calls OnyxBase login {email, password} → gets apiKey → gets/creates profile → creates session
+- Rewrote auth-screen.tsx:
+  - REMOVED "I have an API key" option entirely
+  - New flow: intro → [Sign in with password | Create new account]
+  - Sign in: email + password → OnyxBase login
+  - Create account: email → OTP verification → username + display name + password → OnyxBase register
+  - No API key input anywhere in the UI
+  - Password field with lock icon, username field with user icon
+  - Enter key submits forms
+- Verified end-to-end:
+  - OTP send to k77893301@gmail.com: success (rate limited 1/min, works correctly)
+  - Login with test account (test+rge@example.com / testpass123): success, platform loads
+  - No console errors, no page errors
+  - Rate limiting working ("Please wait Xs before requesting another code")
+- Deployed to https://speedramp-pro.vercel.app
+  - OTP send on production: success
+  - Login on production: success
+
+Stage Summary:
+- API key sign-in completely removed — users authenticate with email + password via OnyxBase
+- Email OTP working correctly via OnyxBase Email Automation API (credential: Email_Verification)
+- Registration flow: email → OTP → username + display name + password → OnyxBase account created
+- Login flow: email + password → OnyxBase verifies → session created
+- Test email sent to k77893301@gmail.com — delivered successfully
+- Deployed live at https://speedramp-pro.vercel.app

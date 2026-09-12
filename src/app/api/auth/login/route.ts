@@ -1,64 +1,64 @@
 /**
  * POST /api/auth/login
- * Login with OnyxBase API key.
- * Verifies the key and creates a session.
+ * Login with email + password via OnyxBase's native auth.
  *
- * Body: { apiKey }
+ * Body: { email, password }
+ *
+ * Flow:
+ * 1. Call OnyxBase /api/auth/login with {email, password}
+ * 2. OnyxBase returns apiKey + userId + name
+ * 3. Get or create platform profile
+ * 4. Create session
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyApiKey } from '@/lib/onyxbase';
+import { loginByEmailPassword } from '@/lib/onyxbase';
 import { getProfile, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 
 export async function POST(request: NextRequest) {
   try {
-    const { apiKey } = await request.json();
-    if (!apiKey || !apiKey.startsWith('kv_live_')) {
+    const { email, password } = await request.json();
+    if (!email || !password) {
       return NextResponse.json(
-        { ok: false, error: 'Valid OnyxBase API key required' },
+        { ok: false, error: 'Email and password are required' },
         { status: 400 }
       );
     }
 
-    // Verify the key
-    const onyxUser = await verifyApiKey(apiKey);
-    if (!onyxUser) {
+    // Login via OnyxBase (verifies credentials, returns API key)
+    const loginResult = await loginByEmailPassword(email, password);
+    if (!loginResult.ok || !loginResult.apiKey) {
       return NextResponse.json(
-        { ok: false, error: 'Invalid API key' },
+        { ok: false, error: loginResult.error || 'Invalid email or password' },
         { status: 400 }
       );
     }
 
-    // Get or create profile
-    let profile = await getProfile(onyxUser.userId);
+    // Get or create platform profile
+    let profile = await getProfile(loginResult.userId!);
     if (!profile) {
       // Auto-create a minimal profile for first login
       const now = new Date().toISOString();
-      const username = onyxUser.name?.toLowerCase().replace(/\s+/g, '') || `user_${onyxUser.userId.slice(-6)}`;
+      const username = (loginResult.name || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '') || `user_${loginResult.userId!.slice(-6)}`;
       profile = {
-        userId: onyxUser.userId,
+        userId: loginResult.userId!,
         username,
-        displayName: onyxUser.name || username,
+        displayName: loginResult.name || username,
         avatar: '',
         bio: '',
-        email: onyxUser.email || '',
-        apiKey,
+        email: loginResult.email || email.toLowerCase().trim(),
+        apiKey: loginResult.apiKey,
         createdAt: now,
         updatedAt: now,
       } as Profile;
-      const profileCreated = await upsertProfile(profile);
-      if (!profileCreated) {
-        console.error('[login] Failed to create profile for user:', onyxUser.userId);
-      } else {
-        console.log('[login] Profile created for:', onyxUser.userId, 'username:', username);
-      }
-    }
-
-    // Update API key in case it changed
-    if (profile.apiKey !== apiKey) {
-      profile.apiKey = apiKey;
-      profile.updatedAt = new Date().toISOString();
       await upsertProfile(profile);
+    } else {
+      // Update API key in case it changed
+      if (profile.apiKey !== loginResult.apiKey) {
+        profile.apiKey = loginResult.apiKey;
+        profile.updatedAt = new Date().toISOString();
+        await upsertProfile(profile);
+      }
     }
 
     const isAdmin = isAdminUser({
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
       email: profile.email,
     });
 
-    const session = await createSession({
+    await createSession({
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,

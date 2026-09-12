@@ -313,8 +313,76 @@ export async function sendEmail(
 // ============ Auth ============
 
 /**
+ * Register a new OnyxBase account using email + password.
+ * OnyxBase creates the account and returns an API key.
+ * This does NOT require a master key — it's a public endpoint.
+ *
+ * Returns { ok, userId?, apiKey?, name?, email?, error? }
+ */
+export async function registerByEmailPassword(
+  name: string,
+  email: string,
+  password: string
+): Promise<{ ok: boolean; userId?: string; apiKey?: string; name?: string; email?: string; error?: string }> {
+  try {
+    const res = await fetch(`${ONYXBASE_BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      return {
+        ok: true,
+        userId: data.userId,
+        apiKey: data.apiKey,
+        name: data.name,
+        email: data.email,
+      };
+    }
+    return { ok: false, error: data.error || 'Registration failed' };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Login to an existing OnyxBase account using email + password.
+ * OnyxBase verifies credentials and returns the API key.
+ * This does NOT require a master key — it's a public endpoint.
+ *
+ * Returns { ok, userId?, apiKey?, name?, email?, plan?, error? }
+ */
+export async function loginByEmailPassword(
+  email: string,
+  password: string
+): Promise<{ ok: boolean; userId?: string; apiKey?: string; name?: string; email?: string; plan?: string; error?: string }> {
+  try {
+    const res = await fetch(`${ONYXBASE_BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      return {
+        ok: true,
+        userId: data.userId,
+        apiKey: data.apiKey,
+        name: data.name,
+        email: data.email,
+        plan: data.plan,
+      };
+    }
+    return { ok: false, error: data.error || 'Login failed' };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
  * Verify an OnyxBase user API key (returns user info).
- * This is used to verify user-provided keys during login.
+ * Used internally to validate keys.
  */
 export async function verifyApiKey(apiKey: string): Promise<OnyxUser | null> {
   try {

@@ -1,45 +1,43 @@
 /**
  * POST /api/auth/register
- * Register a new user with email, username, display name, and OnyxBase API key.
+ * Register a new user via OnyxBase's native auth (email + password).
  * Email must be OTP-verified before calling this endpoint.
  *
  * Body: {
- *   email, username, displayName, apiKey, avatar?, bio?
+ *   email,          // verified email
+ *   username,       // platform username
+ *   displayName,    // display name
+ *   password,       // password for OnyxBase account
+ *   avatar?, bio?
  * }
  *
- * The user provides their own OnyxBase API key (kv_live_*).
- * We verify it via OnyxBase /api/auth/verify, then create a profile.
+ * Flow:
+ * 1. Call OnyxBase /api/auth/register with {name, email, password}
+ * 2. OnyxBase returns apiKey + userId
+ * 3. Create platform profile in OnyxBase KV
+ * 4. Create session
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyApiKey, ONYXBASE_COLLECTIONS } from '@/lib/onyxbase';
-import { getProfile, getProfileByUsername, upsertProfile, type Profile } from '@/lib/resources';
+import { registerByEmailPassword } from '@/lib/onyxbase';
+import { getProfileByUsername, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { email, username, displayName, apiKey, avatar, bio } = body;
+    const { email, username, displayName, password, avatar, bio } = body;
 
     // Validate
-    if (!email || !username || !displayName || !apiKey) {
+    if (!email || !username || !displayName || !password) {
       return NextResponse.json(
-        { ok: false, error: 'Email, username, display name, and API key are required' },
+        { ok: false, error: 'Email, username, display name, and password are required' },
         { status: 400 }
       );
     }
 
-    if (!apiKey.startsWith('kv_live_')) {
+    if (password.length < 6) {
       return NextResponse.json(
-        { ok: false, error: 'Invalid OnyxBase API key format. Keys start with kv_live_' },
-        { status: 400 }
-      );
-    }
-
-    // Verify the API key with OnyxBase
-    const onyxUser = await verifyApiKey(apiKey);
-    if (!onyxUser) {
-      return NextResponse.json(
-        { ok: false, error: 'Invalid OnyxBase API key. Please check your key from onyxbase-phi.vercel.app' },
+        { ok: false, error: 'Password must be at least 6 characters' },
         { status: 400 }
       );
     }
@@ -53,25 +51,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if user already has a profile (same OnyxBase userId)
-    const existingProfile = await getProfile(onyxUser.userId);
-    if (existingProfile) {
+    // Register with OnyxBase (creates the OnyxBase account)
+    const regResult = await registerByEmailPassword(displayName, email, password);
+    if (!regResult.ok || !regResult.apiKey) {
       return NextResponse.json(
-        { ok: false, error: 'Account already exists for this OnyxBase key. Please login instead.' },
+        { ok: false, error: regResult.error || 'Registration failed on OnyxBase' },
         { status: 400 }
       );
     }
 
-    // Create profile
+    // Create platform profile
     const now = new Date().toISOString();
     const profile: Profile = {
-      userId: onyxUser.userId,
+      userId: regResult.userId!,
       username: username.toLowerCase().trim(),
       displayName: displayName.trim(),
       avatar: avatar || '',
       bio: bio || '',
       email: email.toLowerCase().trim(),
-      apiKey, // store the user's own key for file operations
+      apiKey: regResult.apiKey,
       createdAt: now,
       updatedAt: now,
     };
@@ -79,10 +77,14 @@ export async function POST(request: NextRequest) {
     await upsertProfile(profile);
 
     // Check if this is the admin
-    const isAdmin = isAdminUser({ username: profile.username, displayName: profile.displayName, email: profile.email });
+    const isAdmin = isAdminUser({
+      username: profile.username,
+      displayName: profile.displayName,
+      email: profile.email,
+    });
 
     // Create session
-    const session = await createSession({
+    await createSession({
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,

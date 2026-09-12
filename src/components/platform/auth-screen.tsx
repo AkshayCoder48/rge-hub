@@ -2,8 +2,8 @@
 
 import React, { useState, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
-import { NavigationPill, AmbientOrbs, ShinyBorderButton } from '@/components/synapse';
-import { Zap, Mail, ArrowRight, ArrowLeft, Loader2, ShieldCheck, Film, CheckCircle2 } from 'lucide-react';
+import { AmbientOrbs } from '@/components/synapse';
+import { Zap, Mail, ArrowRight, ArrowLeft, Loader2, ShieldCheck, Film, CheckCircle2, Lock, User as UserIcon } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 type Step = 'intro' | 'email' | 'otp' | 'register' | 'login';
@@ -16,9 +16,9 @@ export function AuthScreen() {
   const [otp, setOtp] = useState('');
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [apiKey, setApiKey] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [otpSent, setOtpSent] = useState(false);
 
   const handleSendOtp = useCallback(async () => {
     if (!email || !email.includes('@')) {
@@ -34,7 +34,6 @@ export function AuthScreen() {
       });
       const data = await res.json();
       if (data.ok) {
-        setOtpSent(true);
         setStep('otp');
         toast({ title: 'Code sent', description: 'Check your email for the 6-digit code' });
       } else {
@@ -61,6 +60,8 @@ export function AuthScreen() {
       });
       const data = await res.json();
       if (data.ok) {
+        // Pre-fill display name from email
+        if (!displayName) setDisplayName(email.split('@')[0]);
         setStep('register');
         toast({ title: 'Email verified!', description: 'Complete your registration' });
       } else {
@@ -71,11 +72,15 @@ export function AuthScreen() {
     } finally {
       setLoading(false);
     }
-  }, [email, otp, toast]);
+  }, [email, otp, displayName, toast]);
 
   const handleRegister = useCallback(async () => {
-    if (!username || !displayName || !apiKey) {
+    if (!username || !displayName || !password) {
       toast({ title: 'Missing fields', description: 'All fields are required', variant: 'destructive' });
+      return;
+    }
+    if (password.length < 6) {
+      toast({ title: 'Weak password', description: 'Password must be at least 6 characters', variant: 'destructive' });
       return;
     }
     setLoading(true);
@@ -83,7 +88,7 @@ export function AuthScreen() {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, username, displayName, apiKey }),
+        body: JSON.stringify({ email, username, displayName, password }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -97,11 +102,11 @@ export function AuthScreen() {
     } finally {
       setLoading(false);
     }
-  }, [email, username, displayName, apiKey, refresh, toast]);
+  }, [email, username, displayName, password, refresh, toast]);
 
   const handleLogin = useCallback(async () => {
-    if (!apiKey) {
-      toast({ title: 'Missing API key', description: 'Enter your OnyxBase API key', variant: 'destructive' });
+    if (!email || !loginPassword) {
+      toast({ title: 'Missing fields', description: 'Email and password required', variant: 'destructive' });
       return;
     }
     setLoading(true);
@@ -109,7 +114,7 @@ export function AuthScreen() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
+        body: JSON.stringify({ email, password: loginPassword }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -123,12 +128,10 @@ export function AuthScreen() {
     } finally {
       setLoading(false);
     }
-  }, [apiKey, refresh, toast]);
+  }, [email, loginPassword, refresh, toast]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6 py-12 relative z-10">
-      <NavigationPill />
-
       <div className="w-full max-w-md">
         {/* Logo / Brand */}
         <div className="text-center mb-10 animate-fade-up">
@@ -152,15 +155,15 @@ export function AuthScreen() {
                   Welcome
                 </h1>
                 <p className="text-sm text-neutral-400">
-                  Sign in with your OnyxBase API key, or create a new account.
+                  Sign in to your account or create a new one.
                 </p>
               </div>
               <button
                 onClick={() => setStep('login')}
                 className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white font-medium text-sm hover:from-violet-400 hover:to-cyan-400 transition-all duration-300 ease-snap shadow-[0_0_20px_-5px_rgba(139,92,246,0.4)]"
               >
-                <Zap className="w-4 h-4" />
-                I have an API key
+                <Lock className="w-4 h-4" />
+                Sign in with password
               </button>
               <div className="flex items-center gap-3">
                 <div className="flex-1 h-px bg-white/5" />
@@ -176,7 +179,7 @@ export function AuthScreen() {
               </button>
               <div className="flex items-center justify-center gap-1.5 pt-2 text-[10px] text-neutral-600">
                 <ShieldCheck className="w-3 h-3" />
-                <span>Powered by OnyxBase — secure email OTP verification</span>
+                <span>Secure email OTP verification via OnyxBase</span>
               </div>
             </div>
           )}
@@ -188,16 +191,27 @@ export function AuthScreen() {
               </button>
               <div>
                 <h2 className="font-serif-display text-2xl text-white mb-1">Sign in</h2>
-                <p className="text-xs text-neutral-500">Enter your OnyxBase API key</p>
+                <p className="text-xs text-neutral-500">Enter your email and password</p>
               </div>
               <div>
-                <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">OnyxBase API Key</label>
+                <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">Email</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">Password</label>
                 <input
                   type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="kv_live_..."
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white font-mono-display placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleLogin(); }}
+                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
                 />
               </div>
               <button
@@ -205,11 +219,8 @@ export function AuthScreen() {
                 disabled={loading}
                 className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white font-medium text-sm hover:from-violet-400 hover:to-cyan-400 disabled:opacity-50 transition-all duration-300 ease-snap"
               >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4" /> Sign In</>}
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Lock className="w-4 h-4" /> Sign In</>}
               </button>
-              <p className="text-[10px] text-neutral-600 text-center">
-                Get your free key at <span className="text-violet-400">onyxbase-phi.vercel.app</span>
-              </p>
             </div>
           )}
 
@@ -229,6 +240,7 @@ export function AuthScreen() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSendOtp(); }}
                   className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
                 />
               </div>
@@ -260,6 +272,7 @@ export function AuthScreen() {
                   value={otp}
                   onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
                   placeholder="000000"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp(); }}
                   className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-2xl text-center text-white font-mono-display tracking-[0.5em] placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
                 />
               </div>
@@ -278,19 +291,26 @@ export function AuthScreen() {
 
           {step === 'register' && (
             <div className="space-y-5">
+              <div className="flex items-center gap-2 text-xs text-emerald-400">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{email} verified</span>
+              </div>
               <div>
                 <h2 className="font-serif-display text-2xl text-white mb-1">Create account</h2>
-                <p className="text-xs text-neutral-500">Email verified ✓ — complete your profile</p>
+                <p className="text-xs text-neutral-500">Complete your profile to finish registration</p>
               </div>
               <div>
                 <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">Username</label>
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
-                  placeholder="railfan123"
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
-                />
+                <div className="relative">
+                  <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                    placeholder="railfan123"
+                    className="w-full pl-9 pr-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
+                  />
+                </div>
               </div>
               <div>
                 <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">Display Name</label>
@@ -303,16 +323,20 @@ export function AuthScreen() {
                 />
               </div>
               <div>
-                <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">OnyxBase API Key</label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="kv_live_..."
-                  className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white font-mono-display placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
-                />
+                <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2">Password</label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="At least 6 characters"
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleRegister(); }}
+                    className="w-full pl-9 pr-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors"
+                  />
+                </div>
                 <p className="text-[10px] text-neutral-600 mt-1.5">
-                  Get a free key at onyxbase-phi.vercel.app — used for file storage
+                  Your password is stored securely by OnyxBase — used for account recovery
                 </p>
               </div>
               <button
