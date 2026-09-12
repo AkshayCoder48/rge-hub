@@ -5,7 +5,7 @@
  * Query params:
  *   - type: 'image' | 'clip' | 'xml'
  *   - xmlSource: 'community' | 'admin' (only for type=xml)
- *   - owner: userId  (returns only that owner's resources; requires auth + own self)
+ *   - owner: userId
  *   - search: query string
  *   - published: 'true' | 'false' | 'all'  (default 'true')
  *
@@ -47,11 +47,14 @@ export async function GET(request: NextRequest) {
     const wantUnpublished = publishedParam === 'false';
     const wantAll = publishedParam === 'all';
 
-    const session = await getSession();
+    const sessionResult = await getSession();
+    const session = sessionResult.status === 'ok' ? sessionResult.session : null;
+    const isAuthenticated = session !== null;
+    const isAdmin = session?.isAdmin === true;
 
-    // Admin xmls are privileged
+    // Admin xmls are privileged — COMPLETELY hidden from non-admins
     if (type === 'xml' && xmlSource === 'admin') {
-      if (!session || !session.isAdmin) {
+      if (!isAuthenticated || !isAdmin) {
         return NextResponse.json(
           { ok: false, error: 'Admin access required' },
           { status: 403 }
@@ -60,7 +63,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Auth required when requesting unpublished resources
-    if (wantUnpublished && !session) {
+    if (wantUnpublished && !isAuthenticated) {
       return NextResponse.json(
         { ok: false, error: 'Authentication required to view unpublished resources' },
         { status: 401 }
@@ -68,7 +71,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Auth required when filtering by owner
-    if (owner && !session) {
+    if (owner && !isAuthenticated) {
       return NextResponse.json(
         { ok: false, error: 'Authentication required' },
         { status: 401 }
@@ -76,7 +79,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Non-admin requesting unpublished can only see their own
-    if (wantUnpublished && session && !session.isAdmin && owner && owner !== session.userId) {
+    if (wantUnpublished && isAuthenticated && !isAdmin && owner && owner !== session.userId) {
       return NextResponse.json(
         { ok: false, error: 'Cannot view another user\'s unpublished resources' },
         { status: 403 }
@@ -108,8 +111,8 @@ export async function GET(request: NextRequest) {
         resources = resources.filter(r => r.xmlSource === xmlSource);
       }
       // Non-admin sees only their own published resources unless wantUnpublished/own self
-      const isOwn = session && owner === session.userId;
-      if (!session?.isAdmin) {
+      const isOwn = isAuthenticated && owner === session.userId;
+      if (!isAdmin) {
         resources = isOwn && wantUnpublished
           ? resources
           : resources.filter(r => r.published);
@@ -117,34 +120,27 @@ export async function GET(request: NextRequest) {
     } else if (isResourceType(type)) {
       if (type === 'xml' && !isXmlSource(xmlSource)) {
         // No xmlSource provided — default to community for non-admins
-        // Admins can pass ?xmlSource=admin explicitly (handled above).
         resources = await listResources('xml', 'community');
       } else {
         resources = await listResources(type, isXmlSource(xmlSource) ? xmlSource : undefined);
       }
 
       // Visibility filtering
-      if (!session?.isAdmin) {
+      if (!isAdmin) {
         // Non-admins: only published unless it's their own
-        resources = resources.filter(r => r.published || (session && r.ownerId === session.userId));
+        resources = resources.filter(r => r.published || (isAuthenticated && r.ownerId === session.userId));
       }
       if (!wantAll && !wantUnpublished) {
         // published=true default — caller only wants published
-        // (but we keep own resources visible if user is owner — useful for "my drafts" toggle)
-        if (session) {
+        if (isAuthenticated) {
           resources = resources.filter(r => r.published || r.ownerId === session.userId);
         } else {
           resources = resources.filter(r => r.published);
         }
       }
     } else {
-      // No type filter → public feed (community only)
+      // No type filter → public feed (community only, never admin)
       resources = await listAllPublicResources();
-      // For admin, optionally include admin xmls as well if explicitly requested via xmlSource=admin
-      if (session?.isAdmin && xmlSource === 'admin') {
-        const adminXmls = await listResources('xml', 'admin');
-        resources = [...resources, ...adminXmls];
-      }
     }
 
     // Final sort by createdAt desc

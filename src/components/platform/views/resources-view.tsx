@@ -3,6 +3,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { Resource, ResourceType, XmlSource } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
+import { ResourceDetailModal } from '../resource-detail-modal';
+import { useAuth } from '@/lib/auth-context';
 import { useToast } from '@/hooks/use-toast';
 import {
   Image as ImageIcon,
@@ -20,6 +22,7 @@ interface ResourcesViewProps {
 }
 
 export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
+  const { user } = useAuth();
   const { toast } = useToast();
   const [resources, setResources] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,8 +30,11 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   const [search, setSearch] = useState('');
   const [xmlSource, setXmlSource] = useState<XmlSource>('community');
   const [xmlTab, setXmlTab] = useState<'community' | 'admin'>('community');
+  const [selected, setSelected] = useState<Resource | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const isXml = type === 'xml';
+  const isAdmin = !!user?.isAdmin;
 
   const typeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
   const TypeIcon = typeIcon;
@@ -77,12 +83,19 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [type, xmlSource, isXml, toast]);
+  }, [type, xmlSource, isXml, toast, refreshKey]);
 
   // Keep xmlSource state synced with tab state
   useEffect(() => {
     setXmlSource(xmlTab);
   }, [xmlTab]);
+
+  // Non-admins can only see the community tab; force it back if they somehow had admin selected
+  useEffect(() => {
+    if (isXml && !isAdmin && xmlTab === 'admin') {
+      setXmlTab('community');
+    }
+  }, [isXml, isAdmin, xmlTab]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return resources;
@@ -104,6 +117,38 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
     }
   };
 
+  const handleDelete = async (r: Resource) => {
+    if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return;
+    try {
+      const params = new URLSearchParams();
+      params.set('type', r.type);
+      if (r.xmlSource) params.set('xmlSource', r.xmlSource);
+      const res = await fetch(`/api/resources/${r.id}?${params.toString()}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.ok) {
+        toast({ title: 'Resource deleted', description: r.title });
+        setSelected(null);
+        setRefreshKey((k) => k + 1);
+      } else {
+        toast({ title: 'Delete failed', description: data.error || 'Unknown error', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Delete failed', description: 'Network error', variant: 'destructive' });
+    }
+  };
+
+  const handleUploadClick = () => {
+    onUpload();
+    // Bump refreshKey so the list re-fetches after the upload flow returns
+    // (covers the case where the user is already on this view and the parent
+    // does not remount it after a successful upload).
+    setRefreshKey((k) => k + 1);
+  };
+
+  const isOwn = (r: Resource) => !!user && r.ownerId === user.userId;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -122,7 +167,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
             </div>
           </div>
           <button
-            onClick={onUpload}
+            onClick={handleUploadClick}
             className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r ${ac.from} ${ac.to} text-white text-sm font-medium hover:opacity-90 transition-all duration-300 ease-snap shadow-[0_0_20px_-8px_rgba(139,92,246,0.6)]`}
           >
             <Upload className="w-4 h-4" /> Upload {type === 'image' ? 'Image' : type === 'clip' ? 'Clip' : 'XML'}
@@ -130,7 +175,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
         </div>
       </div>
 
-      {/* XML tabs */}
+      {/* XML tabs — only show admin tab if user is admin */}
       {isXml && (
         <div className="flex items-center gap-2 p-1 rounded-2xl bg-white/[0.02] border border-white/5 w-fit">
           <button
@@ -144,17 +189,19 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
             <FileCode className="w-3.5 h-3.5 inline mr-1.5 text-emerald-400" />
             Community XMLs
           </button>
-          <button
-            onClick={() => setXmlTab('admin')}
-            className={`px-4 py-1.5 rounded-xl text-xs font-medium transition-all duration-300 ease-snap ${
-              xmlTab === 'admin'
-                ? 'bg-white/[0.06] text-white border border-violet-500/20'
-                : 'text-neutral-500 hover:text-white'
-            }`}
-          >
-            <Crown className="w-3.5 h-3.5 inline mr-1.5 text-violet-400" />
-            Admin XMLs
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setXmlTab('admin')}
+              className={`px-4 py-1.5 rounded-xl text-xs font-medium transition-all duration-300 ease-snap ${
+                xmlTab === 'admin'
+                  ? 'bg-white/[0.06] text-white border border-violet-500/20'
+                  : 'text-neutral-500 hover:text-white'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5 inline mr-1.5 text-violet-400" />
+              Admin XMLs
+            </button>
+          )}
         </div>
       )}
 
@@ -194,7 +241,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
           </p>
           {!search && (
             <button
-              onClick={onUpload}
+              onClick={handleUploadClick}
               className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r ${ac.from} ${ac.to} text-white text-sm font-medium hover:opacity-90 transition-all duration-300`}
             >
               <Upload className="w-4 h-4" /> Upload now
@@ -207,11 +254,23 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
             <ResourceCard
               key={r.id}
               resource={r}
+              onClick={() => setSelected(r)}
               onDownload={() => handleDownload(r)}
               showOwner
             />
           ))}
         </div>
+      )}
+
+      {/* Resource detail modal */}
+      {selected && (
+        <ResourceDetailModal
+          resource={selected}
+          onClose={() => setSelected(null)}
+          onDownload={handleDownload}
+          canDelete={isOwn(selected)}
+          onDelete={handleDelete}
+        />
       )}
     </div>
   );

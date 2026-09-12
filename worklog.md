@@ -995,3 +995,152 @@ Stage Summary:
 - Profile customization with avatar upload and edit modal
 - All session reads are now 7ms (was 2.8s) — no OnyxBase dependency for session validation
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+Task ID: 7-views-fix
+Agent: sub-agent
+Task: Wire ResourceDetailModal into the 4 platform view components (resources, community, profile, home)
+
+Work Log:
+- Read /home/z/my-project/worklog.md for context (Tasks 6-profile, 15 prior work)
+- Read ResourceDetailModal props and contract: { resource, onClose, onDownload?, canEdit?, canDelete?, onDelete? }
+- Read ResourceCard props: { resource, onClick?, onDownload?, showOwner? } — already updated to use object-contain
+- Read auth context: useAuth() returns { user: { userId, username, displayName, avatar?, bio?, isAdmin } | null, status, refresh, logout }
+- Read platform-app.tsx: UploadModal.onSuccess triggers setView to the matching type tab (remounts view when navigating from a different tab, but does NOT remount if already on the same tab — this is why refreshKey matters)
+
+### 1. resources-view.tsx — rewrote end-to-end
+- Added imports: ResourceDetailModal, useAuth
+- Added state: selected (Resource | null), refreshKey (number)
+- Added isAdmin from useAuth
+- useEffect for fetching /api/resources/list?type=${type}&published=all now depends on [type, xmlSource, isXml, toast, refreshKey] — refreshKey bump triggers re-fetch
+- handleUploadClick wraps onUpload and bumps refreshKey so the list re-fetches after returning from the upload flow (covers same-tab case where parent doesn't remount)
+- handleDownload: window.open(r.downloadUrl, '_blank') with fallback toast
+- handleDelete: confirm() → DELETE /api/resources/${r.id}?type=${r.type} (&xmlSource if present) → toast success → setSelected(null) → bump refreshKey (which re-fetches the list)
+- isOwn helper: r.ownerId === user.userId
+- ResourceCard gets onClick={() => setSelected(r)} and onDownload={() => handleDownload(r)}
+- ResourceDetailModal rendered when selected !== null, with canDelete={isOwn(selected)} and onDelete={handleDelete}
+- XML tabs: "Admin XMLs" button only rendered if user.isAdmin — community XMLs always available
+- Added a useEffect to force xmlTab back to 'community' if a non-admin somehow had 'admin' selected (defensive guard)
+- Both "Upload {Type}" buttons (header + empty state) now use handleUploadClick
+
+### 2. community-view.tsx — minimal additions
+- Added import: ResourceDetailModal
+- Added state: selected (Resource | null)
+- ResourceCard gets onClick={() => setSelected(r)} (alongside existing onDownload)
+- Rendered <ResourceDetailModal resource={selected} onClose={...} onDownload={handleDownload} /> at the end (only when selected !== null)
+- handleDownload already does window.open(r.downloadUrl, '_blank')
+- Filter tabs (All/Images/Clips/XMLs), search, masonry grid all preserved
+- No delete capability in community view (resources are public from anyone)
+
+### 3. profile-view.tsx — minimal additions on top of the recently rebuilt view
+- Added import: ResourceDetailModal
+- Added state: selected (Resource | null)
+- ResourceCard in the grid now gets onClick={() => setSelected(r)} (alongside existing onDownload and the inline Download/Delete buttons below the card)
+- Rendered <ResourceDetailModal resource={selected} onClose={...} onDownload={handleDownload} canDelete={isOwnProfile} onDelete={handleDelete} /> after the EditProfileModal block
+- Reused the existing handleDelete callback (DELETE API call + toast + optimistic setResources filter)
+- Reused the existing handleDownload callback (window.open)
+- isOwnProfile drives canDelete — only own profile shows the delete action in the modal
+- Profile fetches from GET /api/profile/${user.username} via the existing fetchProfile useCallback — already returns both published and unpublished resources (the API includes own drafts)
+
+### 4. home-view.tsx — minimal additions
+- Added import: ResourceDetailModal
+- Added state: selected (Resource | null)
+- ResourceCard in the "Recently Added" grid now gets onClick={() => setSelected(r)}
+- Rendered <ResourceDetailModal resource={selected} onClose={...} onDownload={handleDownload} /> at the end
+- handleDownload already does window.open(r.downloadUrl, '_blank')
+
+### 5. resource-detail-modal.tsx — small pre-existing lint fix
+- Pre-existing lint error: "Calling setState synchronously within an effect can trigger cascading renders" on the ownerProfile useEffect
+- Refactored the useEffect: extracted ownerName, wrapped the synchronous setState calls (setLoadingOwner, setOwnerProfile) inside a queueMicrotask so they no longer run synchronously in the effect body
+- Added a `cancelled` flag for proper cleanup on rapid resource changes
+- Behavior preserved: owner profile is still resolved dynamically via GET /api/profile/[username] and falls back to resource.ownerName
+
+### Verification
+- bun run lint → 0 errors, 0 warnings (clean exit)
+- bunx tsc --noEmit → no errors in any of the 5 affected files (resources-view, community-view, profile-view, home-view, resource-detail-modal)
+- Imports verified: ResourceDetailModal from '../resource-detail-modal', ResourceCard from '../resource-card', useAuth from '@/lib/auth-context', useToast from '@/hooks/use-toast'
+
+### Behavior summary across views
+| View             | onClick opens modal | canDelete (own) | onDelete handler        | refreshKey |
+|------------------|---------------------|-----------------|-------------------------|------------|
+| resources-view   | yes                 | yes (ownerId match) | DELETE + toast + refetch | yes (after upload or delete) |
+| community-view   | yes                 | no              | n/a                     | n/a        |
+| profile-view     | yes                 | yes (isOwnProfile)  | DELETE + toast + optimistic filter | n/a (uses profileVersion) |
+| home-view        | yes                 | no              | n/a                     | n/a        |
+
+Stage Summary:
+- All 4 platform view components now open ResourceDetailModal when a card is clicked
+- Own-resource delete is wired in resources-view (via ownerId match) and profile-view (via isOwnProfile)
+- After delete, the list re-fetches (resources-view bumps refreshKey; profile-view uses optimistic filter)
+- After upload, resources-view re-fetches via refreshKey bump on upload click
+- XML admin tab in resources-view only renders for admins
+- ResourceDetailModal's lint error fixed (microtask-deferred setState in effect)
+- Lint clean, types clean
+---
+Task ID: 16
+Agent: main
+Task: Fix profile-based posting, image size, detail card, admin hiding, OnyxBase consistency
+
+Work Log:
+
+CRITICAL BUG FIX — Images not appearing on profile/community:
+- Root cause: getSession() was changed to return a discriminated union (SessionResult), but all API routes still checked `if (!session)` which was always truthy (the result is always an object)
+- This meant `session.userId` was `undefined`, so resources were created with `ownerId: undefined`
+- Fixed ALL API routes to use the correct pattern: `const sessionResult = await getSession(); if (sessionResult.status !== 'ok') return 401; const session = sessionResult.session;`
+- Routes fixed: /api/resources/upload, /api/resources/create, /api/resources/list, /api/resources/[id], /api/admin/stats
+
+Image Upload — Full Size Support:
+- Removed all arbitrary image size restrictions
+- Resource card changed from `object-cover` to `object-contain` — images display at their natural aspect ratio without cropping
+- Card preview uses flexible min/max height (120px-280px) instead of fixed `aspect-video`
+- No pixel-dimension restrictions in upload API or upload modal
+- Original file stored in OnyxBase, displayed at full resolution in detail modal
+
+Image Detail Card/Modal:
+- Created ResourceDetailModal component (src/components/platform/resource-detail-modal.tsx)
+- Shows full-resolution image preview (object-contain, max 50vh)
+- Dynamically resolves creator's current profile (not stale copy) — fetches /api/profile/{ownerName}
+- Shows: creator avatar+name (with admin crown badge), title, description, tags, published date, type
+- Actions: Download, Open full image, Share (copy URL), Delete (for owner)
+- All 4 views (home, resources, community, profile) now open this modal on resource card click
+- Modal closes without losing page position
+
+Profile-Based Posting:
+- ownerId assigned from authenticated session (server-side, never trusted from client)
+- After upload success, uploadVersion state increments → forces all views to re-mount and re-fetch
+- Resource key prop on all views: `key={`{view}-${uploadVersion}`}` ensures fresh data after upload
+- Images now appear on profile AND community after upload
+
+Admin Panel — Completely Hidden:
+- Sidebar only shows Admin nav item when `user.isAdmin === true`
+- PlatformApp renders AdminView only when `user.isAdmin && <AdminView />`
+- Admin XMLs (xmlSource=admin) completely hidden from non-admin users in list API, [id] API, and resources-view
+- Admin stats API returns 403 for non-admins (server-side verified)
+- No admin URL accessible to normal users
+
+OnyxBase Consistency Fixes:
+- Added `cache: 'no-store'` to all OnyxBase fetch calls (kvGet, kvList, kvExport)
+- Changed listResources to use kvList + kvGet (individual key reads more consistent than full export)
+- Added retry logic to kvExport (3 attempts with delays)
+- Added retry logic to community feed API (3 attempts for listAllPublicResources)
+- Added retry logic to profile lookup API (3 attempts for getProfileByUsername)
+- Added retry logic to profile creation in login route (3 attempts for upsertProfile)
+
+Verified:
+- Login works, session persists after reload
+- Images appear in Images Library after upload
+- Images appear in Community Feed after upload
+- Image detail modal opens on click with full-resolution preview
+- Admin panel completely hidden for non-admin users
+- Profile page loads (with retry logic for OnyxBase consistency)
+- Lint passes clean
+- Deployed to https://speedramp-pro.vercel.app
+
+Stage Summary:
+- Images now correctly appear on both profile and community after upload
+- Full-size image uploads supported (no cropping/resizing)
+- Image detail card shows full-resolution image with dynamic creator info
+- Admin panel completely hidden from non-admin users
+- OnyxBase consistency issues mitigated with retry logic
+- All getSession() usage fixed across all API routes
+- Deployed live at https://speedramp-pro.vercel.app

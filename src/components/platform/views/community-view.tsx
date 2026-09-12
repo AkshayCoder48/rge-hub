@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
+import { ResourceDetailModal } from '../resource-detail-modal';
 import { useToast } from '@/hooks/use-toast';
 import {
   Users,
@@ -23,6 +24,7 @@ export function CommunityView() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<Resource | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,12 +174,22 @@ export function CommunityView() {
             <div key={r.id} className="break-inside-avoid mb-4">
               <ResourceCard
                 resource={r}
+                onClick={() => setSelected(r)}
                 onDownload={() => handleDownload(r)}
                 showOwner
               />
             </div>
           ))}
         </div>
+      )}
+
+      {/* Resource detail modal */}
+      {selected && (
+        <ResourceDetailModal
+          resource={selected}
+          onClose={() => setSelected(null)}
+          onDownload={handleDownload}
+        />
       )}
     </div>
   );

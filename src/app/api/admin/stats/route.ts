@@ -2,7 +2,7 @@
  * GET /api/admin/stats
  * Returns aggregate counts for the admin dashboard.
  *
- * Admin only.
+ * CRITICAL: Admin only. Server-side verified. Never trusts client-side role.
  *
  * Returns:
  *   { ok: true,
@@ -15,8 +15,8 @@ import { getAllProfiles, listResources } from '@/lib/resources';
 
 export async function GET(_request: NextRequest) {
   try {
-    const session = await getSession();
-    if (!session || !session.isAdmin) {
+    const sessionResult = await getSession();
+    if (sessionResult.status !== 'ok' || !sessionResult.session.isAdmin) {
       return NextResponse.json(
         { ok: false, error: 'Admin access required' },
         { status: 403 }

@@ -1,6 +1,7 @@
 /**
  * POST /api/resources/upload
  * Upload a file (and optional thumbnail) to OnyxBase storage.
+ * No image size restriction — full-resolution uploads supported.
  *
  * Auth required.
  * Form fields:
@@ -17,8 +18,8 @@ import { uploadFile, getFileUrl } from '@/lib/onyxbase';
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getSession();
-    if (!session) {
+    const sessionResult = await getSession();
+    if (sessionResult.status !== 'ok') {
       return NextResponse.json({ ok: false, error: 'Authentication required' }, { status: 401 });
     }
 

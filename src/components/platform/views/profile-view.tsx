@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useAuth } from '@/lib/auth-context';
 import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
+import { ResourceDetailModal } from '../resource-detail-modal';
 import { useToast } from '@/hooks/use-toast';
 import {
   Image as ImageIcon,
@@ -45,6 +46,7 @@ export function ProfileView() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [profileVersion, setProfileVersion] = useState(0);
+  const [selected, setSelected] = useState<Resource | null>(null);
 
   const fetchProfile = useCallback(async (username: string) => {
     setFetchState('loading');
@@ -311,6 +313,7 @@ export function ProfileView() {
               )}
               <ResourceCard
                 resource={r}
+                onClick={() => setSelected(r)}
                 onDownload={() => handleDownload(r)}
                 showOwner={false}
               />
@@ -349,6 +352,17 @@ export function ProfileView() {
             setEditOpen(false);
             handleEditSaved();
           }}
+        />
+      )}
+
+      {/* Resource detail modal — own profile: allow delete */}
+      {selected && (
+        <ResourceDetailModal
+          resource={selected}
+          onClose={() => setSelected(null)}
+          onDownload={handleDownload}
+          canDelete={isOwnProfile}
+          onDelete={handleDelete}
         />
       )}
     </div>

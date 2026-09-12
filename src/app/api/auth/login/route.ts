@@ -51,7 +51,18 @@ export async function POST(request: NextRequest) {
         createdAt: now,
         updatedAt: now,
       } as Profile;
-      await upsertProfile(profile);
+
+      // Retry profile creation to handle OnyxBase inconsistency
+      let profileCreated = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        profileCreated = await upsertProfile(profile);
+        if (profileCreated) break;
+        console.warn(`[login] upsertProfile failed (attempt ${attempt + 1})`);
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      }
+      if (!profileCreated) {
+        console.error('[login] Failed to create profile after 3 attempts for user:', loginResult.userId);
+      }
     } else {
       // Update API key in case it changed
       if (profile.apiKey !== loginResult.apiKey) {

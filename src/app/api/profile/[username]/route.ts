@@ -2,6 +2,9 @@
  * GET /api/profile/[username]
  * Public profile lookup by username, plus that user's public resources.
  *
+ * Includes retry logic for OnyxBase eventual consistency.
+ * Only returns "User not found" after definitively confirming the profile doesn't exist.
+ *
  * Returns: { ok: true, profile, resources }
  *   - profile excludes apiKey
  */
@@ -18,7 +21,14 @@ export async function GET(
       return NextResponse.json({ ok: false, error: 'Username is required' }, { status: 400 });
     }
 
-    const profile = await getProfileByUsername(username);
+    // Retry profile lookup (OnyxBase eventual consistency)
+    let profile: Profile | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      profile = await getProfileByUsername(username);
+      if (profile) break;
+      if (attempt < 2) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+
     if (!profile) {
       return NextResponse.json({ ok: false, error: 'User not found' }, { status: 404 });
     }

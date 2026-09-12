@@ -189,6 +189,19 @@ export async function deleteResource(id: string, type: ResourceType, xmlSource?:
 
 export async function listResources(type: ResourceType, xmlSource?: XmlSource): Promise<Resource[]> {
   const collection = collectionForType(type, xmlSource);
+
+  // OnyxBase has eventual consistency issues — try list+get first, then export
+  // Try kvList + kvGet (individual key reads are more consistent)
+  const keys = await kvList(collection);
+  if (keys.length > 0) {
+    const results = await Promise.all(
+      keys.map(key => kvGet<Resource>(key, collection))
+    );
+    const filtered = results.filter((r): r is Resource => r !== null && r !== undefined && r.id);
+    if (filtered.length > 0) return filtered;
+  }
+
+  // Fallback to kvExport
   const all = await kvExport<Record<string, Resource>>(collection);
   return Object.values(all).filter(Boolean) as Resource[];
 }

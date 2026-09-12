@@ -80,6 +80,7 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
 export async function kvGet<T = any>(key: string, collection: string = 'default'): Promise<T | null> {
   const res = await fetch(`${ONYXBASE_BASE_URL}/v1/get/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`, {
     headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+    cache: 'no-store',
   });
   if (!res.ok) return null;
   const data = await res.json();
@@ -106,6 +107,7 @@ export async function kvDelete(key: string, collection: string = 'default'): Pro
 export async function kvList(collection: string = 'default'): Promise<string[]> {
   const res = await fetch(`${ONYXBASE_BASE_URL}/v1/list?collection=${encodeURIComponent(collection)}`, {
     headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+    cache: 'no-store',
   });
   if (!res.ok) return [];
   const data = await res.json();
@@ -115,13 +117,35 @@ export async function kvList(collection: string = 'default'): Promise<string[]> 
 /**
  * Export all key-value pairs in a collection.
  */
+/**
+ * Export all key-value pairs in a collection.
+ * Includes retry logic for OnyxBase eventual consistency.
+ */
 export async function kvExport(collection: string = 'default'): Promise<Record<string, any>> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/export?collection=${encodeURIComponent(collection)}`, {
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-  });
-  if (!res.ok) return {};
-  const data = await res.json();
-  return data.data || {};
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${ONYXBASE_BASE_URL}/v1/export?collection=${encodeURIComponent(collection)}`, {
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        if (attempt < 2) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
+        return {};
+      }
+      const data = await res.json();
+      const result = data.data || {};
+      // OnyxBase sometimes returns empty due to eventual consistency
+      // If we got results, return them; if empty on first try, retry
+      if (Object.keys(result).length > 0 || attempt === 2) {
+        return result;
+      }
+      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+    } catch {
+      if (attempt < 2) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
+      return {};
+    }
+  }
+  return {};
 }
 
 /**

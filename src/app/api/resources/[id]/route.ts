@@ -12,7 +12,7 @@
  * Access:
  *   - Published resources: visible to anyone.
  *   - Unpublished: only owner or admin.
- *   - Admin XMLs (xmlSource=admin): only admin.
+ *   - Admin XMLs (xmlSource=admin): only admin — COMPLETELY hidden from public.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
@@ -36,33 +36,42 @@ function isXmlSource(v: string | null): v is XmlSource {
 /**
  * Locate a resource. If type/xmlSource is provided, look there directly.
  * Otherwise fall back to scanning all collections.
+ * CRITICAL: Never returns admin XMLs to non-admin users.
  */
 async function locateResource(
   id: string,
   type: ResourceType | null,
-  xmlSource: XmlSource | null
+  xmlSource: XmlSource | null,
+  isAdmin: boolean
 ): Promise<Resource | null> {
   if (type) {
     if (type === 'xml') {
       if (xmlSource) {
+        // Admin XMLs only accessible to admins
+        if (xmlSource === 'admin' && !isAdmin) return null;
         return getResource(id, type, xmlSource);
       }
-      // search community first, then admin
+      // search community first, then admin (only if admin)
       const community = await getResource(id, type, 'community');
       if (community) return community;
-      return getResource(id, type, 'admin');
+      if (isAdmin) {
+        return getResource(id, type, 'admin');
+      }
+      return null;
     }
     return getResource(id, type, undefined);
   }
-  // No type provided → scan
+  // No type provided → scan (community only for non-admins)
   const img = await getResource(id, 'image');
   if (img) return img;
   const clip = await getResource(id, 'clip');
   if (clip) return clip;
   const cx = await getResource(id, 'xml', 'community');
   if (cx) return cx;
-  const ax = await getResource(id, 'xml', 'admin');
-  if (ax) return ax;
+  if (isAdmin) {
+    const ax = await getResource(id, 'xml', 'admin');
+    if (ax) return ax;
+  }
   return null;
 }
 
@@ -76,23 +85,26 @@ export async function GET(
     const type = isResourceType(searchParams.get('type')) ? searchParams.get('type') : null;
     const xmlSource = isXmlSource(searchParams.get('xmlSource')) ? searchParams.get('xmlSource') : null;
 
-    const session = await getSession();
+    const sessionResult = await getSession();
+    const session = sessionResult.status === 'ok' ? sessionResult.session : null;
+    const isAuthenticated = session !== null;
+    const isAdmin = session?.isAdmin === true;
 
     // Admin XMLs require admin
-    if (type === 'xml' && xmlSource === 'admin' && (!session || !session.isAdmin)) {
+    if (type === 'xml' && xmlSource === 'admin' && !isAdmin) {
       return NextResponse.json(
         { ok: false, error: 'Admin access required' },
         { status: 403 }
       );
     }
 
-    const resource = await locateResource(id, type, xmlSource);
+    const resource = await locateResource(id, type, xmlSource, isAdmin);
     if (!resource) {
       return NextResponse.json({ ok: false, error: 'Resource not found' }, { status: 404 });
     }
 
     // If this turns out to be an admin xml, enforce admin even if caller didn't specify xmlSource
-    if (resource.type === 'xml' && resource.xmlSource === 'admin' && (!session || !session.isAdmin)) {
+    if (resource.type === 'xml' && resource.xmlSource === 'admin' && !isAdmin) {
       return NextResponse.json(
         { ok: false, error: 'Admin access required' },
         { status: 403 }
@@ -101,14 +113,14 @@ export async function GET(
 
     // Visibility for unpublished
     if (!resource.published) {
-      if (!session) {
+      if (!isAuthenticated) {
         return NextResponse.json(
           { ok: false, error: 'Authentication required' },
           { status: 401 }
         );
       }
       const isOwner = resource.ownerId === session.userId;
-      if (!isOwner && !session.isAdmin) {
+      if (!isOwner && !isAdmin) {
         return NextResponse.json(
           { ok: false, error: 'Resource not found' },
           { status: 404 }
@@ -136,12 +148,13 @@ export async function PATCH(
     const type = isResourceType(searchParams.get('type')) ? searchParams.get('type') : null;
     const xmlSource = isXmlSource(searchParams.get('xmlSource')) ? searchParams.get('xmlSource') : null;
 
-    const session = await getSession();
-    if (!session) {
+    const sessionResult = await getSession();
+    if (sessionResult.status !== 'ok') {
       return NextResponse.json({ ok: false, error: 'Authentication required' }, { status: 401 });
     }
+    const session = sessionResult.session;
 
-    const resource = await locateResource(id, type, xmlSource);
+    const resource = await locateResource(id, type, xmlSource, session.isAdmin);
     if (!resource) {
       return NextResponse.json({ ok: false, error: 'Resource not found' }, { status: 404 });
     }
@@ -223,12 +236,13 @@ export async function DELETE(
     const type = isResourceType(searchParams.get('type')) ? searchParams.get('type') : null;
     const xmlSource = isXmlSource(searchParams.get('xmlSource')) ? searchParams.get('xmlSource') : null;
 
-    const session = await getSession();
-    if (!session) {
+    const sessionResult = await getSession();
+    if (sessionResult.status !== 'ok') {
       return NextResponse.json({ ok: false, error: 'Authentication required' }, { status: 401 });
     }
+    const session = sessionResult.session;
 
-    const resource = await locateResource(id, type, xmlSource);
+    const resource = await locateResource(id, type, xmlSource, session.isAdmin);
     if (!resource) {
       return NextResponse.json({ ok: false, error: 'Resource not found' }, { status: 404 });
     }

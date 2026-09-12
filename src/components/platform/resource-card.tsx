@@ -23,21 +23,22 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
       onClick={onClick}
       className="group rounded-3xl border border-white/5 bg-white/[0.02] overflow-hidden hover:border-violet-500/30 hover:bg-white/[0.04] hover:-translate-y-1 transition-all duration-500 ease-snap cursor-pointer"
     >
-      {/* Preview */}
-      <div className="relative aspect-video bg-black/40 overflow-hidden">
+      {/* Preview — supports full-size images with any aspect ratio */}
+      <div className="relative bg-black/40 overflow-hidden" style={{ minHeight: '120px', maxHeight: '280px' }}>
         {resource.thumbnailUrl || resource.downloadUrl ? (
           <img
             src={resource.thumbnailUrl || resource.downloadUrl}
             alt={resource.title}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-snap"
+            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-500 ease-snap"
+            style={{ maxHeight: '280px' }}
             loading="lazy"
           />
         ) : resource.type === 'xml' ? (
-          <div className="w-full h-full flex items-center justify-center">
+          <div className="w-full h-full flex items-center justify-center" style={{ minHeight: '160px' }}>
             <FileCode className="w-10 h-10 text-emerald-400/30" />
           </div>
         ) : (
-          <div className="w-full h-full flex items-center justify-center">
+          <div className="w-full h-full flex items-center justify-center" style={{ minHeight: '160px' }}>
             <TypeIcon className={`w-10 h-10 ${typeColor} opacity-30`} />
           </div>
         )}

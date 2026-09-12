@@ -2,6 +2,8 @@
  * GET /api/community/feed
  * Public feed of all published community resources, sorted by createdAt desc.
  *
+ * Includes retry logic for OnyxBase eventual consistency.
+ *
  * Optional query:
  *   - limit: number (default 50)
  *
@@ -18,13 +20,19 @@ export async function GET(request: NextRequest) {
     if (limitParam) {
       const parsed = parseInt(limitParam, 10);
       if (!Number.isNaN(parsed) && parsed > 0) {
-        limit = Math.min(parsed, 500); // hard cap to avoid abuse
+        limit = Math.min(parsed, 500);
       }
     }
 
-    const resources = await listAllPublicResources();
-    const sliced = resources.slice(0, limit);
+    // OnyxBase has eventual consistency issues — retry up to 3 times
+    let resources: any[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      resources = await listAllPublicResources();
+      if (resources.length > 0) break;
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
 
+    const sliced = resources.slice(0, limit);
     return NextResponse.json({ ok: true, resources: sliced });
   } catch (err) {
     console.error('[community/feed] error:', err);

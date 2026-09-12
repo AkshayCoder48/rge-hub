@@ -2,23 +2,16 @@
  * POST /api/resources/create
  * Create a new resource record.
  *
+ * CRITICAL: ownerId is assigned from the authenticated session, never from client input.
+ * The resource is stored ONCE in OnyxBase — both profile and community reference the same record.
+ *
  * Auth required.
  * Body: {
- *   type: 'image' | 'clip' | 'xml',
- *   title: string,
- *   description: string,
- *   fileId: string,
- *   thumbnailFileId?: string,
- *   tags?: string[],
- *   category?: string,
- *   duration?: number,
- *   published?: boolean,
- *   xmlSource?: 'community' | 'admin',
- *   downloadUrl?: string,
- *   thumbnailUrl?: string,
+ *   type, title, description, fileId, thumbnailFileId?, tags?, category?,
+ *   duration?, published?, xmlSource?, downloadUrl?, thumbnailUrl?
  * }
  *
- * ownerId / ownerName come from the session.
+ * ownerId / ownerName come from the session (server-side, never trusted from client).
  * For xmlSource='admin', the caller must be an admin.
  *
  * Returns: { ok: true, resource }
@@ -36,10 +29,11 @@ import { getFileUrl } from '@/lib/onyxbase';
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getSession();
-    if (!session) {
+    const sessionResult = await getSession();
+    if (sessionResult.status !== 'ok') {
       return NextResponse.json({ ok: false, error: 'Authentication required' }, { status: 401 });
     }
+    const session = sessionResult.session;
 
     const body = await request.json();
     const {
@@ -83,6 +77,7 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
     const id = generateResourceId(resourceType);
 
+    // CRITICAL: ownerId comes from the authenticated session, never from client input
     const resource: Resource = {
       id,
       type: resourceType,

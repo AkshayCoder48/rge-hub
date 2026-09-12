@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import type { Resource } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
+import { ResourceDetailModal } from '../resource-detail-modal';
 import type { ViewKey } from '../platform-app';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -27,6 +28,7 @@ export function HomeView({ onNavigate, onUpload }: HomeViewProps) {
   const [recent, setRecent] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Resource | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -210,6 +212,7 @@ export function HomeView({ onNavigate, onUpload }: HomeViewProps) {
               <ResourceCard
                 key={r.id}
                 resource={r}
+                onClick={() => setSelected(r)}
                 onDownload={() => handleDownload(r)}
                 showOwner
               />
@@ -217,6 +220,15 @@ export function HomeView({ onNavigate, onUpload }: HomeViewProps) {
           </div>
         )}
       </section>
+
+      {/* Resource detail modal */}
+      {selected && (
+        <ResourceDetailModal
+          resource={selected}
+          onClose={() => setSelected(null)}
+          onDownload={handleDownload}
+        />
+      )}
     </div>
   );
 }

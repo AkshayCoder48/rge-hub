@@ -20,6 +20,7 @@ export function PlatformApp() {
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadType, setUploadType] = useState<'image' | 'clip' | 'xml'>('image');
+  const [uploadVersion, setUploadVersion] = useState(0); // bumps after each successful upload to force re-fetch
 
   const navigate = useCallback((v: ViewKey) => {
     setView(v);
@@ -79,13 +80,13 @@ export function PlatformApp() {
 
         {/* Content area */}
         <main className="relative z-10 px-4 sm:px-6 lg:px-10 py-6 lg:py-10 max-w-7xl mx-auto">
-          {view === 'home' && <HomeView onNavigate={navigate} onUpload={openUpload} />}
-          {view === 'images' && <ResourcesView type="image" onUpload={() => openUpload('image')} />}
-          {view === 'clips' && <ResourcesView type="clip" onUpload={() => openUpload('clip')} />}
-          {view === 'xmls' && <ResourcesView type="xml" onUpload={() => openUpload('xml')} />}
-          {view === 'community' && <CommunityView />}
-          {view === 'profile' && <ProfileView />}
-          {view === 'admin' && user.isAdmin && <AdminView />}
+          {view === 'home' && <HomeView key={`home-${uploadVersion}`} onNavigate={navigate} onUpload={openUpload} />}
+          {view === 'images' && <ResourcesView key={`images-${uploadVersion}`} type="image" onUpload={() => openUpload('image')} />}
+          {view === 'clips' && <ResourcesView key={`clips-${uploadVersion}`} type="clip" onUpload={() => openUpload('clip')} />}
+          {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} />}
+          {view === 'community' && <CommunityView key={`community-${uploadVersion}`} />}
+          {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} />}
+          {view === 'admin' && user.isAdmin && <AdminView key={`admin-${uploadVersion}`} />}
           {view === 'studio' && <SpeedRampStudio />}
         </main>
       </div>
@@ -97,6 +98,7 @@ export function PlatformApp() {
           onClose={() => setUploadOpen(false)}
           onSuccess={() => {
             setUploadOpen(false);
+            setUploadVersion(v => v + 1); // force all views to re-mount and re-fetch
             setView(uploadType === 'image' ? 'images' : uploadType === 'clip' ? 'clips' : 'xmls');
           }}
         />
