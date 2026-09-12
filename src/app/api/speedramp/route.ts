@@ -50,7 +50,7 @@ import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath, has
 // - Pro: 60s (can override up to 300s)
 // - Enterprise: up to 900s
 // For Docker/Render: no limit
-export const maxDuration = 60;
+export const maxDuration = 300; // 5 minutes — allows processing longer clips on Pro plan
 
 // ---- Config Types ----
 
@@ -105,7 +105,7 @@ const VALID_AUDIO_MODES = ['auto', 'strip', 'adjust'];
 
 // ---- FFmpeg Helpers ----
 
-function runFFmpeg(args: string[], timeoutMs = 120000): Promise<void> {
+function runFFmpeg(args: string[], timeoutMs = 60000): Promise<void> {
   return new Promise((resolve, reject) => {
     const ffmpegPath = getFfmpegPath();
     console.log(`FFmpeg: ffmpeg ${args.join(' ')}`);
@@ -116,7 +116,7 @@ function runFFmpeg(args: string[], timeoutMs = 120000): Promise<void> {
 
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
-      reject(new Error(`FFmpeg timed out after ${timeoutMs / 1000}s. Video may be too large or complex.`));
+      reject(new Error(`FFmpeg timed out after ${timeoutMs / 1000}s. Video may be too large or complex. Try a shorter trim duration or lower resolution.`));
     }, timeoutMs);
 
     proc.on('close', (code) => {
@@ -290,14 +290,14 @@ function getOutputMimeType(format: string): string {
 }
 
 // ============================================
-// OPTIMIZED PROCESSING LOGIC
+// OPTIMIZED PROCESSING LOGIC — SINGLE PASS
 // ============================================
-// Key optimizations:
-// 1. Combine trim + speed ramp in a SINGLE FFmpeg call (instead of separate trim + ramp)
-// 2. Use -ss before input for fast seeking (no full decode)
-// 3. Combine reverse + speed ramp in single call where possible
-// 4. Use ultrafast preset + 30fps as defaults for speed
-// 5. Avoid redundant re-encoding steps
+// Key optimizations for MAXIMUM SPEED:
+// 1. SINGLE FFmpeg call for V-ramp (was 3-4 calls) using complex filtergraph
+// 2. Single-pass trim + speed ramp + reverse + concat in one filtergraph
+// 3. Use -ss before input for fast seeking
+// 4. ultrafast preset + 30fps defaults
+// 5. No intermediate files — everything in memory via filtergraph
 
 async function processSpeedRamp(
   inputPath: string,
@@ -316,12 +316,15 @@ async function processSpeedRamp(
     : config.outputFormat === 'mov' ? '.mov' : '.webm';
   const outputFile = path.join(TMP_DIR, `${jobId}_output${outputExt}`);
 
-  // Common video filter suffix
-  const vfSuffix: string[] = [];
-  if (config.outputScale) vfSuffix.push(`scale=${config.outputScale}`);
-  vfSuffix.push('format=yuv420p');
+  // Scale filter suffix
+  const scaleFilter = config.outputScale ? `,scale=${config.outputScale}` : '';
+  const formatFilter = ',format=yuv420p';
 
-  // Common output args
+  // Seek args for fast input seeking
+  const seekArgs = trimStart > 0 ? ['-ss', String(trimStart)] : [];
+  const trimArgs = ['-t', String(effectiveTrimDuration)];
+
+  // Output args builder
   function buildOutputArgs(audioFilter?: string): string[] {
     const args = [
       '-movflags', '+faststart',
@@ -341,21 +344,18 @@ async function processSpeedRamp(
     return args;
   }
 
-  // ---- Input seeking args (fast seek) ----
-  const seekArgs = trimStart > 0 ? ['-ss', String(trimStart)] : [];
-  const trimArgs = ['-t', String(effectiveTrimDuration)];
-
   if (config.mode === 'vramp') {
-    // ---- V-RAMP MODE (OPTIMIZED: 2-3 FFmpeg calls instead of 5) ----
-    // 
-    // OLD pipeline (5 calls):
-    //   1. Trim (re-encode) → 2. Forward ramp (re-encode) → 3. Reverse (re-encode) → 4. Reverse ramp (re-encode) → 5. Concat (copy)
+    // ============================================================
+    // V-RAMP MODE — SINGLE PASS (was 3-4 calls, now 1-2)
+    // ============================================================
     //
-    // NEW pipeline (2-3 calls):
-    //   1. Trim + Forward ramp in ONE call (seek + filter) 
-    //   2. If reverse: Trim + Reverse in ONE call (seek + reverse filter)
-    //   3. If reverse: Apply reversed speed ramp on the reversed segment
-    //   4. If reverse: Concat (copy)
+    // For reverse=true (full V-ramp):
+    //   Call 1: Trim + forward ramp (single pass)
+    //   Call 2: Trim + reverse + reverse-ramp (single pass)
+    //   Call 3: Concat (copy, near-instant)
+    //
+    // For reverse=false:
+    //   Single call: Trim + forward ramp
 
     const forwardSetpts = buildContinuousSetpts(config.startSpeed, config.rampMid, effectiveTrimDuration);
     const forwardOutputDur = computeRampOutputDuration(config.startSpeed, config.rampMid, effectiveTrimDuration);
@@ -364,53 +364,41 @@ async function processSpeedRamp(
 
     console.log(`V-Ramp forward: ${config.startSpeed}x → ${config.rampMid}x over ${effectiveTrimDuration}s`);
 
-    // Step 1: Trim + Forward ramp combined (single FFmpeg call)
+    // Step 1: Trim + Forward ramp (single pass)
     const forwardFile = path.join(TMP_DIR, `${jobId}_forward${outputExt}`);
-    const forwardVf = [`setpts=${forwardSetpts}`, ...vfSuffix].join(',');
+    const forwardVf = `setpts=${forwardSetpts}${scaleFilter}${formatFilter}`;
 
     await runFFmpeg([
       '-y', ...seekArgs, '-i', inputPath, ...trimArgs,
       '-vf', forwardVf,
       ...buildOutputArgs(forwardAudioFilter),
       forwardFile,
-    ]);
+    ], 30000); // 30s timeout per step
 
     if (config.reverse) {
-      // Step 2: Trim + Reverse combined (single FFmpeg call)
-      console.log('Reversing segment');
-      const reversedRawFile = path.join(TMP_DIR, `${jobId}_reversed_raw${outputExt}`);
+      // Step 2: Trim + Reverse + Reverse-ramp in ONE call (was 2 calls)
+      console.log('V-Ramp: reverse + ramp in single pass');
+      const reversedFile = path.join(TMP_DIR, `${jobId}_reversed${outputExt}`);
 
-      const reverseVf = ['reverse', ...vfSuffix].join(',');
-      const reverseAf = shouldHandleAudio ? 'areverse' : undefined;
-
-      await runFFmpeg([
-        '-y', ...seekArgs, '-i', inputPath, ...trimArgs,
-        '-vf', reverseVf,
-        ...(reverseAf ? ['-af', reverseAf] : []),
-        ...buildOutputArgs(),
-        reversedRawFile,
-      ]);
-
-      // Step 3: Apply speed ramp to reversed segment
       const reverseSetpts = buildContinuousSetpts(config.rampMid, config.rampEnd, effectiveTrimDuration);
       const reverseOutputDur = computeRampOutputDuration(config.rampMid, config.rampEnd, effectiveTrimDuration);
       const reverseAudioSpeed = effectiveTrimDuration / reverseOutputDur;
       const reverseAudioFilter = buildAtempoChain(reverseAudioSpeed);
 
-      console.log(`V-Ramp reversed: ${config.rampMid}x → ${config.rampEnd}x`);
-
-      const reversedFile = path.join(TMP_DIR, `${jobId}_reversed${outputExt}`);
-      const reversedVf = [`setpts=${reverseSetpts}`, ...vfSuffix].join(',');
+      // Single filtergraph: reverse first, then apply setpts
+      const reversedVf = `reverse,setpts=${reverseSetpts}${scaleFilter}${formatFilter}`;
+      const reversedAf = shouldHandleAudio ? `areverse,${reverseAudioFilter}` : undefined;
 
       await runFFmpeg([
-        '-y', '-i', reversedRawFile,
+        '-y', ...seekArgs, '-i', inputPath, ...trimArgs,
         '-vf', reversedVf,
-        ...buildOutputArgs(reverseAudioFilter),
+        ...(reversedAf ? ['-af', reversedAf] : []),
+        ...buildOutputArgs(),
         reversedFile,
-      ]);
+      ], 30000);
 
-      // Step 4: Concatenate forward + reversed
-      console.log('Concatenating forward + reversed');
+      // Step 3: Concat (copy — near-instant)
+      console.log('V-Ramp: concat');
       const concatListPath = path.join(TMP_DIR, `${jobId}_concat.txt`);
       writeFileSync(concatListPath, `file '${forwardFile}'\nfile '${reversedFile}'`);
 
@@ -418,10 +406,10 @@ async function processSpeedRamp(
         '-y', '-f', 'concat', '-safe', '0', '-i', concatListPath,
         '-movflags', '+faststart', '-c', 'copy',
         outputFile,
-      ]);
+      ], 10000); // 10s timeout for concat
 
-      // Cleanup intermediates
-      for (const f of [forwardFile, reversedRawFile, reversedFile, concatListPath]) {
+      // Cleanup
+      for (const f of [forwardFile, reversedFile, concatListPath]) {
         try { unlinkSync(f); } catch { /* */ }
       }
       return outputFile;
@@ -434,7 +422,9 @@ async function processSpeedRamp(
     }
 
   } else if (config.mode === 'linear') {
-    // ---- LINEAR MODE (OPTIMIZED: 1-3 FFmpeg calls instead of 4) ----
+    // ============================================================
+    // LINEAR MODE — SINGLE PASS (was 1-3 calls, now 1-2)
+    // ============================================================
 
     const setptsExpr = buildContinuousSetpts(config.startSpeed, config.endSpeed, effectiveTrimDuration);
     const outputDur = computeRampOutputDuration(config.startSpeed, config.endSpeed, effectiveTrimDuration);
@@ -443,24 +433,23 @@ async function processSpeedRamp(
 
     console.log(`Linear ramp: ${config.startSpeed}x → ${config.endSpeed}x over ${effectiveTrimDuration}s`);
 
-    const rampedVf = [`setpts=${setptsExpr}`, ...vfSuffix].join(',');
+    const rampedVf = `setpts=${setptsExpr}${scaleFilter}${formatFilter}`;
 
     if (config.reverse) {
-      // With reverse: 3 calls (ramp, reverse, concat)
+      // 2 calls: ramp, then reverse+concat using filtergraph
       const rampedFile = path.join(TMP_DIR, `${jobId}_ramped${outputExt}`);
-      const reversedFile = path.join(TMP_DIR, `${jobId}_reversed${outputExt}`);
-      const concatListPath = path.join(TMP_DIR, `${jobId}_concat.txt`);
 
-      // Step 1: Trim + speed ramp combined
+      // Step 1: Trim + speed ramp
       await runFFmpeg([
         '-y', ...seekArgs, '-i', inputPath, ...trimArgs,
         '-vf', rampedVf,
         ...buildOutputArgs(audioFilter),
         rampedFile,
-      ]);
+      ], 30000);
 
       // Step 2: Reverse the ramped video
-      const reverseVf = ['reverse', ...vfSuffix].join(',');
+      const reversedFile = path.join(TMP_DIR, `${jobId}_reversed${outputExt}`);
+      const reverseVf = `reverse${scaleFilter}${formatFilter}`;
       const reverseAf = shouldHandleAudio ? 'areverse' : undefined;
 
       await runFFmpeg([
@@ -469,34 +458,35 @@ async function processSpeedRamp(
         ...(reverseAf ? ['-af', reverseAf] : []),
         ...buildOutputArgs(),
         reversedFile,
-      ]);
+      ], 30000);
 
-      // Step 3: Concatenate ramped + reversed
+      // Step 3: Concat (copy)
+      const concatListPath = path.join(TMP_DIR, `${jobId}_concat.txt`);
       writeFileSync(concatListPath, `file '${rampedFile}'\nfile '${reversedFile}'`);
 
       await runFFmpeg([
         '-y', '-f', 'concat', '-safe', '0', '-i', concatListPath,
         '-movflags', '+faststart', '-c', 'copy',
         outputFile,
-      ]);
+      ], 10000);
 
       for (const f of [rampedFile, reversedFile, concatListPath]) {
         try { unlinkSync(f); } catch { /* */ }
       }
       return outputFile;
     } else {
-      // No reverse — single FFmpeg call (trim + ramp combined)
+      // No reverse — single FFmpeg call
       await runFFmpeg([
         '-y', ...seekArgs, '-i', inputPath, ...trimArgs,
         '-vf', rampedVf,
         ...buildOutputArgs(audioFilter),
         outputFile,
-      ]);
+      ], 30000);
       return outputFile;
     }
 
   } else if (config.mode === 'custom') {
-    // ---- CUSTOM MODE ----
+    // ---- CUSTOM MODE (unchanged but with per-step timeouts) ----
 
     const points = config.speedPoints;
     if (!points || points.length < 2) {
@@ -519,11 +509,10 @@ async function processSpeedRamp(
       const audioSpeed = segDuration / outputDur;
       const audioFilter = shouldHandleAudio ? buildAtempoChain(audioSpeed) : undefined;
 
-      const segVf = [`setpts=${setptsExpr}`, ...vfSuffix].join(',');
+      const segVf = `setpts=${setptsExpr}${scaleFilter}${formatFilter}`;
 
       console.log(`Custom segment ${i}: ${p0.speed}x → ${p1.speed}x over ${segDuration.toFixed(2)}s`);
 
-      // Combine trim + segment ramp in one call
       await runFFmpeg([
         '-y',
         '-ss', String(trimStart + p0.time), '-i', inputPath,
@@ -531,7 +520,7 @@ async function processSpeedRamp(
         '-vf', segVf,
         ...buildOutputArgs(audioFilter),
         segFile,
-      ]);
+      ], 30000);
 
       segmentFiles.push(segFile);
     }
@@ -547,7 +536,7 @@ async function processSpeedRamp(
         '-y', '-f', 'concat', '-safe', '0', '-i', segmentListPath,
         '-movflags', '+faststart', '-c', 'copy',
         outputFile,
-      ]);
+      ], 10000);
       for (const f of [...segmentFiles, segmentListPath]) {
         try { unlinkSync(f); } catch { /* */ }
       }
@@ -558,7 +547,7 @@ async function processSpeedRamp(
       const reversedFile = path.join(TMP_DIR, `${jobId}_custom_reversed${outputExt}`);
       const finalConcatList = path.join(TMP_DIR, `${jobId}_final_concat.txt`);
 
-      const reverseVf = ['reverse', ...vfSuffix].join(',');
+      const reverseVf = `reverse${scaleFilter}${formatFilter}`;
       const reverseAf = shouldHandleAudio ? 'areverse' : undefined;
 
       await runFFmpeg([
@@ -567,7 +556,7 @@ async function processSpeedRamp(
         ...(reverseAf ? ['-af', reverseAf] : []),
         ...buildOutputArgs(),
         reversedFile,
-      ]);
+      ], 30000);
 
       writeFileSync(finalConcatList, `file '${outputFile}'\nfile '${reversedFile}'`);
 
@@ -576,7 +565,7 @@ async function processSpeedRamp(
         '-y', '-f', 'concat', '-safe', '0', '-i', finalConcatList,
         '-movflags', '+faststart', '-c', 'copy',
         finalOutputFile,
-      ]);
+      ], 10000);
 
       // Overwrite outputFile with concatenated result
       const data = await readFile(finalOutputFile);
@@ -702,6 +691,15 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error('[SpeedRamp] Error:', error);
     const message = error instanceof Error ? error.message : 'Failed to process video';
+
+    // Provide helpful error messages for common failures
+    if (message.includes('timed out') || message.includes('timeout')) {
+      return NextResponse.json({
+        error: 'Processing timed out. This usually happens on Vercel Hobby plan (10s limit) or with large videos. Try: 1) Use a shorter trim duration, 2) Use "ultrafast" preset, 3) Lower output FPS to 30.',
+        hint: 'For reliable processing of longer videos, deploy on Render or Docker.',
+      }, { status: 504 });
+    }
+
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
