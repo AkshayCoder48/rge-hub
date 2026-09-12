@@ -575,3 +575,203 @@ Stage Summary:
 - Effects: glassmorphism (blur 16px), floating ambient orbs, text shimmer, spinning conic-gradient borders, staggered fade-up entrances, cubic-bezier(0.23,1,0.32,1) snappy transitions
 - All existing speed ramp functionality preserved and restyled
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+Task ID: 4-api
+Agent: general-purpose (resource API routes)
+Task: Build resource API routes for the RailGuyEdits platform
+
+Work Log:
+- Read worklog.md, src/lib/onyxbase.ts, src/lib/resources.ts, src/lib/session.ts, and existing auth routes to align with established conventions (getSession, NextResponse.json `{ ok, error? }` shape, OnyxBase KV/file helpers).
+- Created all required directories under src/app/api/{resources/{upload,list,create,[id]},community/feed,profile/[username],admin/stats}.
+- Implemented 8 route files (9 endpoints; [id] file exports GET/PATCH/DELETE):
+
+1. /api/resources/upload (POST)
+   - Auth via getSession; rejects 401 if missing.
+   - Reads FormData: required `file` (+ optional `thumbnail`, `label`).
+   - Calls uploadFile() with retry/backoff built into the lib; falls back to getFileUrl() if `url` missing.
+   - Optionally uploads thumbnail and returns thumbnailFileId/thumbnailUrl.
+   - Returns { ok, fileId, url, fileName, mimeType, size, thumbnailFileId?, thumbnailUrl? }.
+
+2. /api/resources/list (GET)
+   - Query: type, xmlSource, owner, search, published (true|false|all, default true).
+   - For type=xml&xmlSource=admin → admin-only (403).
+   - wantUnpublished or owner set → auth required.
+   - Non-admins requesting unpublished can only see their own (and never another user's unpublished).
+   - Uses searchResources when `search` provided; listResourcesByOwner when `owner` provided; listResources when `type` provided; falls back to listAllPublicResources for the public feed.
+   - Always sorts by createdAt desc.
+
+3. /api/resources/create (POST)
+   - Auth required; ownerId/ownerName pulled from session.
+   - Validates type, title, fileId.
+   - For xmlSource='admin', enforces session.isAdmin.
+   - Generates ID via generateResourceId(type) (img_/clip_/xml_ prefix).
+   - Auto-fills downloadUrl/thumbnailUrl from fileId/thumbnailFileId when not supplied.
+   - Persists via createResource(); returns the full resource object.
+
+4. /api/resources/[id] (GET)
+   - Next.js 16 async params signature: `params: Promise<{ id: string }>`.
+   - Query: type, xmlSource? — uses locateResource() helper that scans collections when type is omitted.
+   - Admin XMLs (xmlSource=admin or detected from record) → admin-only.
+   - Unpublished → owner or admin only (404 for non-owners to avoid leaking existence).
+
+5. /api/resources/[id] (PATCH)
+   - Auth required; owner-or-admin gate.
+   - Allows updates to title, description, tags, category, duration, published, thumbnailFileId, thumbnailUrl, downloadUrl.
+   - `featured` is admin-only — non-admins get 403.
+   - Cannot mutate id/ownerId/type/fileId/xmlSource (immutable fields simply ignored).
+   - Calls updateResource() which sets updatedAt.
+
+6. /api/resources/[id] (DELETE)
+   - Auth required; owner-or-admin gate.
+   - Best-effort deleteFile() on resource.fileId and resource.thumbnailFileId (warns on failure but continues).
+   - Removes the KV record via deleteResource(id, type, xmlSource).
+
+7. /api/community/feed (GET)
+   - Returns all public resources (listAllPublicResources already excludes admin XMLs and unpublished) sorted by createdAt desc.
+   - Optional `limit` query (default 50, hard cap 500).
+
+8. /api/profile/[username] (GET)
+   - Async params; looks up profile by username (case-insensitive).
+   - Returns safe profile (apiKey stripped) + that user's published resources only.
+
+9. /api/admin/stats (GET)
+   - Admin-only gate (session.isAdmin === true).
+   - Parallel fetch of profiles + all four resource collections.
+   - Returns totalUsers, totalImages, totalClips, totalCommunityXmls, totalAdminXmls, publishedCount, unpublishedCount.
+
+Implementation notes:
+- All routes use `import { NextRequest, NextResponse } from 'next/server'` and `getSession` from `@/lib/session`.
+- All responses use `NextResponse.json()` with `{ ok: boolean, error?: string }` shape and appropriate HTTP status codes (400/401/403/404/500).
+- Every handler wrapped in try/catch with console.error logging.
+- Dynamic routes use the Next.js 16 `params: Promise<...>` + `await params` pattern.
+
+Stage Summary:
+- All 8 route files (9 endpoints) created at the specified paths.
+- `bun run lint` exits 0 with zero errors/warnings.
+- Routes follow the existing auth route conventions (consistent error shape, session checks, OnyxBase lib usage).
+- Ready for frontend integration; no breaking changes to existing modules.
+---
+Task ID: 7-views
+Agent: fullstack-developer (platform view components)
+
+Work Log:
+- Read worklog.md, src/lib/resources.ts (Resource type), src/components/platform/resource-card.tsx (props + styling), src/components/platform/sidebar.tsx (ViewKey usage + sidebar conventions), src/lib/auth-context.tsx (useAuth shape), src/hooks/use-toast.ts (toast API), src/components/speed-ramp-app.tsx (export name) for full context.
+- Created 6 view components in src/components/platform/views/:
+
+1. home-view.tsx (props: onNavigate, onUpload)
+   - Hero with serif heading "Welcome back, {displayName}" + shimmer effect, pill badge "RailGuyEdits Platform", violet/cyan ambient blurs
+   - 4 quick-action cards in 4-col grid: Speed Ramp Studio (nav to 'studio', violet), Upload Image (violet), Upload Clip (cyan), Upload XML (emerald) — each with type-colored icon tile + arrow reveal on hover
+   - "Recently Added" section fetching GET /api/community/feed?limit=4 → 4-col grid of ResourceCards with onDownload handler
+   - Loading spinner, error block, empty state with Sparkles icon
+   - "View all" link → onNavigate('community')
+
+2. resources-view.tsx (props: type, onUpload)
+   - Header with type icon tile + serif heading ("Images Library"/"Clips Library"/"XMLs Library") + Upload button (gradient colored per type)
+   - For XML type: Community/Admin tab toggle (segmented control) — switches xmlSource state, refetches on change
+   - Search input with left-aligned Search icon (filters client-side by title/description/tags/ownerName)
+   - GET /api/resources/list?type=...&published=all (+ xmlSource for admin tab); 403 → silent + toast "Access restricted"
+   - 3-col grid (sm:2, lg:3) of ResourceCards with download handlers
+   - Empty state with PackageOpen icon + Upload CTA when no resources
+
+3. community-view.tsx (no props)
+   - Header with Users icon tile, violet/cyan ambient blurs, creator count
+   - Filter tabs: All / Images / Clips / XMLs (segmented) with per-type counts and type-colored icons
+   - Search bar
+   - Masonry grid using CSS columns (1/2/3 cols responsive) with break-inside-avoid
+   - GET /api/community/feed?limit=50 → client-side filter+search
+
+4. profile-view.tsx (no props, uses useAuth)
+   - Fetches GET /api/profile/{username}
+   - Profile header: 24x24 rounded-3xl avatar (image or initials in serif), displayName, @username, join date, bio
+   - 3-stat row (Images/Clips/XMLs counts) with type-colored backgrounds
+   - Tabs: Images / Clips / XMLs (segmented with counts)
+   - Grid of user's own resources with ResourceCard (showOwner=false)
+   - Unpublished resources get amber "Draft" badge top-right
+   - Per-card action row: Download button (full width) + red Trash button with confirm dialog + Loader2 spinner during delete
+   - DELETE call to /api/resources/[id]?type=TYPE[&xmlSource=admin] with toast feedback
+
+5. admin-view.tsx (no props, only rendered if user.isAdmin)
+   - Header with Shield icon + emerald "Restricted · Platform oversight" subtitle
+   - Stats grid (2/3/5 cols): Total Users, Total Images, Total Clips, Community XMLs, Admin XMLs — each as StatCard with type-colored bg + serif numeric
+   - Admin XML library section: GET /api/resources/list?type=xml&xmlSource=admin&published=all → grid of ResourceCards with red trash delete button overlay (top-right, backdrop-blur circle)
+   - Recent community activity section: GET /api/community/feed?limit=6 → grid of ResourceCards
+   - Footer line: "Admin console · All systems operational" with TrendingUp emerald icon
+   - All section headers use serif font with emerald accent icons (SectionHeading helper)
+   - Spinner / ErrorBlock / EmptyBlock helpers for consistent state handling
+
+6. speed-ramp-studio.tsx (no props)
+   - Header: "Speed Ramp Studio" serif heading, Zap icon in gradient tile, "Create V-shaped reverse speed ramp clips" subtitle, "Powered by FFmpeg" pill with Cpu icon
+   - Renders existing SpeedRampApp inside rounded-3xl styled container
+   - Import: `import { SpeedRampApp } from '@/components/speed-ramp-app'`
+
+Implementation notes:
+- All 6 components use 'use client'
+- Consistent Synapse design: rounded-3xl cards, bg-white/[0.02], border-white/5, hover -translate-y-1, duration-300 ease-snap
+- Type-colored accents throughout: violet=image, cyan=clip, emerald=xml/admin
+- font-serif-display for all major headings, font-mono-display uppercase tracking-[0.2em] text-neutral-500 for labels
+- All async fetching uses cancelled flag in useEffect cleanup to prevent state updates after unmount
+- Download handler: window.open(r.downloadUrl, '_blank') with toast fallback if missing
+- Date formatting: toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+- ResourceCard reused everywhere with appropriate showOwner flag
+- Profile/admin delete operations use confirm() dialog + toast feedback
+
+Verification:
+- `bun run lint` exits 0 with zero errors/warnings
+- Dev server compiling cleanly per dev.log
+
+Stage Summary:
+- All 6 view components created at the specified paths in src/components/platform/views/
+- Components cover: home dashboard, type-filtered resource library (with XML source tabs), community masonry feed, user profile with draft management, admin console with stats + admin XML management, and speed ramp studio wrapper
+- Ready to be wired into platform-app.tsx by a subsequent agent (ViewKey type referenced from '../platform-app' as specified)
+---
+Task ID: 13
+Agent: main
+Task: Transform app into RailGuyEdits Editing Platform with OnyxBase backend
+
+Work Log:
+- Researched OnyxBase API (Telegram-backed KV + file storage): discovered all endpoints via OpenAPI spec at /api/openapi.json
+  - KV: POST /v1/set, GET /v1/get/{key}, DELETE /v1/delete/{key}, GET /v1/list, GET /v1/export
+  - Collections: POST /v1/collections, GET /v1/collections
+  - Files: POST /v1/files (multipart ≤50MB), public download at /f/{fileId}
+  - Email: POST /api/email/send via connected MCPEmail credential "Email_Verification"
+  - Auth: POST /api/auth/verify (verifies kv_live_* API keys)
+- Set up environment: ONYXBASE_BASE_URL, ONYXBASE_API_KEY, ONYXBASE_EMAIL_CREDENTIAL, ADMIN_EMAIL
+- Created OnyxBase server-side client (src/lib/onyxbase.ts): kvSet/kvGet/kvDelete/kvList/kvExport/kvSearch/kvCount, uploadFile/deleteFile/getFileUrl, sendEmail, verifyApiKey
+- Created session management (src/lib/session.ts): cookie-based sessions stored in OnyxBase KV, createSession/getSession/destroySession, isAdminUser check
+- Created OTP system (src/lib/otp.ts): 6-digit code generation, SHA-256+salt hashing, 10-min expiry, max 5 attempts, rate limited 1/min, sends via OnyxBase Email Automation
+- Created data layer (src/lib/resources.ts): Profile + Resource types, CRUD for images/clips/community_xmls/admin_xmls, search, listAllPublicResources, listResourcesByOwner
+- Initialized 8 OnyxBase collections: profiles, editing_images, editing_clips, community_xmls, admin_xmls, otps, sessions, categories
+- Built auth API routes: /api/auth/otp/send, /api/auth/otp/verify, /api/auth/register, /api/auth/login, /api/auth/logout, /api/auth/me
+- Built resource API routes (via subagent): /api/resources/upload, /api/resources/list, /api/resources/create, /api/resources/[id] (GET/PATCH/DELETE), /api/community/feed, /api/profile/[username], /api/admin/stats
+- Created auth context provider (src/lib/auth-context.tsx): useAuth hook with user/loading/refresh/logout
+- Built auth UI (auth-screen.tsx): 4-step flow (intro → email → OTP → register) + login with API key, Synapse themed
+- Built sidebar navigation (sidebar.tsx): Home, Speed Ramp Studio, Images, Clips, XMLs, Community, Profile, Admin (admin only), upload menu, user card with logout
+- Built platform shell (platform-app.tsx): auth gate → sidebar + content area with view switching
+- Built resource card component (resource-card.tsx): preview, type badge, admin badge, duration, tags, hover actions
+- Built upload modal (upload-modal.tsx): file select → details form → upload to OnyxBase → create resource record
+- Built 6 view components (via subagent):
+  - home-view: welcome hero + quick action cards + recently added grid
+  - resources-view: per-type library with search + XML community/admin tabs
+  - community-view: masonry feed with All/Images/Clips/XMLs filter tabs
+  - profile-view: avatar/stats/tabs + draft-aware grid with download/delete
+  - admin-view: 5-stat dashboard + admin XML library management
+  - speed-ramp-studio: wraps existing SpeedRampApp with header
+- Updated page.tsx to render PlatformApp with AuthProvider
+- Updated layout.tsx metadata to "RailGuyEdits — Editing Platform"
+- Set Vercel env vars: ONYXBASE_BASE_URL, ONYXBASE_API_KEY (secret), ONYXBASE_EMAIL_CREDENTIAL, ADMIN_EMAIL
+- Verified with agent-browser: auth screen loads, login works, platform renders with sidebar, all views accessible, profile page shows user data, speed ramp studio integrated
+- Deployed to https://speedramp-pro.vercel.app (200 OK, "RailGuyEdits" + "Editing Platform" confirmed in production HTML)
+
+Stage Summary:
+- Complete RailGuyEdits Editing Platform built on OnyxBase backend
+- Authentication: OnyxBase API key login + email OTP registration flow
+- 6 main sections: Home, Speed Ramp Studio, Images, Clips, XMLs, Community, Profile, Admin
+- Resource system: upload images/clips/XMLs to OnyxBase file storage, publish/unpublish, search, download
+- XML separation: admin_xmls (privileged) vs community_xmls (public) — never mixed
+- Admin dashboard with stats + admin XML library management
+- Speed Ramp Studio fully integrated as clip creation tool
+- Synapse design system maintained throughout (dark theme, violet/cyan/emerald accents)
+- All OnyxBase API keys kept server-side (never exposed to browser)
+- Session management via httpOnly cookies + OnyxBase KV
+- Deployed live at https://speedramp-pro.vercel.app

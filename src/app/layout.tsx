@@ -23,10 +23,10 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Synapse — Speed Ramp Engine",
-  description: "Futuristic video speed-ramp studio. V-shaped ramps, batch processing, FFmpeg-powered. Built on the Synapse design system.",
-  keywords: ["speed ramp", "video editing", "FFmpeg", "V-ramp", "Synapse"],
-  authors: [{ name: "Synapse" }],
+  title: "RailGuyEdits — Editing Platform",
+  description: "The editing-focused community & resource platform for Indian railway editors. Images, clips, XMLs, speed ramp studio, and community — powered by OnyxBase.",
+  keywords: ["RailGuyEdits", "Indian railways", "editing", "speed ramp", "OnyxBase", "clips", "XMLs"],
+  authors: [{ name: "RailGuyEdits" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
