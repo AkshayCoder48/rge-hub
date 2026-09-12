@@ -1,19 +1,23 @@
 /**
  * POST /api/auth/otp/verify
  * Verifies the OTP code for an email.
- * Body: { email, code }
+ * Checks: existence, expiry, attempts, consumed state, hash match.
+ *
+ * Body: { email, code, purpose? }
+ * purpose: "registration" (default) | "password_reset"
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyOtp } from '@/lib/otp';
+import { verifyOtp, type OtpPurpose } from '@/lib/otp';
 
 export async function POST(request: NextRequest) {
   try {
-    const { email, code } = await request.json();
+    const { email, code, purpose } = await request.json();
     if (!email || !code) {
       return NextResponse.json({ ok: false, error: 'Email and code required' }, { status: 400 });
     }
 
-    const result = await verifyOtp(email, code);
+    const otpPurpose: OtpPurpose = purpose === 'password_reset' ? 'password_reset' : 'registration';
+    const result = await verifyOtp(email, code, otpPurpose);
     if (!result.ok) {
       return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
     }

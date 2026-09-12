@@ -16,7 +16,7 @@ import { AmbientOrbs } from '@/components/synapse';
 export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'admin' | 'studio';
 
 export function PlatformApp() {
-  const { user, loading } = useAuth();
+  const { user, status, loading } = useAuth();
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadType, setUploadType] = useState<'image' | 'clip' | 'xml'>('image');
@@ -30,10 +30,15 @@ export function PlatformApp() {
     setUploadOpen(true);
   }, []);
 
-  if (loading) {
+  // Show spinner while auth is being checked (loading state)
+  // CRITICAL: Do NOT show auth screen during loading — this prevents false logouts
+  if (loading || status === 'loading') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#030303]">
-        <div className="w-10 h-10 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
+        <div className="text-center space-y-4">
+          <div className="w-10 h-10 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin mx-auto" />
+          <p className="text-xs font-mono-display uppercase tracking-[0.2em] text-neutral-500">Loading session…</p>
+        </div>
       </div>
     );
   }

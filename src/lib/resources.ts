@@ -57,25 +57,102 @@ export async function getProfile(userId: string): Promise<Profile | null> {
   return kvGet<Profile>(`profile:${userId}`, ONYXBASE_COLLECTIONS.PROFILES);
 }
 
+/**
+ * Get a profile by username using a username index.
+ * The index maps `username:{username}` → `userId` in the profiles collection.
+ * Falls back to export-and-search if the index is missing (backward compat).
+ */
 export async function getProfileByUsername(username: string): Promise<Profile | null> {
-  // Profiles are keyed by userId; to find by username we export and search
+  const normalized = username.toLowerCase().trim();
+
+  // Try the username index first (fast O(1) lookup)
+  const userId = await kvGet<string>(`username:${normalized}`, ONYXBASE_COLLECTIONS.PROFILES);
+  if (userId) {
+    const profile = await getProfile(userId);
+    if (profile) return profile;
+  }
+
+  // Fallback: export and search (for backward compat with old profiles)
   const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
   for (const key of Object.keys(all)) {
     const p = all[key];
-    if (p && p.username && p.username.toLowerCase() === username.toLowerCase()) {
+    if (p && p.username && p.username.toLowerCase() === normalized) {
+      // Rebuild the index for this profile
+      await kvSet(`username:${normalized}`, p.userId, ONYXBASE_COLLECTIONS.PROFILES);
       return p;
     }
   }
   return null;
 }
 
+/**
+ * Check if a username is already taken.
+ */
+export async function isUsernameTaken(username: string): Promise<boolean> {
+  const existing = await getProfileByUsername(username);
+  return existing !== null;
+}
+
+/**
+ * Check if an email is already registered.
+ */
+export async function isEmailRegistered(email: string): Promise<boolean> {
+  const normalized = email.toLowerCase().trim();
+  const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
+  for (const key of Object.keys(all)) {
+    const p = all[key];
+    if (p && p.email && p.email.toLowerCase() === normalized) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Get a profile by email.
+ */
+export async function getProfileByEmail(email: string): Promise<Profile | null> {
+  const normalized = email.toLowerCase().trim();
+  const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
+  for (const key of Object.keys(all)) {
+    const p = all[key];
+    if (p && p.email && p.email.toLowerCase() === normalized) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * Upsert a profile and maintain the username index.
+ * If the username changed, removes the old index entry.
+ */
 export async function upsertProfile(profile: Profile): Promise<boolean> {
-  return kvSet(`profile:${profile.userId}`, profile, ONYXBASE_COLLECTIONS.PROFILES);
+  const normalized = profile.username.toLowerCase().trim();
+
+  // Check if there's an existing profile (for username change detection)
+  const existing = await getProfile(profile.userId);
+  if (existing && existing.username.toLowerCase() !== normalized) {
+    // Username changed — remove old index
+    try {
+      await kvDelete(`username:${existing.username.toLowerCase()}`, ONYXBASE_COLLECTIONS.PROFILES);
+    } catch {}
+  }
+
+  // Set the main profile record
+  const ok = await kvSet(`profile:${profile.userId}`, profile, ONYXBASE_COLLECTIONS.PROFILES);
+
+  // Maintain username index
+  if (ok) {
+    await kvSet(`username:${normalized}`, profile.userId, ONYXBASE_COLLECTIONS.PROFILES);
+  }
+
+  return ok;
 }
 
 export async function getAllProfiles(): Promise<Profile[]> {
   const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
-  return Object.values(all).filter(Boolean) as Profile[];
+  return Object.values(all).filter(p => p && p.userId) as Profile[];
 }
 
 // ============ Resources ============
