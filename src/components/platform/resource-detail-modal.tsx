@@ -69,14 +69,19 @@ export function ResourceDetailModal({
   const username = ownerProfile?.username || resource.ownerName;
   const isAdminResource = resource.ownerName?.toLowerCase() === 'railguyedits' || resource.xmlSource === 'admin';
 
+  // Every resource has its own canonical URL on our domain: /r/<id>
+  const pageUrl = typeof window !== 'undefined' ? `${window.location.origin}/r/${resource.id}` : `/r/${resource.id}`;
+
   const handleShare = () => {
-    if (resource.downloadUrl) {
-      navigator.clipboard.writeText(resource.downloadUrl).then(() => {
-        toast({ title: 'Link copied!', description: 'Resource URL copied to clipboard' });
-      }).catch(() => {
-        toast({ title: 'Copy failed', description: 'Could not copy URL', variant: 'destructive' });
-      });
-    }
+    navigator.clipboard.writeText(pageUrl).then(() => {
+      toast({ title: 'Link copied!', description: 'Resource page URL copied to clipboard' });
+    }).catch(() => {
+      toast({ title: 'Copy failed', description: 'Could not copy URL', variant: 'destructive' });
+    });
+  };
+
+  const handleOpenPage = () => {
+    window.open(pageUrl, '_blank');
   };
 
   const handleOpenFull = () => {
@@ -241,12 +246,21 @@ export function ResourceDetailModal({
             <Download className="w-4 h-4" /> Download
           </button>
           <button
-            onClick={handleOpenFull}
+            onClick={handleOpenPage}
             className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.05] border border-white/5 text-zinc-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
-            title="Open full image"
+            title="Open resource page (/r/…)"
           >
             <ExternalLink className="w-4 h-4" />
           </button>
+          {resource.downloadUrl && (
+            <button
+              onClick={handleOpenFull}
+              className="hidden sm:flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.05] border border-white/5 text-zinc-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
+              title="Open raw file"
+            >
+              <span className="font-mono text-[10px] text-zinc-500">RAW</span>
+            </button>
+          )}
           <button
             onClick={handleShare}
             className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.05] border border-white/5 text-zinc-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"

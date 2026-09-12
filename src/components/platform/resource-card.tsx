@@ -2,7 +2,7 @@
 
 import React from 'react';
 import type { Resource } from '@/lib/resources';
-import { FileCode, Film, Image as ImageIcon, Download, Eye, Crown } from 'lucide-react';
+import { FileCode, Film, Image as ImageIcon, Download, Eye, Crown, Link2 } from 'lucide-react';
 
 interface ResourceCardProps {
   resource: Resource;
@@ -68,7 +68,10 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
         {/* Hover actions */}
         <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-2">
           {onClick && (
-            <button className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center hover:bg-white/20 transition-all">
+            <button
+              className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center hover:bg-white/20 transition-all"
+              title="View details"
+            >
               <Eye className="w-4 h-4 text-white" />
             </button>
           )}
@@ -76,10 +79,23 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
             <button
               onClick={(e) => { e.stopPropagation(); onDownload(); }}
               className="w-10 h-10 rounded-full bg-[#ef233c]/30 backdrop-blur-sm border border-[#ef233c]/40 flex items-center justify-center hover:bg-[#ef233c]/50 transition-all"
+              title="Download"
             >
               <Download className="w-4 h-4 text-white" />
             </button>
           )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              const url = `${window.location.origin}/r/${resource.id}`;
+              navigator.clipboard?.writeText(url).catch(() => {});
+              window.open(url, '_blank');
+            }}
+            className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center hover:bg-white/20 transition-all"
+            title="Open its own page (/r/…)"
+          >
+            <Link2 className="w-4 h-4 text-white" />
+          </button>
         </div>
       </div>
 

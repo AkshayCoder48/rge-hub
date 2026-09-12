@@ -216,6 +216,10 @@ export async function PATCH(
       );
     }
 
+    // Invalidate server-side cache so listings reflect the update (PRD §46)
+    const { invalidateResources } = await import('@/lib/cache');
+    invalidateResources();
+
     return NextResponse.json({ ok: true, resource });
   } catch (err) {
     console.error('[resources/patch] error:', err);

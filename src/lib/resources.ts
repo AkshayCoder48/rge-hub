@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvGet, kvDelete, kvExport, kvList } from './onyxbase';
+import { kvSet, kvGet, kvDelete, kvExport, kvList, kvSetVerified, kvGetWithRetry } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 // ============ Types ============
@@ -30,6 +30,8 @@ export interface Profile {
 export type ResourceType = 'image' | 'clip' | 'xml';
 export type XmlSource = 'community' | 'admin';
 
+export type ResourceStatus = 'ready' | 'processing' | 'pending';
+
 export interface Resource {
   id: string;
   type: ResourceType;
@@ -41,6 +43,12 @@ export interface Resource {
   thumbnailFileId?: string; // optional thumbnail
   downloadUrl?: string;     // public download URL
   thumbnailUrl?: string;
+  // Upload metadata (PRD §17) — captured at upload time, optional for legacy records
+  fileName?: string;
+  mimeType?: string;
+  size?: number;
+  status?: ResourceStatus;
+  clientId?: string; // idempotency key supplied by the uploader (PRD §25)
   tags: string[];
   category?: string;
   duration?: number; // for clips (seconds)
@@ -171,6 +179,61 @@ export async function createResource(resource: Resource): Promise<boolean> {
   return kvSet(resource.id, resource, collection);
 }
 
+/**
+ * Two-phase persistent create (PRD §9, §14, §49):
+ * write the record, then verify it is readable before reporting success.
+ * Only { ok: true, verified: true } may be surfaced as "Upload complete".
+ */
+export async function createResourceVerified(
+  resource: Resource,
+  opts: { retries?: number; baseDelayMs?: number } = {}
+): Promise<{ ok: boolean; verified: boolean; attempts: number; ms: number }> {
+  const collection = collectionForType(resource.type, resource.xmlSource);
+  return kvSetVerified(resource.id, resource, collection, {
+    retries: opts.retries ?? 6,
+    baseDelayMs: opts.baseDelayMs ?? 600,
+  });
+}
+
+/**
+ * Lightweight read-back verification for a single record (PRD §49).
+ * Used by the verify endpoint and by registration retries.
+ */
+export async function verifyResource(
+  id: string,
+  type: ResourceType,
+  xmlSource?: XmlSource
+): Promise<{ verified: boolean; resource: Resource | null; attempts: number }> {
+  const collection = collectionForType(type, xmlSource);
+  const { value, attempts } = await kvGetWithRetry<Resource>(id, collection, {
+    retries: 4,
+    baseDelayMs: 600,
+  });
+  return { verified: value !== null, resource: value, attempts };
+}
+
+/**
+ * Locate a resource by id across all public collections (no type needed).
+ * Used by public resource pages (/r/[id]) and the sitemap.
+ * NEVER includes admin XMLs unless includeAdmin is true (server-side only).
+ */
+export async function getResourceAny(
+  id: string,
+  opts: { includeAdmin?: boolean } = {}
+): Promise<Resource | null> {
+  const img = await getResource(id, 'image').catch(() => null);
+  if (img) return img;
+  const clip = await getResource(id, 'clip').catch(() => null);
+  if (clip) return clip;
+  const cx = await getResource(id, 'xml', 'community').catch(() => null);
+  if (cx) return cx;
+  if (opts.includeAdmin) {
+    const ax = await getResource(id, 'xml', 'admin').catch(() => null);
+    if (ax) return ax;
+  }
+  return null;
+}
+
 export async function getResource(id: string, type: ResourceType, xmlSource?: XmlSource): Promise<Resource | null> {
   const collection = collectionForType(type, xmlSource);
   return kvGet<Resource>(id, collection);
@@ -257,10 +320,21 @@ export async function searchResources(query: string): Promise<Resource[]> {
   });
 }
 
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
 /**
  * Generate a resource ID.
+ *
+ * When the client supplies a stable `clientId` (idempotency key, PRD §25),
+ * the resource id is derived from it so that registration retries return
+ * the SAME record instead of creating duplicates (PRD §26).
  */
-export function generateResourceId(type: ResourceType): string {
+export function generateResourceId(type: ResourceType, clientId?: string): string {
   const prefix = type === 'image' ? 'img' : type === 'clip' ? 'clip' : 'xml';
+  if (clientId && CLIENT_ID_RE.test(clientId)) {
+    const clean = clientId.replace(/[^A-Za-z0-9_-]/g, '').substring(0, 48);
+    if (clean.startsWith(`${prefix}_`)) return clean;
+    return `${prefix}_${clean}`;
+  }
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
 }

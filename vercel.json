@@ -1,17 +1,5 @@
 {
-  "services": {
-    "speed-ramper": {
-      "root": ".",
-      "framework": "nextjs"
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": {
-        "type": "service",
-        "service": "speed-ramper"
-      }
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "prisma generate && next build"
 }

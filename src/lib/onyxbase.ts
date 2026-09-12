@@ -451,3 +451,203 @@ export const ONYXBASE_COLLECTIONS = {
   SESSIONS: 'sessions',
   CATEGORIES: 'categories',
 } as const;
+
+// ============ Upload reliability (PRD: persistence & performance fix) ============
+
+/** Max file size for a single-shot multipart upload (OnyxBase limit). */
+export const MAX_SIMPLE_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/** Per-stage timing instrumentation for upload diagnostics (PRD §3). */
+export interface UploadTimings {
+  upload_init_ms: number;
+  transfer_ms: number;
+  storage_finalize_ms: number;
+  total_upload_ms: number;
+  attempts: number;
+}
+
+function emptyTimings(): UploadTimings {
+  return {
+    upload_init_ms: 0,
+    transfer_ms: 0,
+    storage_finalize_ms: 0,
+    total_upload_ms: 0,
+    attempts: 0,
+  };
+}
+
+export type UploadFileResult =
+  | { ok: true; file: OnyxFileMeta; timings: UploadTimings }
+  | {
+      ok: false;
+      code: 'UPLOAD_STORAGE_ERROR' | 'UPLOAD_THROTTLED';
+      throttled: boolean;
+      retryAfterSecs?: number;
+      error: string;
+      timings: UploadTimings;
+    };
+
+/**
+ * Upload a file to OnyxBase storage with structured results.
+ *
+ * Improvements over the legacy path:
+ * - Returns a discriminated result (success vs throttled vs failed) so the
+ *   API layer can answer 429 with a Retry-After instead of hanging ~60s.
+ * - Caps any single backoff wait at 10s (Telegram flood-waits can otherwise
+ *   stall one small upload for 50-60+ seconds).
+ * - Emits per-stage timings for bottleneck diagnosis (PRD §3).
+ */
+export async function uploadFileResult(
+  file: File | Blob,
+  fileName: string,
+  mimeType: string,
+  label?: string
+): Promise<UploadFileResult> {
+  const timings = emptyTimings();
+  const t0 = Date.now();
+
+  // --- init: build the multipart payload (lightweight, no network) ---
+  const tInit = Date.now();
+  const formData = new FormData();
+  formData.append('file', file, fileName);
+  if (label) formData.append('label', label);
+  timings.upload_init_ms = Date.now() - tInit;
+
+  let lastError = 'Unknown upload error';
+  const MAX_ATTEMPTS = 3;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    timings.attempts = attempt;
+    const tTransfer = Date.now();
+    try {
+      const res = await fetch(`${ONYXBASE_BASE_URL}/v1/files`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+        body: formData,
+      });
+      timings.transfer_ms += Date.now() - tTransfer;
+
+      if (res.ok) {
+        const tFinalize = Date.now();
+        const data = await res.json();
+        timings.storage_finalize_ms = Date.now() - tFinalize;
+        timings.total_upload_ms = Date.now() - t0;
+        if (data.file) {
+          return {
+            ok: true,
+            file: {
+              ...data.file,
+              url: `${ONYXBASE_BASE_URL}/f/${data.file.fileId}`,
+            },
+            timings,
+          };
+        }
+        lastError = 'Storage returned no file reference';
+      } else {
+        const errText = await res.text().catch(() => `HTTP ${res.status}`);
+        lastError = errText.slice(0, 300) || `HTTP ${res.status}`;
+        const throttled =
+          res.status === 429 || res.status === 413 || /retry after/i.test(errText);
+        if (throttled) {
+          const match = errText.match(/retry after (\d+)/i);
+          const retryAfterSecs = match ? parseInt(match[1], 10) : 5 * attempt;
+          console.warn(
+            `[OnyxBase] upload throttled (attempt ${attempt}/${MAX_ATTEMPTS}), server asked retry after ${retryAfterSecs}s`
+          );
+          if (attempt < MAX_ATTEMPTS) {
+            // Cap the wait so one small file can never hang ~60s (PRD §6, §40).
+            const waitSecs = Math.min(retryAfterSecs, 10);
+            await new Promise((r) => setTimeout(r, waitSecs * 1000));
+            continue;
+          }
+          timings.total_upload_ms = Date.now() - t0;
+          return {
+            ok: false,
+            code: 'UPLOAD_THROTTLED',
+            throttled: true,
+            retryAfterSecs,
+            error: lastError,
+            timings,
+          };
+        }
+        console.error('[OnyxBase] uploadFile failed:', res.status, errText.slice(0, 300));
+        timings.total_upload_ms = Date.now() - t0;
+        return {
+          ok: false,
+          code: 'UPLOAD_STORAGE_ERROR',
+          throttled: false,
+          error: lastError,
+          timings,
+        };
+      }
+    } catch (err) {
+      timings.transfer_ms += Date.now() - tTransfer;
+      lastError = err instanceof Error ? err.message : 'Network error';
+      console.warn(`[OnyxBase] upload network error (attempt ${attempt}/${MAX_ATTEMPTS}):`, lastError);
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+        continue;
+      }
+    }
+  }
+
+  timings.total_upload_ms = Date.now() - t0;
+  console.error('[OnyxBase] uploadFile exhausted retries:', lastError);
+  return {
+    ok: false,
+    code: 'UPLOAD_STORAGE_ERROR',
+    throttled: false,
+    error: lastError,
+    timings,
+  };
+}
+
+/**
+ * Read a key with retries — used to verify read-your-write after kvSet
+ * (OnyxBase is eventually consistent; an immediate read can return null).
+ */
+export async function kvGetWithRetry<T = any>(
+  key: string,
+  collection: string = 'default',
+  opts: { retries?: number; baseDelayMs?: number } = {}
+): Promise<{ value: T | null; attempts: number; ms: number }> {
+  const retries = opts.retries ?? 5;
+  const baseDelayMs = opts.baseDelayMs ?? 600;
+  const t0 = Date.now();
+  let value: T | null = null;
+  let attempts = 0;
+  for (let i = 0; i < retries; i++) {
+    attempts = i + 1;
+    value = await kvGet<T>(key, collection);
+    if (value !== null && value !== undefined) break;
+    if (i < retries - 1) {
+      await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
+    }
+  }
+  return { value, attempts, ms: Date.now() - t0 };
+}
+
+/**
+ * Two-phase persistent write (PRD §9, §14):
+ * Phase 1 — kvSet; Phase 2 — read-back verification with retries.
+ * Only { ok: true, verified: true } means the record is durable and readable.
+ */
+export async function kvSetVerified(
+  key: string,
+  value: any,
+  collection: string = 'default',
+  opts: { retries?: number; baseDelayMs?: number } = {}
+): Promise<{ ok: boolean; verified: boolean; attempts: number; ms: number }> {
+  const t0 = Date.now();
+  const ok = await kvSet(key, value, collection);
+  if (!ok) {
+    return { ok: false, verified: false, attempts: 0, ms: Date.now() - t0 };
+  }
+  const { value: readBack, attempts } = await kvGetWithRetry(key, collection, opts);
+  return {
+    ok: true,
+    verified: readBack !== null && readBack !== undefined,
+    attempts,
+    ms: Date.now() - t0,
+  };
+}

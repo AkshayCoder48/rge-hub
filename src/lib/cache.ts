@@ -40,6 +40,21 @@ export function setCached<T>(key: string, data: T): void {
 }
 
 /**
+ * Cache a resource-list payload ONLY when it is non-empty (PRD §46).
+ *
+ * OnyxBase is eventually consistent and can briefly return empty lists
+ * right after a write. Caching that empty result is what made uploads
+ * "disappear" (and "Recently added" render empty) after a refresh.
+ * Empty responses are therefore never cached — the next request retries
+ * the backing store instead of serving a stale empty page.
+ */
+export function setCachedNonEmpty<T>(key: string, data: T, isEmpty: boolean): boolean {
+  if (isEmpty) return false;
+  setCached(key, data);
+  return true;
+}
+
+/**
  * Invalidate a specific cache key.
  */
 export function invalidate(key: string): void {
