@@ -279,6 +279,10 @@ export async function DELETE(
       );
     }
 
+    // Invalidate server-side cache
+    const { invalidateResources } = await import('@/lib/cache');
+    invalidateResources();
+
     return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('[resources/delete] error:', err);

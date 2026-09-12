@@ -1144,3 +1144,240 @@ Stage Summary:
 - OnyxBase consistency issues mitigated with retry logic
 - All getSession() usage fixed across all API routes
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+Task ID: 7-views-rednoir
+Agent: sub-agent
+Task: Update view components to use batch fetching (resource-store) and Red Noir design system
+
+Work Log:
+
+Context:
+- Read /home/z/my-project/worklog.md (Tasks 16, 7-views-fix prior work)
+- Read /home/z/my-project/src/lib/resource-store.ts — Zustand store with {allResources, images, clips, xmls, myResources, loading, loaded, fetchAll, fetchMine, invalidate, ...}
+- Confirmed PlatformApp already calls fetchAll() and fetchMine(user.userId) on mount — views must READ, not fetch
+- Read existing Red Noir styling patterns from sidebar.tsx (#ef233c, bg-black/60 backdrop-blur-xl, font-manrope, transition ease-[cubic-bezier(0.23,1,0.32,1)])
+
+### 1. home-view.tsx — full rewrite
+- Removed useEffect + fetch to /api/community/feed
+- Added `import { useResourceStore } from '@/lib/resource-store'`
+- Reads `allResources` and `loaded` from store via selectors
+- Shows 6 most recent from allResources (slice(0,6))
+- Loading skeleton (6 cards) when !loaded
+- Removed violet/cyan/emerald accentMap and per-action color theming
+- All quick-action cards now use bg-[#ef233c]/10 border-[#ef233c]/20 icons text-[#ef233c]
+- Hero card: rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl, font-manrope font-semibold heading "Welcome back, {displayName}"
+- Kept ResourceDetailModal integration
+- Kept Speed Ramp Studio + Upload Image/Clip/XML quick actions
+
+### 2. resources-view.tsx — full rewrite
+- Removed useEffect + fetch to /api/resources/list
+- Removed all XML tab logic (xmlSource state, xmlTab state, Crown import, admin tab buttons) — admin completely hidden
+- Removed refreshKey state (no per-view fetch to refresh)
+- Reads `images`, `clips`, `xmls`, `myResources`, `loaded` from store via selectors
+- Merges public-of-type + my-of-type, dedupes by id, sorts newest-first
+- Client-side search filter on the merged list (preserved)
+- Loading skeleton when !loaded
+- handleDelete now calls invalidate() + fetchMine(user.userId) to refresh the shared store after delete
+- handleUploadClick just calls onUpload() (parent triggers store invalidate via UploadModal onSuccess)
+- Red Noir styling throughout: rounded-xl bg-black/60 backdrop-blur-xl border border-white/10, type icon text-[#ef233c], upload button bg-[#ef233c] hover:bg-red-700 rounded-full, search input focus:border-[#ef233c]/40
+- Kept ResourceDetailModal with canDelete={isOwn(selected)} onDelete={handleDelete}
+- Kept empty-state PackageOpen + upload CTA
+
+### 3. community-view.tsx — full rewrite
+- Removed useEffect + fetch to /api/community/feed
+- Reads `allResources` and `loaded` from store
+- Kept filter tabs (All/Images/Clips/XMLs) — client-side filter on store data
+- Active tab style: bg-[#ef233c]/10 text-white border border-[#ef233c]/30, icon text-[#ef233c]
+- Removed per-tab color (violet/cyan/emerald) — all tabs use same red accent on active
+- Loading skeleton when !loaded
+- Kept search bar, masonry grid (columns-1 sm:columns-2 lg:columns-3)
+- Kept ResourceDetailModal integration
+- Header: rounded-xl bg-black/60 backdrop-blur-xl, accent bg-[#ef233c]/10
+
+### 4. profile-view.tsx — full rewrite (preserving EditProfileModal)
+- KEPT profile fetch: GET /api/profile/{username} (for profile data only)
+- Removed `resources` state and the `setResources(data.resources)` line — no longer trusts profile API for resources
+- Reads `myResources` and `loaded` from store
+- `resources` derived from store's myResources (already server-filtered by owner=user.userId)
+- Loading state shows when fetchState==='loading' OR !loaded (skeleton grid for resources)
+- handleDelete now calls invalidate() + fetchMine(user.userId) instead of optimistic setResources filter
+- StatBlock simplified: removed accent prop, always uses bg-[#ef233c]/5 border-[#ef233c]/15 icon text-[#ef233c]
+- All tabs use bg-[#ef233c]/10 text-[#ef233c] active style (removed per-type color)
+- Avatar gradient now from-[#ef233c]/30 to-zinc-800
+- Edit Profile button: rounded-full hover:border-[#ef233c]/30
+- EditProfileModal rewritten with Red Noir:
+  - Card: bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl
+  - All inputs: bg-black/60 border-white/10 focus:border-[#ef233c]/40
+  - Save button: rounded-full bg-[#ef233c] hover:bg-red-700
+  - Cancel button: rounded-full bg-white/[0.03]
+  - Removed all violet-500/cyan-500 references
+- Kept EditProfileModal avatar upload + PATCH /api/profile/update flow
+- Kept ResourceDetailModal with canDelete={isOwnProfile} onDelete={handleDelete}
+- Kept draft badge (amber) on unpublished resources
+- Kept inline Download + Delete buttons under each card in the grid
+
+### 5. resource-card.tsx — full rewrite (Red Noir)
+- typeColor is now constant: 'text-[#ef233c]' (removed per-type switch)
+- Card container: rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl hover:border-[#ef233c]/30
+- Admin badge: bg-[#ef233c]/20 border-[#ef233c]/30 text-[#ef233c]
+- Download hover button: bg-[#ef233c]/30 border-[#ef233c]/40 hover:bg-[#ef233c]/50
+- XML fallback icon and image fallback use text-[#ef233c]/30
+- Owner name on admin resources: text-[#ef233c]
+- All transitions use duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]
+- Kept object-contain for full-size image support, kept hover scale-105
+
+### 6. upload-modal.tsx — full rewrite (Red Noir)
+- Removed dynamic accentColor switch (violet/cyan/emerald)
+- Card: bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl
+- Header icon: bg-[#ef233c]/15 text-[#ef233c]
+- Drop zone: hover:border-[#ef233c]/30 hover:bg-black/60
+- Drop icon: bg-[#ef233c]/10 text-[#ef233c]
+- All input focus:border-[#ef233c]/40
+- Publish checkbox: accent-[#ef233c]
+- Upload button: rounded-full bg-[#ef233c] hover:bg-red-700
+- Uploading spinner: text-[#ef233c]
+- Done icon: bg-[#ef233c]/10 text-[#ef233c]
+- Kept 4-step flow (select → details → uploading → done) and OnyxBase upload logic
+
+### 7. resource-detail-modal.tsx — full rewrite (Red Noir)
+- typeColor constant: 'text-[#ef233c]'
+- Header icon container: bg-[#ef233c]/15
+- Card: bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl
+- Creator row: rounded-xl bg-black/40 border border-white/5
+- Creator avatar gradient: from-[#ef233c]/20 to-zinc-800
+- Admin badge: bg-[#ef233c]/15 border border-[#ef233c]/30 text-[#ef233c]
+- Meta info cards: rounded-xl bg-black/40 border border-white/5
+- Loading spinner: border-[#ef233c]/30 border-t-[#ef233c]
+- Download button: rounded-full bg-[#ef233c] hover:bg-red-700
+- Secondary buttons: rounded-full bg-white/[0.05] border border-white/5
+- Delete button: rounded-full bg-[#ef233c]/10 border-[#ef233c]/20 text-[#ef233c]
+- Kept full-resolution image preview (object-contain, max-h-[50vh])
+- Kept video preview for clips
+- Kept dynamic owner profile resolution (fetch /api/profile/{ownerName}) with queueMicrotask deferral
+- Kept all action buttons (Download, Open full, Share, Delete)
+
+### Verification
+- bun run lint → 0 errors, 0 warnings (exit 0)
+- bunx tsc --noEmit → no errors in any of the 7 modified files (errors reported are all pre-existing in unrelated files: examples/, skills/, src/lib/resources.ts, src/lib/ffmpeg*.ts, src/app/api/resources/[id]/route.ts, src/app/api/resources/upload/route.ts, src/lib/otp.ts, src/lib/api.ts)
+
+### Behavior summary across views
+| View             | Data source                  | Loading state              | Detail modal | Delete               |
+|------------------|------------------------------|----------------------------|--------------|----------------------|
+| home-view        | store.allResources (first 6) | skeleton grid (6 cards)    | yes          | n/a                  |
+| resources-view   | store images/clips/xmls + myResources merged, deduped | skeleton grid (6 cards) | yes (canDelete=isOwn) | yes → invalidate+fetchMine |
+| community-view   | store.allResources           | skeleton grid (6 cards)    | yes          | n/a                  |
+| profile-view     | store.myResources            | skeleton grid (6 cards)    | yes (canDelete=isOwnProfile) | yes → invalidate+fetchMine |
+
+### Red Noir palette compliance
+- Primary accent: #ef233c everywhere (text-[#ef233c], bg-[#ef233c], border-[#ef233c])
+- All violet-500, cyan-500, emerald-500 references removed from these 7 files
+- Cards: rounded-xl (or rounded-2xl for modals) bg-black/60 backdrop-blur-xl border border-white/10
+- Headings: font-manrope font-semibold
+- Body: font-inter
+- Labels: text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500
+- Buttons: bg-[#ef233c] hover:bg-red-700 text-white rounded-full
+- Transitions: transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]
+
+Stage Summary:
+- All 4 platform view components (home, resources, community, profile) now read from the shared Zustand resource store instead of fetching individually — instant loading after initial fetchAll
+- All 7 platform components (views + resource-card + upload-modal + resource-detail-modal) converted to Red Noir design system
+- Loading skeletons shown when !loaded (store still fetching)
+- Admin XML tab completely removed from resources-view (admin is hidden everywhere)
+- Profile-view keeps profile API fetch for profile data but uses store myResources for the resource list
+- Delete actions in resources-view and profile-view now refresh the shared store via invalidate()+fetchMine() so all views stay in sync
+- EditProfileModal preserved with full Red Noir styling and same PATCH flow
+- ResourceDetailModal preserved with full Red Noir styling, full-res image preview, and dynamic creator resolution
+- Lint clean, types clean (no new errors)
+---
+Task ID: 17
+Agent: main
+Task: Batch/chunk fetching for instant loading, rename to RGE Hub, remove admin, Red Noir design
+
+Work Log:
+
+Batch/Chunk Fetching (Instant Loading):
+- Created server-side in-memory cache (src/lib/cache.ts) with 15s TTL for OnyxBase responses
+- Created /api/resources/all endpoint — batch fetches ALL resources (images+clips+xmls) in parallel server-side
+- Cache invalidation on resource create/delete ensures fresh data after mutations
+- Performance: First request ~5s (OnyxBase latency), cached requests ~29ms (186x faster)
+- Created client-side Zustand store (src/lib/resource-store.ts) with prefetch:
+  - PlatformApp calls fetchAll() + fetchMine(userId) on mount
+  - All views READ from the store — NO individual fetch calls per view
+  - Navigation between views is INSTANT (data already in memory)
+  - After upload/delete, store.invalidate() re-fetches in background
+- Loading skeletons (animated pulse cards) shown while store loads
+
+Rename to RGE Hub:
+- Updated layout.tsx metadata: title "RGE Hub — Editing Platform"
+- Updated sidebar: logo text "RGE Hub" with red accent on "Hub"
+- Updated auth-screen: "RGE Hub" branding
+- Updated platform-app: mobile top bar shows "RGE Hub"
+- All references to "RailGuyEdits" replaced with "RGE Hub" in UI
+
+SVG Logo:
+- Created src/components/logo.tsx with Logo component
+- Design: red diamond (rotated 45°) with white play triangle — represents video editing + railways
+- LogoWithText component: logo + "RGE Hub" text with red "Hub"
+- Used in sidebar and auth-screen
+
+Admin Panel Completely Removed:
+- Removed AdminView import from platform-app
+- Removed 'admin' from ViewKey type
+- Removed admin nav item from sidebar entirely (not just hidden)
+- Admin API routes still exist but are completely inaccessible from the UI
+- No admin URL or navigation visible to any user
+
+Red Noir Design System (from reference HTML):
+- Primary accent: #ef233c (red) — replaces all violet/cyan/emerald
+- Background: pure black #000000 with red-tinted gradient (from-[#1a0505] to-black)
+- Fonts: Manrope (headings) + Inter (body) via next/font/google
+- Parallax stars background animation (stars-1, stars-2 with animStar keyframes)
+- Radial red glow blur (800px, blur-120px)
+- Grid overlay with radial mask
+- Shiny CTA button with spinning conic-gradient border (shiny-cta class)
+- Cards: border-white/10 bg-black/60 backdrop-blur-xl rounded-xl
+- Buttons: bg-[#ef233c] hover:bg-red-700 rounded-full
+- Labels: text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500
+- Transitions: cubic-bezier(0.23, 1, 0.32, 1) — "snappy" feel
+- Text selection color: red (#ef233c)
+- Custom scrollbar with red tint
+- Range sliders with red thumb + glow
+
+Files Updated:
+- src/app/layout.tsx — Manrope + Inter fonts, RGE Hub metadata
+- src/app/globals.css — Complete Red Noir theme rewrite
+- src/app/page.tsx — (unchanged, renders PlatformApp)
+- src/components/logo.tsx — NEW SVG logo component
+- src/lib/cache.ts — NEW server-side cache
+- src/lib/resource-store.ts — NEW Zustand store with batch prefetch
+- src/app/api/resources/all/route.ts — NEW batch fetch endpoint
+- src/app/api/resources/create/route.ts — Added cache invalidation
+- src/app/api/resources/[id]/route.ts — Added cache invalidation on delete
+- src/components/platform/platform-app.tsx — Red Noir, prefetch, remove admin
+- src/components/platform/sidebar.tsx — Red Noir, remove admin, RGE Hub logo
+- src/components/platform/auth-screen.tsx — Complete Red Noir restyle
+- src/components/platform/views/*.tsx — All use batch store + Red Noir (via subagent)
+- src/components/platform/resource-card.tsx — Red Noir (via subagent)
+- src/components/platform/upload-modal.tsx — Red Noir (via subagent)
+- src/components/platform/resource-detail-modal.tsx — Red Noir (via subagent)
+
+Verified:
+- Page title: "RGE Hub — Editing Platform"
+- No admin button in sidebar
+- Session persists after reload
+- Batch API: 29ms cached (186x faster than 5.4s uncached)
+- Production batch API: 0.77s cached (8.7x faster than 6.7s uncached)
+- Navigation between views is instant (data from Zustand store)
+- No console errors
+- Lint passes clean
+- Deployed to https://speedramp-pro.vercel.app
+
+Stage Summary:
+- Batch/chunk fetching implemented: server-side cache (15s TTL) + client-side Zustand store with prefetch
+- Navigation between views is INSTANT (no per-view API calls)
+- App renamed from "RailGuyEdits" to "RGE Hub" everywhere
+- SVG logo added (red diamond + play triangle)
+- Admin panel completely removed from sidebar and UI
+- Red Noir design system applied throughout (red #ef233c accent, Manrope+Inter fonts, parallax stars, shiny CTA buttons)
+- Deployed live at https://speedramp-pro.vercel.app

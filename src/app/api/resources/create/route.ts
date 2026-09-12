@@ -109,6 +109,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Invalidate server-side cache so next read sees the new resource
+    const { invalidateResources } = await import('@/lib/cache');
+    invalidateResources();
+
     return NextResponse.json({ ok: true, resource });
   } catch (err) {
     console.error('[resources/create] error:', err);

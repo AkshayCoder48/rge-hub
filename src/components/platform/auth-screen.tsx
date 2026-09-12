@@ -2,8 +2,8 @@
 
 import React, { useState, useCallback } from 'react';
 import { useAuth } from '@/lib/auth-context';
-import { AmbientOrbs } from '@/components/synapse';
-import { Mail, ArrowRight, ArrowLeft, Loader2, ShieldCheck, Film, CheckCircle2, Lock, User as UserIcon, KeyRound } from 'lucide-react';
+import { Logo } from '@/components/logo';
+import { Mail, ArrowRight, ArrowLeft, Loader2, ShieldCheck, CheckCircle2, Lock, User as UserIcon, KeyRound } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 type Step = 'intro' | 'email' | 'otp' | 'register' | 'login' | 'forgot' | 'forgot-otp' | 'reset-password';
@@ -166,48 +166,65 @@ export function AuthScreen() {
     }
   }, [email, newPassword, confirmPassword, refresh, toast]);
 
-  const inputCls = "w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors";
-  const inputWithIconCls = "w-full pl-9 pr-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors";
-  const labelCls = "text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-2";
-  const btnCls = "w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white font-medium text-sm hover:from-violet-400 hover:to-cyan-400 disabled:opacity-50 transition-all duration-300 ease-snap";
-  const backBtnCls = "flex items-center gap-1 text-xs text-neutral-500 hover:text-white transition-colors";
+  const inputCls = "w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder:text-zinc-600 focus:border-[#ef233c] focus:outline-none transition-all";
+  const inputWithIconCls = "w-full pl-9 pr-4 py-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder:text-zinc-600 focus:border-[#ef233c] focus:outline-none transition-all";
+  const labelCls = "text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-2";
+  const btnCls = "w-full flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-[#ef233c] hover:bg-red-700 text-white font-bold text-sm transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-50";
+  const backBtnCls = "flex items-center gap-1 text-xs text-zinc-500 hover:text-white transition-colors";
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6 py-12 relative z-10">
-      <div className="w-full max-w-md">
+      {/* Red Noir background */}
+      <div className="fixed inset-0 z-0 pointer-events-none">
+        <div className="absolute inset-0 bg-gradient-to-b from-[#1a0505] to-black" />
+        <div className="absolute top-0 left-0 w-[1px] h-[1px] bg-transparent stars-1 animate-stars-1" />
+        <div className="absolute top-0 left-0 w-[2px] h-[2px] bg-transparent stars-2 animate-stars-2" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-red-600/5 rounded-full blur-[120px]" />
+        <div
+          className="absolute inset-0 opacity-[0.03]"
+          style={{
+            backgroundImage: `linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)`,
+            backgroundSize: '40px 40px',
+            maskImage: 'radial-gradient(circle at center, black 40%, transparent 80%)',
+            WebkitMaskImage: 'radial-gradient(circle at center, black 40%, transparent 80%)',
+          }}
+        />
+      </div>
+
+      <div className="w-full max-w-md relative z-10">
         {/* Logo / Brand */}
         <div className="text-center mb-10 animate-fade-up">
           <div className="inline-flex items-center gap-2 mb-6">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center shadow-[0_0_20px_-5px_rgba(139,92,246,0.5)]">
-              <Film className="w-5 h-5 text-white" />
-            </div>
-            <span className="font-serif-display text-2xl text-white">RailGuyEdits</span>
+            <Logo size={40} />
+            <span className="font-manrope font-bold text-2xl text-white">
+              RGE <span className="text-[#ef233c]">Hub</span>
+            </span>
           </div>
-          <p className="text-sm text-neutral-400">
+          <p className="text-sm text-zinc-400 font-inter">
             The editing-focused community & resource platform for Indian railway editors.
           </p>
         </div>
 
         {/* Card */}
-        <div className="glass rounded-3xl p-8 animate-fade-up stagger-1">
+        <div className="bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl p-8 animate-fade-up stagger-1">
           {step === 'intro' && (
             <div className="space-y-6">
               <div className="text-center">
-                <h1 className="font-serif-display text-3xl text-white mb-2">Welcome</h1>
-                <p className="text-sm text-neutral-400">Sign in to your account or create a new one.</p>
+                <h1 className="text-3xl font-manrope font-semibold text-white mb-2">Welcome</h1>
+                <p className="text-sm text-zinc-400 font-inter">Sign in to your account or create a new one.</p>
               </div>
               <button onClick={() => setStep('login')} className={btnCls}>
                 <Lock className="w-4 h-4" /> Sign in with password
               </button>
               <div className="flex items-center gap-3">
                 <div className="flex-1 h-px bg-white/5" />
-                <span className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-600">or</span>
+                <span className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-600">or</span>
                 <div className="flex-1 h-px bg-white/5" />
               </div>
-              <button onClick={() => setStep('email')} className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-neutral-300 font-medium text-sm hover:bg-white/[0.05] hover:text-white transition-all duration-300 ease-snap">
+              <button onClick={() => setStep('email')} className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-white/5 border border-white/10 text-zinc-300 font-bold text-sm hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]">
                 <Mail className="w-4 h-4" /> Create new account
               </button>
-              <div className="flex items-center justify-center gap-1.5 pt-2 text-[10px] text-neutral-600">
+              <div className="flex items-center justify-center gap-1.5 pt-2 text-[10px] text-zinc-600">
                 <ShieldCheck className="w-3 h-3" />
                 <span>Secure email OTP verification via OnyxBase</span>
               </div>
@@ -218,8 +235,8 @@ export function AuthScreen() {
             <div className="space-y-5">
               <button onClick={() => setStep('intro')} className={backBtnCls}><ArrowLeft className="w-3 h-3" /> Back</button>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Sign in</h2>
-                <p className="text-xs text-neutral-500">Enter your email and password</p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Sign in</h2>
+                <p className="text-xs text-zinc-500 font-inter">Enter your email and password</p>
               </div>
               <div>
                 <label className={labelCls}>Email</label>
@@ -232,7 +249,7 @@ export function AuthScreen() {
               <button onClick={handleLogin} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Lock className="w-4 h-4" /> Sign In</>}
               </button>
-              <button onClick={() => setStep('forgot')} className="w-full text-center text-[11px] text-violet-400/70 hover:text-violet-400 transition-colors">
+              <button onClick={() => setStep('forgot')} className="w-full text-center text-[11px] text-[#ef233c] hover:text-red-400 transition-colors">
                 Forgot password? Request new password
               </button>
             </div>
@@ -242,8 +259,8 @@ export function AuthScreen() {
             <div className="space-y-5">
               <button onClick={() => setStep('intro')} className={backBtnCls}><ArrowLeft className="w-3 h-3" /> Back</button>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Verify email</h2>
-                <p className="text-xs text-neutral-500">We'll send a 6-digit code to verify it's you</p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Verify email</h2>
+                <p className="text-xs text-zinc-500 font-inter">We'll send a 6-digit code to verify it's you</p>
               </div>
               <div>
                 <label className={labelCls}>Email Address</label>
@@ -259,17 +276,17 @@ export function AuthScreen() {
             <div className="space-y-5">
               <button onClick={() => setStep('email')} className={backBtnCls}><ArrowLeft className="w-3 h-3" /> Back</button>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Enter code</h2>
-                <p className="text-xs text-neutral-500">Sent to <span className="text-neutral-300">{email}</span></p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Enter code</h2>
+                <p className="text-xs text-zinc-500 font-inter">Sent to <span className="text-zinc-300">{email}</span></p>
               </div>
               <div>
                 <label className={labelCls}>Verification Code</label>
-                <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('registration'); }} className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-2xl text-center text-white font-mono-display tracking-[0.5em] placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors" />
+                <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('registration'); }} className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-2xl text-center text-white font-manrope tracking-[0.5em] placeholder:text-zinc-700 focus:border-[#ef233c] focus:outline-none transition-all" />
               </div>
               <button onClick={() => handleVerifyOtp('registration')} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify</>}
               </button>
-              <button onClick={() => handleSendOtp('registration')} className="w-full text-center text-[10px] text-neutral-600 hover:text-neutral-400 transition-colors">Didn't receive it? Resend code</button>
+              <button onClick={() => handleSendOtp('registration')} className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Didn't receive it? Resend code</button>
             </div>
           )}
 
@@ -279,13 +296,13 @@ export function AuthScreen() {
                 <CheckCircle2 className="w-3.5 h-3.5" /><span>{email} verified</span>
               </div>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Create account</h2>
-                <p className="text-xs text-neutral-500">Complete your profile to finish registration</p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Create account</h2>
+                <p className="text-xs text-zinc-500 font-inter">Complete your profile to finish registration</p>
               </div>
               <div>
                 <label className={labelCls}>Username</label>
                 <div className="relative">
-                  <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
                   <input type="text" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="railfan123" className={inputWithIconCls} />
                 </div>
               </div>
@@ -296,10 +313,10 @@ export function AuthScreen() {
               <div>
                 <label className={labelCls}>Password</label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
                   <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" onKeyDown={(e) => { if (e.key === 'Enter') handleRegister(); }} className={inputWithIconCls} />
                 </div>
-                <p className="text-[10px] text-neutral-600 mt-1.5">Your password is stored securely by OnyxBase</p>
+                <p className="text-[10px] text-zinc-600 mt-1.5">Your password is stored securely by OnyxBase</p>
               </div>
               <button onClick={handleRegister} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <>Create Account <ArrowRight className="w-4 h-4" /></>}
@@ -311,8 +328,8 @@ export function AuthScreen() {
             <div className="space-y-5">
               <button onClick={() => setStep('login')} className={backBtnCls}><ArrowLeft className="w-3 h-3" /> Back to login</button>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Reset password</h2>
-                <p className="text-xs text-neutral-500">Enter your account email — we'll send a verification code</p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Reset password</h2>
+                <p className="text-xs text-zinc-500 font-inter">Enter your account email — we'll send a verification code</p>
               </div>
               <div>
                 <label className={labelCls}>Email Address</label>
@@ -321,7 +338,7 @@ export function AuthScreen() {
               <button onClick={() => handleSendOtp('password_reset')} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><KeyRound className="w-4 h-4" /> Send Reset Code</>}
               </button>
-              <p className="text-[10px] text-neutral-600 text-center">If an account exists for this email, a reset code will be sent.</p>
+              <p className="text-[10px] text-zinc-600 text-center">If an account exists for this email, a reset code will be sent.</p>
             </div>
           )}
 
@@ -329,17 +346,17 @@ export function AuthScreen() {
             <div className="space-y-5">
               <button onClick={() => setStep('forgot')} className={backBtnCls}><ArrowLeft className="w-3 h-3" /> Back</button>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">Enter reset code</h2>
-                <p className="text-xs text-neutral-500">Sent to <span className="text-neutral-300">{email}</span></p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Enter reset code</h2>
+                <p className="text-xs text-zinc-500 font-inter">Sent to <span className="text-zinc-300">{email}</span></p>
               </div>
               <div>
                 <label className={labelCls}>Reset Code</label>
-                <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('password_reset'); }} className="w-full px-4 py-3 rounded-2xl bg-white/[0.03] border border-white/5 text-2xl text-center text-white font-mono-display tracking-[0.5em] placeholder:text-neutral-700 focus:border-violet-500/30 focus:outline-none transition-colors" />
+                <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('password_reset'); }} className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-2xl text-center text-white font-manrope tracking-[0.5em] placeholder:text-zinc-700 focus:border-[#ef233c] focus:outline-none transition-all" />
               </div>
               <button onClick={() => handleVerifyOtp('password_reset')} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify Code</>}
               </button>
-              <button onClick={() => handleSendOtp('password_reset')} className="w-full text-center text-[10px] text-neutral-600 hover:text-neutral-400 transition-colors">Didn't receive it? Resend code</button>
+              <button onClick={() => handleSendOtp('password_reset')} className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Didn't receive it? Resend code</button>
             </div>
           )}
 
@@ -349,20 +366,20 @@ export function AuthScreen() {
                 <CheckCircle2 className="w-3.5 h-3.5" /><span>Code verified — set your new password</span>
               </div>
               <div>
-                <h2 className="font-serif-display text-2xl text-white mb-1">New password</h2>
-                <p className="text-xs text-neutral-500">Choose a new password for your account</p>
+                <h2 className="text-2xl font-manrope font-semibold text-white mb-1">New password</h2>
+                <p className="text-xs text-zinc-500 font-inter">Choose a new password for your account</p>
               </div>
               <div>
                 <label className={labelCls}>New Password</label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
                   <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" className={inputWithIconCls} />
                 </div>
               </div>
               <div>
                 <label className={labelCls}>Confirm Password</label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-600" />
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
                   <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" onKeyDown={(e) => { if (e.key === 'Enter') handleResetPassword(); }} className={inputWithIconCls} />
                 </div>
               </div>

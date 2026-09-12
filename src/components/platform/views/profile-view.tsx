@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/lib/auth-context';
+import { useResourceStore } from '@/lib/resource-store';
 import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
 import { ResourceDetailModal } from '../resource-detail-modal';
@@ -40,13 +41,18 @@ export function ProfileView() {
   const { user, refresh } = useAuth();
   const { toast } = useToast();
   const [profile, setProfile] = useState<ProfileData | null>(null);
-  const [resources, setResources] = useState<Resource[]>([]);
   const [fetchState, setFetchState] = useState<FetchState>('loading');
   const [tab, setTab] = useState<TabKey>('image');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [profileVersion, setProfileVersion] = useState(0);
   const [selected, setSelected] = useState<Resource | null>(null);
+
+  // Read myResources from the shared store (set by PlatformApp on mount)
+  const myResources = useResourceStore((s) => s.myResources);
+  const loaded = useResourceStore((s) => s.loaded);
+  const invalidate = useResourceStore((s) => s.invalidate);
+  const fetchMine = useResourceStore((s) => s.fetchMine);
 
   const fetchProfile = useCallback(async (username: string) => {
     setFetchState('loading');
@@ -57,7 +63,6 @@ export function ProfileView() {
       const data = await res.json();
       if (data.ok) {
         setProfile(data.profile);
-        setResources(data.resources || []);
         setFetchState('ready');
       } else if (data.error === 'User not found') {
         setFetchState('not-found');
@@ -73,6 +78,9 @@ export function ProfileView() {
     if (!user?.username) return;
     fetchProfile(user.username);
   }, [user?.username, fetchProfile, profileVersion]);
+
+  // Use store myResources (already filtered server-side by owner=user.userId)
+  const resources = myResources;
 
   const counts = useMemo(
     () => ({
@@ -112,8 +120,10 @@ export function ProfileView() {
         });
         const data = await res.json();
         if (data.ok) {
-          setResources((prev) => prev.filter((x) => x.id !== r.id));
           toast({ title: 'Resource deleted', description: r.title });
+          // Refresh the shared store so all views stay in sync
+          invalidate();
+          if (user?.userId) fetchMine(user.userId);
         } else {
           toast({ title: 'Delete failed', description: data.error || 'Unknown error' });
         }
@@ -123,7 +133,7 @@ export function ProfileView() {
         setDeletingId(null);
       }
     },
-    [toast]
+    [toast, invalidate, fetchMine, user?.userId]
   );
 
   const handleEditSaved = useCallback(() => {
@@ -137,19 +147,18 @@ export function ProfileView() {
     label: string;
     icon: typeof ImageIcon;
     count: number;
-    color: string;
   }[] = [
-    { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image, color: 'text-violet-400' },
-    { key: 'clip', label: 'Clips', icon: Film, count: counts.clip, color: 'text-cyan-400' },
-    { key: 'xml', label: 'XMLs', icon: FileCode, count: counts.xml, color: 'text-emerald-400' },
+    { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image },
+    { key: 'clip', label: 'Clips', icon: Film, count: counts.clip },
+    { key: 'xml', label: 'XMLs', icon: FileCode, count: counts.xml },
   ];
 
-  // --- Loading state ---
+  // --- Loading state (profile or store still loading) ---
   if (fetchState === 'loading') {
     return (
       <div className="flex flex-col items-center justify-center py-24 gap-4">
-        <div className="w-8 h-8 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
-        <p className="text-sm text-neutral-500">Loading profile...</p>
+        <div className="w-8 h-8 border-2 border-[#ef233c]/30 border-t-[#ef233c] rounded-full animate-spin" />
+        <p className="font-inter text-sm text-zinc-500">Loading profile...</p>
       </div>
     );
   }
@@ -157,17 +166,17 @@ export function ProfileView() {
   // --- Error state (network / server) ---
   if (fetchState === 'error') {
     return (
-      <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-12 text-center">
-        <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
-          <AlertCircle className="w-7 h-7 text-red-400" />
+      <div className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-12 text-center">
+        <div className="w-14 h-14 rounded-xl bg-[#ef233c]/10 border border-[#ef233c]/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-[#ef233c]" />
         </div>
-        <h3 className="font-serif-display text-lg text-white mb-1">Unable to load profile</h3>
-        <p className="text-sm text-neutral-500 mb-6">
+        <h3 className="font-manrope font-semibold text-lg text-white mb-1">Unable to load profile</h3>
+        <p className="font-inter text-sm text-zinc-500 mb-6">
           Unable to load profile right now. Please try again.
         </p>
         <button
           onClick={() => user?.username && fetchProfile(user.username)}
-          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white text-sm font-medium hover:from-violet-400 hover:to-cyan-400 transition-all duration-300 ease-snap"
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
         >
           <RefreshCw className="w-4 h-4" />
           Retry
@@ -179,12 +188,12 @@ export function ProfileView() {
   // --- Not found state (explicit 404 from API) ---
   if (fetchState === 'not-found' || !profile) {
     return (
-      <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-12 text-center">
-        <div className="w-14 h-14 rounded-2xl bg-white/[0.03] border border-white/5 flex items-center justify-center mx-auto mb-4">
-          <UserIcon className="w-7 h-7 text-neutral-500" />
+      <div className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-12 text-center">
+        <div className="w-14 h-14 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-center mx-auto mb-4">
+          <UserIcon className="w-7 h-7 text-zinc-500" />
         </div>
-        <h3 className="font-serif-display text-lg text-white mb-1">User not found</h3>
-        <p className="text-sm text-neutral-500">This profile does not exist.</p>
+        <h3 className="font-manrope font-semibold text-lg text-white mb-1">User not found</h3>
+        <p className="font-inter text-sm text-zinc-500">This profile does not exist.</p>
       </div>
     );
   }
@@ -207,11 +216,11 @@ export function ProfileView() {
   return (
     <div className="space-y-6">
       {/* Profile header */}
-      <section className="rounded-3xl border border-white/5 bg-white/[0.02] p-6 lg:p-8 relative overflow-hidden">
-        <div className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-violet-500/10 blur-3xl pointer-events-none" />
+      <section className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-6 lg:p-8 relative overflow-hidden">
+        <div className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-[#ef233c]/10 blur-3xl pointer-events-none" />
         <div className="relative flex flex-col md:flex-row md:items-center gap-6">
           {/* Avatar */}
-          <div className="w-24 h-24 rounded-full bg-gradient-to-br from-violet-500/30 to-cyan-500/30 border border-white/10 flex items-center justify-center text-2xl font-serif-display text-white overflow-hidden shrink-0">
+          <div className="w-24 h-24 rounded-full bg-gradient-to-br from-[#ef233c]/30 to-zinc-800 border border-white/10 flex items-center justify-center text-2xl font-manrope font-semibold text-white overflow-hidden shrink-0">
             {profile.avatar ? (
               <img src={profile.avatar} alt={profile.displayName} className="w-full h-full object-cover" />
             ) : (
@@ -223,10 +232,10 @@ export function ProfileView() {
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="font-serif-display text-2xl lg:text-3xl text-white leading-tight truncate">
+                <h1 className="font-manrope font-semibold text-2xl lg:text-3xl text-white leading-tight truncate">
                   {profile.displayName}
                 </h1>
-                <div className="flex flex-wrap items-center gap-3 mt-1.5 text-[11px] font-mono-display text-neutral-500">
+                <div className="flex flex-wrap items-center gap-3 mt-1.5 text-[11px] font-manrope text-zinc-500">
                   <span className="flex items-center gap-1.5">
                     <UserIcon className="w-3 h-3" />@{profile.username}
                   </span>
@@ -240,7 +249,7 @@ export function ProfileView() {
               {isOwnProfile && (
                 <button
                   onClick={() => setEditOpen(true)}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-xs font-mono-display text-neutral-300 hover:text-white hover:bg-white/[0.06] hover:border-violet-500/30 transition-all duration-300 ease-snap"
+                  className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/[0.04] border border-white/10 text-xs font-manrope text-zinc-300 hover:text-white hover:bg-white/[0.06] hover:border-[#ef233c]/30 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                   Edit Profile
@@ -249,21 +258,21 @@ export function ProfileView() {
             </div>
 
             {profile.bio && (
-              <p className="mt-3 text-sm text-neutral-400 max-w-2xl leading-relaxed">{profile.bio}</p>
+              <p className="mt-3 font-inter text-sm text-zinc-400 max-w-2xl leading-relaxed">{profile.bio}</p>
             )}
           </div>
         </div>
 
         {/* Stats */}
         <div className="relative grid grid-cols-3 gap-3 mt-6 pt-6 border-t border-white/5">
-          <StatBlock label="Images" value={counts.image} accent="violet" icon={ImageIcon} />
-          <StatBlock label="Clips" value={counts.clip} accent="cyan" icon={Film} />
-          <StatBlock label="XMLs" value={counts.xml} accent="emerald" icon={FileCode} />
+          <StatBlock label="Images" value={counts.image} icon={ImageIcon} />
+          <StatBlock label="Clips" value={counts.clip} icon={Film} />
+          <StatBlock label="XMLs" value={counts.xml} icon={FileCode} />
         </div>
       </section>
 
       {/* Tabs */}
-      <div className="flex items-center gap-2 p-1 rounded-2xl bg-white/[0.02] border border-white/5 w-fit">
+      <div className="flex items-center gap-2 p-1 rounded-xl bg-black/60 backdrop-blur-xl border border-white/10 w-fit">
         {tabs.map((t) => {
           const TabIcon = t.icon;
           const isActive = tab === t.key;
@@ -271,17 +280,17 @@ export function ProfileView() {
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-medium transition-all duration-300 ease-snap ${
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
                 isActive
-                  ? 'bg-white/[0.06] text-white border border-white/10'
-                  : 'text-neutral-500 hover:text-white'
+                  ? 'bg-[#ef233c]/10 text-white border border-[#ef233c]/30'
+                  : 'text-zinc-500 hover:text-white border border-transparent'
               }`}
             >
-              <TabIcon className={`w-3.5 h-3.5 ${isActive ? t.color : ''}`} />
+              <TabIcon className={`w-3.5 h-3.5 ${isActive ? 'text-[#ef233c]' : ''}`} />
               {t.label}
               <span
-                className={`text-[9px] font-mono-display px-1.5 py-0.5 rounded-md ${
-                  isActive ? 'bg-white/10 text-white' : 'bg-white/[0.03] text-neutral-600'
+                className={`text-[9px] font-manrope px-1.5 py-0.5 rounded-md ${
+                  isActive ? 'bg-white/10 text-white' : 'bg-white/[0.03] text-zinc-600'
                 }`}
               >
                 {t.count}
@@ -292,13 +301,23 @@ export function ProfileView() {
       </div>
 
       {/* Resources grid */}
-      {filtered.length === 0 ? (
-        <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-12 text-center">
-          <div className="w-14 h-14 rounded-2xl bg-white/[0.03] border border-white/5 flex items-center justify-center mx-auto mb-4">
-            <PackageOpen className="w-7 h-7 text-neutral-500" />
+      {!loaded ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-black/60 p-4 animate-pulse">
+              <div className="w-full h-40 bg-white/5 rounded-lg mb-3" />
+              <div className="h-4 bg-white/5 rounded w-3/4 mb-2" />
+              <div className="h-3 bg-white/5 rounded w-1/2" />
+            </div>
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-12 text-center">
+          <div className="w-14 h-14 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-center mx-auto mb-4">
+            <PackageOpen className="w-7 h-7 text-zinc-500" />
           </div>
-          <h3 className="font-serif-display text-lg text-white mb-1">No {tab}s yet</h3>
-          <p className="text-sm text-neutral-500">Use the upload button in the sidebar to add one.</p>
+          <h3 className="font-manrope font-semibold text-lg text-white mb-1">No {tab}s yet</h3>
+          <p className="font-inter text-sm text-zinc-500">Use the upload button in the sidebar to add one.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -306,7 +325,7 @@ export function ProfileView() {
             <div key={r.id} className="relative group">
               {!r.published && (
                 <div className="absolute top-2 right-2 z-20 flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 backdrop-blur-sm border border-amber-500/30">
-                  <span className="text-[9px] font-mono-display uppercase tracking-wider text-amber-300">
+                  <span className="text-[9px] font-manrope uppercase tracking-wider text-amber-300">
                     Draft
                   </span>
                 </div>
@@ -322,14 +341,14 @@ export function ProfileView() {
                 <button
                   onClick={() => handleDownload(r)}
                   disabled={!r.downloadUrl}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-white/[0.02] border border-white/5 text-[11px] font-mono-display text-neutral-300 hover:text-white hover:bg-white/[0.04] transition-all duration-300 ease-snap disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.02] border border-white/5 text-[11px] font-manrope text-zinc-300 hover:text-white hover:bg-white/[0.04] transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Download className="w-3.5 h-3.5" /> Download
                 </button>
                 <button
                   onClick={() => handleDelete(r)}
                   disabled={deletingId === r.id}
-                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-500/5 border border-red-500/10 text-[11px] font-mono-display text-red-400/80 hover:text-red-300 hover:bg-red-500/10 transition-all duration-300 ease-snap disabled:opacity-40"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#ef233c]/5 border border-[#ef233c]/10 text-[11px] font-manrope text-[#ef233c]/80 hover:text-[#ef233c] hover:bg-[#ef233c]/10 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40"
                 >
                   {deletingId === r.id ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -496,29 +515,29 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg glass rounded-3xl overflow-hidden"
+        className="w-full max-w-lg bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-violet-500/15 flex items-center justify-center">
-              <Pencil className="w-4 h-4 text-violet-400" />
+            <div className="w-8 h-8 rounded-lg bg-[#ef233c]/15 flex items-center justify-center">
+              <Pencil className="w-4 h-4 text-[#ef233c]" />
             </div>
             <div>
-              <h2 className="font-serif-display text-lg text-white">Edit Profile</h2>
-              <p className="text-[10px] font-mono-display uppercase tracking-wider text-neutral-500">
+              <h2 className="font-manrope font-semibold text-lg text-white">Edit Profile</h2>
+              <p className="text-[10px] font-manrope uppercase tracking-wider text-zinc-500">
                 Update your public profile
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-neutral-500 hover:text-white hover:bg-white/5 transition-all"
+            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all"
           >
             <X className="w-4 h-4" />
           </button>
@@ -528,7 +547,7 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
         <div className="p-6 space-y-5">
           {/* Avatar uploader */}
           <div className="flex items-center gap-4">
-            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-violet-500/30 to-cyan-500/30 border border-white/10 flex items-center justify-center text-xl font-serif-display text-white overflow-hidden shrink-0">
+            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-[#ef233c]/30 to-zinc-800 border border-white/10 flex items-center justify-center text-xl font-manrope font-semibold text-white overflow-hidden shrink-0">
               {avatarPreview ? (
                 <img src={avatarPreview} alt="Avatar preview" className="w-full h-full object-cover" />
               ) : (
@@ -538,7 +557,7 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
             <div className="flex-1">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.04] border border-white/10 text-xs font-mono-display text-neutral-300 hover:text-white hover:bg-white/[0.06] transition-all duration-300 ease-snap"
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.04] border border-white/10 text-xs font-manrope text-zinc-300 hover:text-white hover:bg-white/[0.06] transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
               >
                 <Upload className="w-3.5 h-3.5" />
                 {avatarFile ? 'Change image' : 'Upload avatar'}
@@ -552,12 +571,12 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
                     setAvatarFile(null);
                     setAvatarPreview(profile.avatar || null);
                   }}
-                  className="ml-2 text-xs text-neutral-500 hover:text-white transition-colors"
+                  className="ml-2 text-xs text-zinc-500 hover:text-white transition-colors"
                 >
                   Remove
                 </button>
               )}
-              <p className="text-[10px] font-mono-display text-neutral-600 mt-1.5">
+              <p className="text-[10px] font-manrope text-zinc-600 mt-1.5">
                 PNG/JPG up to 10MB
               </p>
               <input
@@ -575,7 +594,7 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
 
           {/* Display Name */}
           <div>
-            <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-1.5">
+            <label className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-1.5">
               Display Name
             </label>
             <input
@@ -583,33 +602,33 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               maxLength={50}
-              className="w-full px-3 py-2 rounded-xl bg-white/[0.03] border border-white/5 text-sm text-white focus:border-violet-500/30 focus:outline-none transition-colors"
+              className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/10 font-inter text-sm text-white focus:border-[#ef233c]/40 focus:outline-none transition-colors"
             />
           </div>
 
           {/* Username */}
           <div>
-            <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-1.5">
+            <label className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-1.5">
               Username
             </label>
-            <div className="flex items-center rounded-xl bg-white/[0.03] border border-white/5 focus-within:border-violet-500/30 transition-colors">
-              <span className="pl-3 text-sm text-neutral-500 font-mono-display">@</span>
+            <div className="flex items-center rounded-xl bg-black/60 border border-white/10 focus-within:border-[#ef233c]/40 transition-colors">
+              <span className="pl-3 text-sm text-zinc-500 font-manrope">@</span>
               <input
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value.toLowerCase())}
                 maxLength={20}
-                className="flex-1 px-1.5 py-2 bg-transparent text-sm text-white font-mono-display focus:outline-none"
+                className="flex-1 px-1.5 py-2 bg-transparent text-sm text-white font-manrope focus:outline-none"
               />
             </div>
-            <p className="text-[10px] font-mono-display text-neutral-600 mt-1.5">
+            <p className="text-[10px] font-manrope text-zinc-600 mt-1.5">
               3-20 chars: lowercase letters, numbers, underscores
             </p>
           </div>
 
           {/* Bio */}
           <div>
-            <label className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 block mb-1.5">
+            <label className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-1.5">
               Bio
             </label>
             <textarea
@@ -618,9 +637,9 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
               rows={3}
               maxLength={300}
               placeholder="Tell the community about yourself..."
-              className="w-full px-3 py-2 rounded-xl bg-white/[0.03] border border-white/5 text-sm text-white placeholder:text-neutral-700 resize-none focus:border-violet-500/30 focus:outline-none transition-colors"
+              className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/10 font-inter text-sm text-white placeholder:text-zinc-700 resize-none focus:border-[#ef233c]/40 focus:outline-none transition-colors"
             />
-            <p className="text-[10px] font-mono-display text-neutral-600 mt-1.5 text-right">
+            <p className="text-[10px] font-manrope text-zinc-600 mt-1.5 text-right">
               {bio.length}/300
             </p>
           </div>
@@ -630,14 +649,14 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
             <button
               onClick={onClose}
               disabled={saving}
-              className="flex-1 px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/5 text-sm text-neutral-300 hover:text-white hover:bg-white/[0.05] transition-all duration-300 ease-snap disabled:opacity-40"
+              className="flex-1 px-4 py-2.5 rounded-full bg-white/[0.03] border border-white/5 text-sm text-zinc-300 hover:text-white hover:bg-white/[0.05] transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40"
             >
               Cancel
             </button>
             <button
               onClick={handleSave}
               disabled={saving}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white text-sm font-medium hover:from-violet-400 hover:to-cyan-400 disabled:opacity-50 transition-all duration-300 ease-snap"
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium disabled:opacity-50 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
             >
               {saving ? (
                 <>
@@ -660,29 +679,21 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
 function StatBlock({
   label,
   value,
-  accent,
   icon: Icon,
 }: {
   label: string;
   value: number;
-  accent: 'violet' | 'cyan' | 'emerald';
   icon: typeof ImageIcon;
 }) {
-  const colorMap = {
-    violet: { text: 'text-violet-400', bg: 'bg-violet-500/10', border: 'border-violet-500/20' },
-    cyan: { text: 'text-cyan-400', bg: 'bg-cyan-500/10', border: 'border-cyan-500/20' },
-    emerald: { text: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20' },
-  };
-  const c = colorMap[accent];
   return (
-    <div className={`rounded-2xl ${c.bg} ${c.border} border p-4`}>
+    <div className="rounded-xl bg-[#ef233c]/5 border border-[#ef233c]/15 p-4">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500">
+        <span className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500">
           {label}
         </span>
-        <Icon className={`w-3.5 h-3.5 ${c.text}`} />
+        <Icon className="w-3.5 h-3.5 text-[#ef233c]" />
       </div>
-      <div className="font-serif-display text-2xl text-white">{value}</div>
+      <div className="font-manrope font-semibold text-2xl text-white">{value}</div>
     </div>
   );
 }

@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
-import type { Resource, ResourceType, XmlSource } from '@/lib/resources';
+import React, { useMemo, useState } from 'react';
+import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
 import { ResourceDetailModal } from '../resource-detail-modal';
 import { useAuth } from '@/lib/auth-context';
+import { useResourceStore } from '@/lib/resource-store';
 import { useToast } from '@/hooks/use-toast';
 import {
   Image as ImageIcon,
@@ -13,7 +14,6 @@ import {
   Upload,
   Search,
   PackageOpen,
-  Crown,
 } from 'lucide-react';
 
 interface ResourcesViewProps {
@@ -24,78 +24,42 @@ interface ResourcesViewProps {
 export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   const { user } = useAuth();
   const { toast } = useToast();
-  const [resources, setResources] = useState<Resource[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const loaded = useResourceStore((s) => s.loaded);
+  const invalidate = useResourceStore((s) => s.invalidate);
+  const fetchMine = useResourceStore((s) => s.fetchMine);
+
+  // Read typed slices from the store
+  const images = useResourceStore((s) => s.images);
+  const clips = useResourceStore((s) => s.clips);
+  const xmls = useResourceStore((s) => s.xmls);
+  const myResources = useResourceStore((s) => s.myResources);
+
   const [search, setSearch] = useState('');
-  const [xmlSource, setXmlSource] = useState<XmlSource>('community');
-  const [xmlTab, setXmlTab] = useState<'community' | 'admin'>('community');
   const [selected, setSelected] = useState<Resource | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  const isXml = type === 'xml';
-  const isAdmin = !!user?.isAdmin;
-
-  const typeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
-  const TypeIcon = typeIcon;
-  const accent = type === 'image' ? 'violet' : type === 'clip' ? 'cyan' : 'emerald';
-  const accentMap: Record<string, { text: string; bg: string; border: string; from: string; to: string }> = {
-    violet: { text: 'text-violet-400', bg: 'bg-violet-500/10', border: 'border-violet-500/20', from: 'from-violet-500', to: 'to-cyan-500' },
-    cyan: { text: 'text-cyan-400', bg: 'bg-cyan-500/10', border: 'border-cyan-500/20', from: 'from-cyan-500', to: 'to-violet-500' },
-    emerald: { text: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', from: 'from-emerald-500', to: 'to-cyan-500' },
-  };
-  const ac = accentMap[accent];
-
+  const TypeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
   const typeLabel = type === 'image' ? 'Images' : type === 'clip' ? 'Clips' : 'XMLs';
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const params = new URLSearchParams();
-        params.set('type', type);
-        params.set('published', 'all');
-        if (isXml) params.set('xmlSource', xmlSource);
-        const res = await fetch(`/api/resources/list?${params.toString()}`);
-        const data = await res.json();
-        if (!cancelled) {
-          if (data.ok) setResources(data.resources || []);
-          else {
-            setError(data.error || 'Failed to load resources');
-            if (res.status === 403) {
-              setResources([]);
-              setError(null);
-              toast({
-                title: 'Access restricted',
-                description: 'Admin XMLs require administrator privileges.',
-              });
-            }
-          }
-        }
-      } catch {
-        if (!cancelled) setError('Network error');
-      } finally {
-        if (!cancelled) setLoading(false);
+  // Merge public resources of this type with the user's own resources of this type,
+  // deduplicating by id so unpublished drafts still show up.
+  const resources = useMemo(() => {
+    const publicOfType =
+      type === 'image' ? images : type === 'clip' ? clips : xmls;
+    const mineOfType = myResources.filter((r) => r.type === type);
+    const seen = new Set<string>();
+    const merged: Resource[] = [];
+    for (const r of [...publicOfType, ...mineOfType]) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id);
+        merged.push(r);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [type, xmlSource, isXml, toast, refreshKey]);
-
-  // Keep xmlSource state synced with tab state
-  useEffect(() => {
-    setXmlSource(xmlTab);
-  }, [xmlTab]);
-
-  // Non-admins can only see the community tab; force it back if they somehow had admin selected
-  useEffect(() => {
-    if (isXml && !isAdmin && xmlTab === 'admin') {
-      setXmlTab('community');
     }
-  }, [isXml, isAdmin, xmlTab]);
+    // Newest first
+    merged.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    return merged;
+  }, [type, images, clips, xmls, myResources]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return resources;
@@ -130,7 +94,9 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
       if (data.ok) {
         toast({ title: 'Resource deleted', description: r.title });
         setSelected(null);
-        setRefreshKey((k) => k + 1);
+        // Refresh the shared store so all views stay in sync
+        invalidate();
+        if (user?.userId) fetchMine(user.userId);
       } else {
         toast({ title: 'Delete failed', description: data.error || 'Unknown error', variant: 'destructive' });
       }
@@ -141,10 +107,6 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
 
   const handleUploadClick = () => {
     onUpload();
-    // Bump refreshKey so the list re-fetches after the upload flow returns
-    // (covers the case where the user is already on this view and the parent
-    // does not remount it after a successful upload).
-    setRefreshKey((k) => k + 1);
   };
 
   const isOwn = (r: Resource) => !!user && r.ownerId === user.userId;
@@ -152,89 +114,61 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-6 relative overflow-hidden">
-        <div className={`absolute -top-20 -right-20 w-56 h-56 rounded-full ${ac.bg} blur-3xl pointer-events-none`} />
+      <div className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-6 relative overflow-hidden">
+        <div className="absolute -top-20 -right-20 w-56 h-56 rounded-full bg-[#ef233c]/10 blur-3xl pointer-events-none" />
         <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-center gap-4">
-            <div className={`w-12 h-12 rounded-2xl ${ac.bg} ${ac.border} border flex items-center justify-center`}>
-              <TypeIcon className={`w-6 h-6 ${ac.text}`} />
+            <div className="w-12 h-12 rounded-xl bg-[#ef233c]/10 border border-[#ef233c]/20 flex items-center justify-center">
+              <TypeIcon className="w-6 h-6 text-[#ef233c]" />
             </div>
             <div>
-              <h1 className="font-serif-display text-2xl text-white leading-tight">{typeLabel} Library</h1>
-              <p className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 mt-1">
+              <h1 className="font-manrope font-semibold text-2xl text-white leading-tight">{typeLabel} Library</h1>
+              <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mt-1">
                 {filtered.length} {filtered.length === 1 ? 'resource' : 'resources'} available
               </p>
             </div>
           </div>
           <button
             onClick={handleUploadClick}
-            className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r ${ac.from} ${ac.to} text-white text-sm font-medium hover:opacity-90 transition-all duration-300 ease-snap shadow-[0_0_20px_-8px_rgba(139,92,246,0.6)]`}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] shadow-[0_0_20px_-8px_rgba(239,35,60,0.6)]"
           >
             <Upload className="w-4 h-4" /> Upload {type === 'image' ? 'Image' : type === 'clip' ? 'Clip' : 'XML'}
           </button>
         </div>
       </div>
 
-      {/* XML tabs — only show admin tab if user is admin */}
-      {isXml && (
-        <div className="flex items-center gap-2 p-1 rounded-2xl bg-white/[0.02] border border-white/5 w-fit">
-          <button
-            onClick={() => setXmlTab('community')}
-            className={`px-4 py-1.5 rounded-xl text-xs font-medium transition-all duration-300 ease-snap ${
-              xmlTab === 'community'
-                ? 'bg-white/[0.06] text-white border border-emerald-500/20'
-                : 'text-neutral-500 hover:text-white'
-            }`}
-          >
-            <FileCode className="w-3.5 h-3.5 inline mr-1.5 text-emerald-400" />
-            Community XMLs
-          </button>
-          {isAdmin && (
-            <button
-              onClick={() => setXmlTab('admin')}
-              className={`px-4 py-1.5 rounded-xl text-xs font-medium transition-all duration-300 ease-snap ${
-                xmlTab === 'admin'
-                  ? 'bg-white/[0.06] text-white border border-violet-500/20'
-                  : 'text-neutral-500 hover:text-white'
-              }`}
-            >
-              <Crown className="w-3.5 h-3.5 inline mr-1.5 text-violet-400" />
-              Admin XMLs
-            </button>
-          )}
-        </div>
-      )}
-
       {/* Search */}
       <div className="relative">
-        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder={`Search ${typeLabel.toLowerCase()} by title, tag, or creator...`}
-          className="w-full pl-11 pr-4 py-3 rounded-2xl bg-white/[0.02] border border-white/5 text-sm text-white placeholder:text-neutral-600 focus:outline-none focus:border-violet-500/30 focus:bg-white/[0.04] transition-all duration-300"
+          className="w-full pl-11 pr-4 py-3 rounded-xl bg-black/60 backdrop-blur-xl border border-white/10 font-inter text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#ef233c]/40 focus:bg-black/80 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
         />
       </div>
 
       {/* Grid */}
-      {loading ? (
-        <div className="flex justify-center py-16">
-          <div className="w-8 h-8 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
-        </div>
-      ) : error ? (
-        <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-8 text-center">
-          <p className="text-sm text-neutral-500">{error}</p>
+      {!loaded ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-black/60 p-4 animate-pulse">
+              <div className="w-full h-40 bg-white/5 rounded-lg mb-3" />
+              <div className="h-4 bg-white/5 rounded w-3/4 mb-2" />
+              <div className="h-3 bg-white/5 rounded w-1/2" />
+            </div>
+          ))}
         </div>
       ) : filtered.length === 0 ? (
-        <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-12 text-center">
-          <div className={`w-14 h-14 rounded-2xl ${ac.bg} ${ac.border} border flex items-center justify-center mx-auto mb-4`}>
-            <PackageOpen className={`w-7 h-7 ${ac.text}`} />
+        <div className="rounded-xl border border-white/10 bg-black/60 backdrop-blur-xl p-12 text-center">
+          <div className="w-14 h-14 rounded-xl bg-[#ef233c]/10 border border-[#ef233c]/20 flex items-center justify-center mx-auto mb-4">
+            <PackageOpen className="w-7 h-7 text-[#ef233c]" />
           </div>
-          <h3 className="font-serif-display text-lg text-white mb-1">
+          <h3 className="font-manrope font-semibold text-lg text-white mb-1">
             {search ? 'No matches found' : `No ${typeLabel.toLowerCase()} yet`}
           </h3>
-          <p className="text-sm text-neutral-500 mb-5 max-w-md mx-auto">
+          <p className="font-inter text-sm text-zinc-500 mb-5 max-w-md mx-auto">
             {search
               ? `Try adjusting your search terms.`
               : `Be the first to upload a${type === 'image' ? 'n' : ''} ${type === 'image' ? 'image' : type === 'clip' ? 'clip' : 'XML'} to the library.`}
@@ -242,7 +176,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
           {!search && (
             <button
               onClick={handleUploadClick}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r ${ac.from} ${ac.to} text-white text-sm font-medium hover:opacity-90 transition-all duration-300`}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
             >
               <Upload className="w-4 h-4" /> Upload now
             </button>

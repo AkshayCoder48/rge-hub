@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
+import { Logo } from '@/components/logo';
 import type { ViewKey } from './platform-app';
 import {
   Home,
@@ -10,7 +11,6 @@ import {
   FileCode,
   Users,
   User,
-  Shield,
   Zap,
   Upload,
   LogOut,
@@ -36,6 +36,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
   const { logout } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // Admin section completely removed from sidebar
   const navItems: { key: ViewKey; label: string; icon: typeof Home; section?: string }[] = [
     { key: 'home', label: 'Home', icon: Home },
     { key: 'studio', label: 'Speed Ramp Studio', icon: Zap },
@@ -45,10 +46,6 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'community', label: 'Community', icon: Users, section: 'Discover' },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
   ];
-
-  if (user.isAdmin) {
-    navItems.push({ key: 'admin', label: 'Admin', icon: Shield });
-  }
 
   const handleNav = (v: ViewKey) => {
     onNavigate(v);
@@ -60,7 +57,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
       {/* Mobile toggle */}
       <button
         onClick={() => setMobileOpen(!mobileOpen)}
-        className="lg:hidden fixed bottom-6 right-6 z-50 w-12 h-12 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center shadow-[0_0_20px_-5px_rgba(139,92,246,0.5)]"
+        className="lg:hidden fixed bottom-6 right-6 z-50 w-12 h-12 rounded-full bg-[#ef233c] flex items-center justify-center shadow-[0_0_20px_-5px_rgba(239,35,60,0.5)]"
       >
         {mobileOpen ? <X className="w-5 h-5 text-white" /> : <Menu className="w-5 h-5 text-white" />}
       </button>
@@ -75,19 +72,19 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
 
       {/* Sidebar */}
       <aside className={`
-        fixed top-0 left-0 z-40 h-full w-64 glass border-r border-white/5
-        transition-transform duration-300 ease-snap
+        fixed top-0 left-0 z-40 h-full w-64 bg-black/60 backdrop-blur-xl border-r border-white/10
+        transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]
         ${mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
       `}>
         <div className="flex flex-col h-full p-4">
           {/* Logo */}
           <div className="flex items-center gap-2.5 px-2 py-3 mb-2">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center shadow-[0_0_12px_-2px_rgba(139,92,246,0.5)]">
-              <Film className="w-4 h-4 text-white" />
-            </div>
+            <Logo size={28} />
             <div>
-              <div className="font-serif-display text-sm text-white leading-tight">RailGuyEdits</div>
-              <div className="text-[9px] font-mono-display uppercase tracking-[0.15em] text-neutral-500">Editing Platform</div>
+              <div className="font-manrope font-bold text-sm text-white leading-tight">
+                RGE <span className="text-[#ef233c]">Hub</span>
+              </div>
+              <div className="text-[9px] font-manrope uppercase tracking-[0.15em] text-zinc-600">Editing Platform</div>
             </div>
           </div>
 
@@ -101,21 +98,21 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
             {navItems.map((item, i) => (
               <div key={item.key}>
                 {item.section && (
-                  <div className={`text-[9px] font-mono-display uppercase tracking-[0.2em] text-neutral-600 px-3 ${i > 0 ? 'mt-4 mb-1' : 'mb-1'}`}>
+                  <div className={`text-[9px] font-manrope uppercase tracking-[0.2em] text-zinc-600 px-3 ${i > 0 ? 'mt-4 mb-1' : 'mb-1'}`}>
                     {item.section}
                   </div>
                 )}
                 <button
                   onClick={() => handleNav(item.key)}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-300 ease-snap ${
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
                     currentView === item.key
-                      ? 'bg-gradient-to-r from-violet-500/15 to-cyan-500/10 text-white border border-violet-500/20'
-                      : 'text-neutral-400 hover:text-white hover:bg-white/[0.03]'
+                      ? 'bg-[#ef233c]/10 text-white border border-[#ef233c]/20'
+                      : 'text-zinc-400 hover:text-white hover:bg-white/[0.03]'
                   }`}
                 >
-                  <item.icon className={`w-4 h-4 ${currentView === item.key ? 'text-violet-400' : ''}`} />
+                  <item.icon className={`w-4 h-4 ${currentView === item.key ? 'text-[#ef233c]' : ''}`} />
                   <span className="flex-1 text-left">{item.label}</span>
-                  {currentView === item.key && <ChevronRight className="w-3 h-3 text-violet-400" />}
+                  {currentView === item.key && <ChevronRight className="w-3 h-3 text-[#ef233c]" />}
                 </button>
               </div>
             ))}
@@ -124,7 +121,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
           {/* User card */}
           <div className="mt-4 p-3 rounded-2xl bg-white/[0.02] border border-white/5">
             <div className="flex items-center gap-2.5 mb-2">
-              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500/20 to-cyan-500/20 flex items-center justify-center text-sm font-medium text-white overflow-hidden">
+              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#ef233c]/20 to-zinc-700 flex items-center justify-center text-sm font-medium text-white overflow-hidden">
                 {user.avatar ? (
                   <img src={user.avatar} alt={user.displayName} className="w-full h-full object-cover" />
                 ) : (
@@ -133,17 +130,12 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
               </div>
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-medium text-white truncate">{user.displayName}</div>
-                <div className="text-[10px] font-mono-display text-neutral-500 truncate">@{user.username}</div>
+                <div className="text-[10px] font-manrope text-zinc-500 truncate">@{user.username}</div>
               </div>
             </div>
-            {user.isAdmin && (
-              <div className="mb-2 px-2 py-1 rounded-lg bg-violet-500/10 border border-violet-500/20 text-[9px] font-mono-display uppercase tracking-wider text-violet-400 text-center">
-                Administrator
-              </div>
-            )}
             <button
               onClick={logout}
-              className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[10px] text-neutral-500 hover:text-red-400 hover:bg-red-500/5 transition-all duration-300 ease-snap"
+              className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[10px] text-zinc-500 hover:text-red-400 hover:bg-red-500/5 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
             >
               <LogOut className="w-3 h-3" /> Sign out
             </button>
@@ -161,29 +153,29 @@ function UploadMenu({ onUpload }: { onUpload: (type: 'image' | 'clip' | 'xml') =
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white text-sm font-medium hover:from-violet-400 hover:to-cyan-400 transition-all duration-300 ease-snap shadow-[0_0_20px_-8px_rgba(139,92,246,0.6)]"
+        className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-full bg-[#ef233c] text-white text-sm font-bold hover:bg-red-700 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] shadow-[0_0_20px_-8px_rgba(239,35,60,0.6)]"
       >
         <Upload className="w-4 h-4" /> Upload
       </button>
       {open && (
-        <div className="absolute top-full left-0 right-0 mt-2 glass rounded-2xl p-1.5 z-50 space-y-0.5">
+        <div className="absolute top-full left-0 right-0 mt-2 bg-black/80 backdrop-blur-xl rounded-2xl p-1.5 z-50 space-y-0.5 border border-white/10">
           <button
             onClick={() => { onUpload('image'); setOpen(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-neutral-300 hover:text-white hover:bg-white/5 transition-all"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-white/5 transition-all"
           >
-            <ImageIcon className="w-3.5 h-3.5 text-violet-400" /> Image
+            <ImageIcon className="w-3.5 h-3.5 text-[#ef233c]" /> Image
           </button>
           <button
             onClick={() => { onUpload('clip'); setOpen(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-neutral-300 hover:text-white hover:bg-white/5 transition-all"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-white/5 transition-all"
           >
-            <Film className="w-3.5 h-3.5 text-cyan-400" /> Clip
+            <Film className="w-3.5 h-3.5 text-[#ef233c]" /> Clip
           </button>
           <button
             onClick={() => { onUpload('xml'); setOpen(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-neutral-300 hover:text-white hover:bg-white/5 transition-all"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-white/5 transition-all"
           >
-            <FileCode className="w-3.5 h-3.5 text-emerald-400" /> XML
+            <FileCode className="w-3.5 h-3.5 text-[#ef233c]" /> XML
           </button>
         </div>
       )}

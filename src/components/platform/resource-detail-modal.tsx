@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import type { Resource, Profile } from '@/lib/resources';
-import { X, Download, Share2, ExternalLink, Calendar, Tag, Crown, Film, FileCode, Image as ImageIcon, User as UserIcon } from 'lucide-react';
+import { X, Download, Share2, ExternalLink, Calendar, Tag, Crown, Film, FileCode, Image as ImageIcon } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface ResourceDetailModalProps {
@@ -59,7 +59,8 @@ export function ResourceDetailModal({
   if (!resource) return null;
 
   const typeIcon = resource.type === 'image' ? ImageIcon : resource.type === 'clip' ? Film : FileCode;
-  const typeColor = resource.type === 'image' ? 'text-violet-400' : resource.type === 'clip' ? 'text-cyan-400' : 'text-emerald-400';
+  // Red Noir: all type icons use the same red accent
+  const typeColor = 'text-[#ef233c]';
   const TypeIcon = typeIcon;
 
   // Use the dynamically resolved owner profile, fall back to resource's stored ownerName
@@ -102,23 +103,23 @@ export function ResourceDetailModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-3xl max-h-[90vh] glass rounded-3xl overflow-hidden flex flex-col"
+        className="w-full max-w-3xl max-h-[90vh] bg-black/60 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/5 shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className={`w-8 h-8 rounded-xl bg-${resource.type === 'image' ? 'violet' : resource.type === 'clip' ? 'cyan' : 'emerald'}-500/15 flex items-center justify-center`}>
+            <div className="w-8 h-8 rounded-lg bg-[#ef233c]/15 flex items-center justify-center">
               <TypeIcon className={`w-4 h-4 ${typeColor}`} />
             </div>
             <div>
-              <h2 className="font-serif-display text-lg text-white truncate max-w-[300px]">{resource.title}</h2>
-              <p className="text-[10px] font-mono-display uppercase tracking-wider text-neutral-500">
+              <h2 className="font-manrope font-semibold text-lg text-white truncate max-w-[300px]">{resource.title}</h2>
+              <p className="text-[10px] font-manrope uppercase tracking-wider text-zinc-500">
                 {resource.type} · {formatDate(resource.createdAt)}
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-neutral-500 hover:text-white hover:bg-white/5 transition-all">
+          <button onClick={onClose} className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -142,13 +143,13 @@ export function ResourceDetailModal({
               />
             ) : resource.type === 'xml' ? (
               <div className="flex flex-col items-center gap-3 py-12">
-                <FileCode className="w-16 h-16 text-emerald-400/30" />
-                <p className="text-sm text-neutral-500">XML file — download to view</p>
+                <FileCode className="w-16 h-16 text-[#ef233c]/30" />
+                <p className="font-inter text-sm text-zinc-500">XML file — download to view</p>
               </div>
             ) : (
               <div className="flex flex-col items-center gap-3 py-12">
                 <TypeIcon className={`w-16 h-16 ${typeColor} opacity-30`} />
-                <p className="text-sm text-neutral-500">No preview available</p>
+                <p className="font-inter text-sm text-zinc-500">No preview available</p>
               </div>
             )}
           </div>
@@ -156,8 +157,8 @@ export function ResourceDetailModal({
           {/* Info section */}
           <div className="p-6 space-y-4">
             {/* Creator — dynamically resolved from current profile */}
-            <div className="flex items-center gap-3 p-3 rounded-2xl bg-white/[0.02] border border-white/5">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-violet-500/20 to-cyan-500/20 flex items-center justify-center text-sm font-medium text-white overflow-hidden shrink-0">
+            <div className="flex items-center gap-3 p-3 rounded-xl bg-black/40 border border-white/5">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#ef233c]/20 to-zinc-800 flex items-center justify-center text-sm font-medium text-white overflow-hidden shrink-0">
                 {avatar ? (
                   <img src={avatar} alt={displayName} className="w-full h-full object-cover" />
                 ) : (
@@ -166,35 +167,35 @@ export function ResourceDetailModal({
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <p className="text-sm font-medium text-white truncate">{displayName}</p>
+                  <p className="font-inter text-sm font-medium text-white truncate">{displayName}</p>
                   {isAdminResource && (
-                    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 border border-violet-500/25 text-[8px] font-mono-display uppercase tracking-wider text-violet-300">
+                    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-[#ef233c]/15 border border-[#ef233c]/30 text-[8px] font-manrope uppercase tracking-wider text-[#ef233c]">
                       <Crown className="w-2.5 h-2.5" /> Admin
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] font-mono-display text-neutral-500">@{username}</p>
+                <p className="text-[11px] font-manrope text-zinc-500">@{username}</p>
               </div>
               {loadingOwner && (
-                <div className="w-4 h-4 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
+                <div className="w-4 h-4 border-2 border-[#ef233c]/30 border-t-[#ef233c] rounded-full animate-spin" />
               )}
             </div>
 
             {/* Description */}
             {resource.description && (
               <div>
-                <p className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 mb-1.5">Description</p>
-                <p className="text-sm text-neutral-300 leading-relaxed">{resource.description}</p>
+                <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1.5">Description</p>
+                <p className="font-inter text-sm text-zinc-300 leading-relaxed">{resource.description}</p>
               </div>
             )}
 
             {/* Tags */}
             {resource.tags && resource.tags.length > 0 && (
               <div>
-                <p className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 mb-1.5">Tags</p>
+                <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1.5">Tags</p>
                 <div className="flex flex-wrap gap-1.5">
                   {resource.tags.map((tag, i) => (
-                    <span key={i} className="flex items-center gap-1 text-[11px] font-mono-display px-2 py-1 rounded-lg bg-white/[0.03] border border-white/5 text-neutral-400">
+                    <span key={i} className="flex items-center gap-1 text-[11px] font-manrope px-2 py-1 rounded-lg bg-white/[0.03] border border-white/5 text-zinc-400">
                       <Tag className="w-2.5 h-2.5" />
                       {tag}
                     </span>
@@ -205,16 +206,16 @@ export function ResourceDetailModal({
 
             {/* Meta info */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                <p className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 mb-1">Published</p>
-                <div className="flex items-center gap-1.5 text-xs text-neutral-300">
-                  <Calendar className="w-3 h-3 text-neutral-600" />
+              <div className="p-3 rounded-xl bg-black/40 border border-white/5">
+                <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1">Published</p>
+                <div className="flex items-center gap-1.5 text-xs font-inter text-zinc-300">
+                  <Calendar className="w-3 h-3 text-zinc-600" />
                   {formatDate(resource.createdAt)}
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                <p className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500 mb-1">Type</p>
-                <div className="flex items-center gap-1.5 text-xs text-neutral-300">
+              <div className="p-3 rounded-xl bg-black/40 border border-white/5">
+                <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1">Type</p>
+                <div className="flex items-center gap-1.5 text-xs font-inter text-zinc-300">
                   <TypeIcon className={`w-3 h-3 ${typeColor}`} />
                   {resource.type.toUpperCase()}
                   {resource.duration && ` · ${resource.duration.toFixed(1)}s`}
@@ -225,7 +226,7 @@ export function ResourceDetailModal({
             {/* Status badge */}
             {!resource.published && (
               <div className="p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
-                <p className="text-[11px] text-amber-400 font-medium">Draft — not published to community</p>
+                <p className="text-[11px] font-inter text-amber-400 font-medium">Draft — not published to community</p>
               </div>
             )}
           </div>
@@ -235,20 +236,20 @@ export function ResourceDetailModal({
         <div className="flex items-center gap-2 px-6 py-4 border-t border-white/5 shrink-0">
           <button
             onClick={handleDownloadClick}
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-500 text-white text-sm font-medium hover:from-violet-400 hover:to-cyan-400 transition-all duration-300 ease-snap"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
           >
             <Download className="w-4 h-4" /> Download
           </button>
           <button
             onClick={handleOpenFull}
-            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-white/[0.05] border border-white/5 text-neutral-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-snap"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.05] border border-white/5 text-zinc-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
             title="Open full image"
           >
             <ExternalLink className="w-4 h-4" />
           </button>
           <button
             onClick={handleShare}
-            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-white/[0.05] border border-white/5 text-neutral-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-snap"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.05] border border-white/5 text-zinc-300 text-sm font-medium hover:bg-white/10 hover:text-white transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
             title="Share"
           >
             <Share2 className="w-4 h-4" />
@@ -256,7 +257,7 @@ export function ResourceDetailModal({
           {canDelete && onDelete && (
             <button
               onClick={() => { onDelete(resource); onClose(); }}
-              className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm font-medium hover:bg-red-500/20 transition-all duration-300 ease-snap"
+              className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c]/10 border border-[#ef233c]/20 text-[#ef233c] text-sm font-medium hover:bg-[#ef233c]/20 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
               title="Delete"
             >
               Delete
