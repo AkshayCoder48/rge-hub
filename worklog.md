@@ -456,3 +456,122 @@ Stage Summary:
 - API routes reduced from 17 to 3, well under Vercel Hobby plan 12-function limit
 - Codebase cleaned: removed ~20 orphaned component files and 14 unused API routes
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+Task ID: 4-a
+Agent: general-purpose
+Task: Restyle export-panel.tsx and video-preview.tsx to Synapse design system
+
+Work Log:
+- Read worklog.md for project context (Synapse design system, Tailwind v4, #030303 base)
+- Read globals.css to confirm utility classes available: font-mono-display, font-serif-display, ease-snap
+- Read both target files: export-panel.tsx (441 lines) and video-preview.tsx (203 lines)
+- Cross-referenced existing synapse/feature-card.tsx and code-block.tsx for canonical patterns
+
+export-panel.tsx restyle (14 edits):
+- Outer container: rounded-2xl bg-[#0f0f17] p-5 -> rounded-3xl border border-white/5 bg-white/[0.02] p-6
+- Header icon: text-cyan-400 -> text-violet-400
+- Header title: text-sm font-medium text-white/70 -> font-serif-display text-lg text-white
+- Config toggle button: added font-mono-display text-[10px] uppercase tracking-[0.2em], text-neutral-500 hover:text-white, duration-300 ease-snap
+- Config panel container: rounded-xl -> rounded-2xl
+- All 16 config panel labels: replaced text-[10px] text-white/25 uppercase tracking-wider block mb-1(.5) with font-mono-display text-[10px] uppercase tracking-[0.2em] text-neutral-500 block mb-1(.5) (via replace_all)
+- All config inputs (4 with orange focus, 3 with cyan focus): replaced text-white/60 font-mono focus:border-(orange|cyan)-500/30 with text-neutral-300 font-mono-display focus:border-violet-500/30 (via replace_all)
+- All config selects (1 with orange focus, 7 with cyan focus): replaced text-white/60 focus:border-(orange|cyan)-500/30 with text-neutral-300 font-mono-display focus:border-violet-500/30 (via replace_all)
+- Textarea: same input pattern replacement (font-mono -> font-mono-display, focus:border-cyan-500/30 -> focus:border-violet-500/30)
+- Mode buttons: active from-orange-500/15 text-white/80 border-orange-500/30 -> from-violet-500/15 text-white border-violet-500/30; inactive text-white/30 hover:text-white/50 -> text-neutral-500 hover:text-white; added duration-300 ease-snap
+- Summary card container: rounded-xl -> rounded-2xl
+- Summary card content (4 stat blocks): icons text-white/40 -> text-neutral-500; Scissors icon text-orange-400/60 -> text-violet-400/60; labels -> font-mono-display text-[10px] uppercase tracking-[0.2em] text-neutral-600; values text-white/60 -> text-neutral-300 font-mono-display; Type gradient from-orange-400/70 to-cyan-400/70 -> from-violet-400/80 to-cyan-400/80; added gradient to speed value display per spec
+- Process button: rounded-xl -> rounded-2xl; disabled bg-orange-500/10 text-orange-400/60 -> bg-violet-500/10 text-violet-400/60; active from-orange-500 to-cyan-500 hover:from-orange-400 hover:to-cyan-400 shadow-lg shadow-orange-500/20 -> from-violet-500 to-cyan-500 hover:from-violet-400 hover:to-cyan-400 shadow-[0_0_20px_-5px_rgba(139,92,246,0.4)]; added duration-300 ease-snap
+- Download button: rounded-xl -> rounded-2xl; added duration-300 ease-snap (colors already match spec: bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20)
+- Clear button: rounded-xl -> rounded-2xl; text-white/20 hover:text-white/40 -> text-neutral-700 hover:text-neutral-500; added duration-300 ease-snap
+- API ref toggle: text-[10px] text-white/20 hover:text-white/40 -> font-mono-display text-[10px] uppercase tracking-[0.2em] text-neutral-500 hover:text-white; added duration-300 ease-snap
+- API ref block: rounded-xl bg-white/[0.02] -> rounded-2xl bg-black/40; description text-white/30 -> font-mono-display text-[10px] uppercase tracking-[0.2em] text-neutral-600
+- API ref code: font-mono text-white/40 -> font-mono-display text-neutral-500
+- API ref footer: text-[9px] text-white/20 -> font-mono-display text-[9px] text-neutral-700; text-cyan-400/40 -> text-cyan-400/60 (bumped for legibility)
+
+video-preview.tsx restyle (14 edits):
+- Outer container: rounded-2xl bg-[#0f0f17] border border-white/5 overflow-hidden -> rounded-3xl border border-white/5 bg-white/[0.02] overflow-hidden
+- Header title: text-sm font-medium text-white/70 -> font-serif-display text-lg text-white (icon stays text-cyan-400 per spec)
+- Processed toggle: added duration-300 ease-snap; inactive text-white/30 hover:text-white/50 -> text-neutral-600 hover:text-neutral-400 (active already matches spec)
+- Original toggle: bg-orange-500/15 text-orange-400 border-orange-500/30 -> bg-violet-500/15 text-violet-400 border-violet-500/30; inactive same neutral swap; added duration-300 ease-snap
+- Video container: rounded-xl -> rounded-2xl (inner element per spec)
+- Loading state: Film icon text-white/10 -> text-neutral-700; text text-white/20 -> text-neutral-700
+- Play button overlay: added duration-300 ease-snap (bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 already matches spec)
+- Loading spinner: border-orange-400/30 border-t-orange-400 -> border-violet-400/30 border-t-violet-400
+- Processing overlay spinner: same orange->violet swap; text text-white/50 -> text-neutral-400
+- Video badge: ORIGINAL bg-orange-500/20 text-orange-400 -> bg-violet-500/20 text-violet-400; fallback bg-white/10 text-white/40 -> bg-white/10 text-neutral-500 (V-RAMP cyan already correct)
+- Progress bar: from-orange-500 to-cyan-400 -> from-violet-500 to-cyan-400; duration-100 -> duration-300 ease-snap
+- Time display: text-[10px] text-white/30 font-mono -> text-[10px] font-mono-display text-neutral-500
+- Control buttons (play/pause, restart, mute, fullscreen - 4 instances via replace_all): text-white/60 hover:text-white/90 -> text-neutral-300 hover:text-white; added duration-300 ease-snap
+- Download button: text-cyan-400/60 hover:text-cyan-400 -> text-cyan-400 (cleaner per spec); added duration-300 ease-snap
+
+Verification:
+- Ran `bun run lint` -> passed with zero errors
+- Confirmed no remaining `orange`, `bg-[#0f0f17]`, `text-white/XX` opacity patterns, or bare `font-mono ` (without -display) in either file
+
+Stage Summary:
+- Both components now match Synapse design system: vantablack bg-[#030303] foundation, violet/cyan/emerald accents, rounded-3xl outer cards with rounded-2xl inner elements, font-serif-display headings, font-mono-display labels/numeric data, ease-snap cubic-bezier transitions, violet-cyan gradient CTAs with glow shadows
+- All orange references eliminated (replaced with violet equivalents)
+- All bg-[#0f0f17] replaced with bg-white/[0.02]
+- All text-white/XX opacity patterns mapped to text-neutral-XXX equivalents
+- Lint passes cleanly; no TypeScript or ESLint errors
+---
+Task ID: 12
+Agent: main
+Task: Complete Synapse design system overhaul — redesign entire app UI
+
+Work Log:
+- Set up typography via next/font/google:
+  - Instrument Serif (headings, brand) — weight 400, normal + italic
+  - Inter (body/UI) — weights 300, 400, 500, 600, 700
+  - JetBrains Mono (data/metrics/code) — weights 400, 500, 600
+- Rewrote src/app/globals.css with full Synapse design tokens:
+  - Base background: #030303 (Vantablack)
+  - Accent colors: Violet #8B5CF6, Cyan #06B6D4, Emerald #10B981
+  - Custom utilities: .glass, .glass-light, .text-shimmer, .glow-violet, .glow-cyan, .ease-snap, .font-serif-display, .font-mono-display
+  - Keyframe animations: shimmer, float-orb, float-orb-slow, spin-border, ticker-scroll, fade-up, fade-in, pulse-dot, bounce-subtle
+  - Shiny border button ::before conic-gradient pseudo-element
+  - Synapse-styled range sliders (violet thumb with glow)
+  - Custom scrollbar with violet tint
+  - Stagger delay utilities (stagger-1 through stagger-6)
+- Updated layout.tsx: replaced Geist fonts with Inter + Instrument Serif + JetBrains Mono, set dark class on html, updated metadata title to "Synapse — Speed Ramp Engine"
+- Created 7 Synapse reusable components in src/components/synapse/:
+  1. shiny-border-button.tsx — Spinning conic-gradient border button (padding 1px, ::before 200%x200% 4s rotation)
+  2. navigation-pill.tsx — Floating glass nav bar (top-6, centered, max-w-672px, rounded-full, glass bg, logo+links+CTA)
+  3. metrics-ticker.tsx — Full-width infinite horizontal scroll (40s loop, mono labels+values, 10 metric pairs duplicated for seamless loop)
+  4. feature-card.tsx — Reveal-on-scroll card (rounded-3xl, hover lift -12px, violet/cyan/emerald glow, icon scale+rotate)
+  5. code-block.tsx — IDE-style window (3 window controls, filename, copy button, custom syntax highlighter: violet imports, cyan classes, emerald strings, grey comments)
+  6. ambient-orbs.tsx — Fixed background orbs (violet top-right 600px blur-120px, cyan bottom-left 500px blur-100px, grid overlay)
+  7. footer.tsx — 4-column grid footer (#050505 bg, brand logo, copyright, emerald "All Systems Operational" pulsing status)
+- Rewrote src/app/page.tsx with full Synapse layout:
+  - AmbientOrbs (fixed background)
+  - NavigationPill (floating glass nav)
+  - Hero section: radial gradient bg, pill badge "Synapse Engine v1.0", massive serif heading "Speed ramp, reengineered." with shimmer on "reengineered", subtext, ShinyBorderButton "Launch Studio" + text link "Explore features", speed preview badges
+  - MetricsTicker (infinite scroll: Engine/FFmpeg 6.0, Ramp Mode/V-Shape, Speed Range/4x→0.6x, Avg Latency/271ms, etc.)
+  - Studio section: SpeedRampApp (the functional speed ramp tool)
+  - Feature Grid: 6 FeatureCards (V-Shaped Ramp, Seamless Fusion, FFmpeg Native, Batch Engine, Smart Trim, Multi-Format) with staggered fade-up
+  - Code Integration Block: CodeBlock with demo code (createRamp API example)
+  - SynapseFooter (4-column + status indicator)
+- Restyled all speed-ramp child components to Synapse aesthetic:
+  - speed-ramp-app.tsx: violet/cyan accents, glass-light badges, serif headings, mono labels, violet SVG graph gradients
+  - upload-zone.tsx: violet drag glow, rounded-3xl, font-serif-display heading, mono format labels, violet→cyan progress bar
+  - clip-list.tsx: glass cards, violet selected glow, mono data, emerald/violet/cyan status dots
+  - trim-duration-control.tsx: rounded-3xl, violet slider, mono preset buttons
+  - processing-status.tsx: emerald ping dot, violet→cyan progress bar, mono labels
+  - process-all.tsx: violet→cyan gradient button with glow, mono tracking labels
+  - export-panel.tsx: (restyled by subagent) full violet/cyan theme, serif headings, mono labels
+  - video-preview.tsx: (restyled by subagent) violet/cyan toggle buttons, violet progress bar, mono time display
+- Verified with agent-browser: page title "Synapse — Speed Ramp Engine", all sections present (Nav, Hero, Ticker, Studio, Features, Code, Footer), zero console errors, zero page errors
+- VLM analysis confirmed design quality: "Technical Luxury / Developer Premium" aesthetic with dark bg, violet/cyan dual-accent, glassmorphism, gradients, glows
+- Lint passes clean (0 errors)
+- Deployed to https://speedramp-pro.vercel.app (200 OK, verified "Synapse", "Speed ramp", "reengineered", "V-Shaped", "All Systems" present in production HTML)
+
+Stage Summary:
+- Complete Synapse design system implemented across entire app
+- 7 reusable Synapse components created (shiny-border-button, navigation-pill, metrics-ticker, feature-card, code-block, ambient-orbs, footer)
+- Full page layout: Fixed Nav Pill → Hero → Metrics Ticker → Studio → Feature Grid → Code Block → Footer
+- Typography: Instrument Serif (headings), Inter (body), JetBrains Mono (data/code)
+- Color system: #030303 base, Violet #8B5CF6 + Cyan #06B6D4 + Emerald #10B981 accents
+- Effects: glassmorphism (blur 16px), floating ambient orbs, text shimmer, spinning conic-gradient borders, staggered fade-up entrances, cubic-bezier(0.23,1,0.32,1) snappy transitions
+- All existing speed ramp functionality preserved and restyled
+- Deployed live at https://speedramp-pro.vercel.app

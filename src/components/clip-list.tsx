@@ -38,7 +38,6 @@ export function ClipList() {
         if (!response.ok) throw new Error('Upload failed');
         const data = await response.json();
 
-        // For clips under 10s, use full video duration; for longer clips, cap at 10s
         const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
 
         const clip: VideoClip = {
@@ -50,7 +49,7 @@ export function ClipList() {
           speedRamps: createReverseSpeedRamp(trimDuration),
           config: { ...DEFAULT_CONFIG, trimDuration },
           hasAudio: data.hasAudio,
-          originalFile: file, // Store the original File object for re-uploading during process
+          originalFile: file,
           status: 'ready',
         };
         addClip(clip);
@@ -70,15 +69,15 @@ export function ClipList() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-white/50 uppercase tracking-wider">Clips ({clips.length})</h2>
+        <h2 className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500">Clips ({clips.length})</h2>
         {uploadingCount > 0 && (
-          <div className="flex items-center gap-1.5 text-xs text-orange-400/70">
+          <div className="flex items-center gap-1.5 text-xs text-violet-400">
             <Loader2 className="w-3 h-3 animate-spin" /> Uploading {uploadingCount}...
           </div>
         )}
       </div>
 
-      <div className="space-y-2 max-h-[calc(100vh-320px)] overflow-y-auto pr-1 custom-scrollbar">
+      <div className="space-y-2 max-h-[calc(100vh-340px)] overflow-y-auto pr-1 custom-scrollbar">
         {clips.map((clip) => {
           const speedStart = clip.speedRamps[0]?.speed ?? 0;
           const speedMid = clip.speedRamps[Math.floor(clip.speedRamps.length / 2)]?.speed ?? 0;
@@ -90,47 +89,53 @@ export function ClipList() {
               onClick={() => selectClip(clip.id)}
               role="button" tabIndex={0}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectClip(clip.id); }}
-              className={`w-full text-left rounded-xl p-3 transition-all duration-200 group cursor-pointer ${
+              className={`w-full text-left rounded-2xl p-3 transition-all duration-300 ease-snap group cursor-pointer ${
                 selectedClipId === clip.id
-                  ? 'bg-gradient-to-r from-orange-500/10 to-cyan-500/10 border border-orange-500/30'
-                  : 'bg-white/[0.02] border border-white/5 hover:bg-white/[0.05] hover:border-white/10'
+                  ? 'bg-gradient-to-r from-violet-500/10 to-cyan-500/10 border border-violet-500/30 shadow-[0_0_20px_-10px_rgba(139,92,246,0.4)]'
+                  : 'bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] hover:border-white/10'
               }`}
             >
               <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-gradient-to-br from-orange-500/10 to-cyan-500/10">
-                  <Combine className="w-4 h-4 text-white/60" />
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-gradient-to-br from-violet-500/10 to-cyan-500/10">
+                  <Combine className="w-4 h-4 text-neutral-300" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-white/80 truncate">{clip.originalName}</p>
-                    <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-gradient-to-r from-orange-500/10 to-cyan-500/10 text-white/50 border border-white/10 font-medium">V-RAMP</span>
+                    <p className="text-sm font-medium text-white truncate">{clip.originalName}</p>
+                    <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full bg-white/5 text-violet-400 border border-violet-500/20 font-mono-display font-medium">V-RAMP</span>
                   </div>
                   <div className="flex items-center gap-3 mt-1">
-                    <span className="text-xs font-mono font-medium bg-gradient-to-r from-orange-400/60 to-cyan-400/60 bg-clip-text text-transparent">
+                    <span className="text-xs font-mono-display font-medium bg-gradient-to-r from-violet-400/80 to-cyan-400/80 bg-clip-text text-transparent">
                       {speedStart}x → {speedMid}x → {speedEnd}x
                     </span>
-                    <span className="flex items-center gap-1 text-xs text-white/30">
+                    <span className="flex items-center gap-1 text-xs text-neutral-500 font-mono-display">
                       <Clock className="w-3 h-3" /> {clip.trimDuration.toFixed(2)}s
                     </span>
-                    <span className="flex items-center gap-1 text-xs text-white/30">
-                      <MonitorPlay className="w-3 h-3" /> {clip.width}x{clip.height}
+                    <span className="flex items-center gap-1 text-xs text-neutral-500 font-mono-display">
+                      <MonitorPlay className="w-3 h-3" /> {clip.width}×{clip.height}
                     </span>
                   </div>
                   <div className="mt-1.5 flex items-center gap-2">
-                    <span className={`inline-flex items-center text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                    <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-mono-display font-medium ${
                       clip.status === 'ready' ? 'bg-emerald-500/10 text-emerald-400' :
-                      clip.status === 'processing' ? 'bg-orange-500/10 text-orange-400' :
+                      clip.status === 'processing' ? 'bg-violet-500/10 text-violet-400' :
                       clip.status === 'done' ? 'bg-cyan-500/10 text-cyan-400' :
-                      clip.status === 'error' ? 'bg-red-500/10 text-red-400' : 'bg-white/5 text-white/30'
+                      clip.status === 'error' ? 'bg-red-500/10 text-red-400' : 'bg-white/5 text-neutral-500'
                     }`}>
-                      {clip.status === 'ready' ? '● Ready' : clip.status === 'processing' ? '● Processing' :
-                       clip.status === 'done' ? '● Complete' : clip.status === 'error' ? '● Error' : '● Idle'}
+                      <span className={`w-1 h-1 rounded-full ${
+                        clip.status === 'ready' ? 'bg-emerald-400' :
+                        clip.status === 'processing' ? 'bg-violet-400 animate-pulse' :
+                        clip.status === 'done' ? 'bg-cyan-400' :
+                        clip.status === 'error' ? 'bg-red-400' : 'bg-neutral-500'
+                      }`} />
+                      {clip.status === 'ready' ? 'Ready' : clip.status === 'processing' ? 'Processing' :
+                       clip.status === 'done' ? 'Complete' : clip.status === 'error' ? 'Error' : 'Idle'}
                     </span>
                   </div>
                 </div>
-                <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300 ease-snap">
                   <button onClick={(e) => { e.stopPropagation(); removeClip(clip.id); }}
-                    className="p-1.5 rounded-lg hover:bg-red-500/10 hover:text-red-400 text-white/20 transition-all" title="Delete">
+                    className="p-1.5 rounded-lg hover:bg-red-500/10 hover:text-red-400 text-neutral-600 transition-all duration-300 ease-snap" title="Delete">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -142,11 +147,11 @@ export function ClipList() {
 
       <div className="pt-2 space-y-2">
         <button onClick={() => fileInputRef.current?.click()} disabled={uploadingCount > 0}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl text-sm font-medium bg-white/[0.02] border border-dashed border-white/10 text-white/40 hover:bg-white/[0.05] hover:border-orange-500/30 hover:text-orange-400/70 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-2xl text-sm font-medium bg-white/[0.02] border border-dashed border-white/10 text-neutral-400 hover:bg-white/[0.04] hover:border-violet-500/30 hover:text-violet-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-300 ease-snap">
           {uploadingCount > 0 ? <><Loader2 className="w-4 h-4 animate-spin" /> Uploading...</> : <><Plus className="w-4 h-4" /> Add More Videos</>}
         </button>
         <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.webm,.mkv" multiple onChange={async (e) => { if (e.target.files?.length) { await handleFileUpload(e.target.files); e.target.value = ''; } }} className="hidden" />
-        <p className="text-[10px] text-white/15 text-center">Each video creates 1 reverse speed ramp clip ({RAMP_START}x→{RAMP_MID}x→{RAMP_END}x)</p>
+        <p className="text-[10px] font-mono-display text-neutral-600 text-center tracking-wide">Each video creates 1 reverse speed ramp clip ({RAMP_START}x→{RAMP_MID}x→{RAMP_END}x)</p>
       </div>
     </div>
   );

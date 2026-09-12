@@ -105,27 +105,27 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
   const progress = timeDisplay.duration > 0 ? (timeDisplay.current / timeDisplay.duration) * 100 : 0;
 
   return (
-    <div className="rounded-2xl bg-[#0f0f17] border border-white/5 overflow-hidden">
+    <div className="rounded-3xl border border-white/5 bg-white/[0.02] overflow-hidden">
       <div className="flex items-center justify-between p-4 pb-0">
         <div className="flex items-center gap-2">
           <Play className="w-4 h-4 text-cyan-400" />
-          <h3 className="text-sm font-medium text-white/70">Preview</h3>
+          <h3 className="font-serif-display text-lg text-white">Preview</h3>
         </div>
         {hasProcessed && (
           <div className="flex items-center gap-1 bg-white/[0.03] rounded-lg p-0.5">
             <button onClick={() => setShowOriginal(false)}
-              className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${!showOriginal ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30' : 'text-white/30 hover:text-white/50'}`}>
+              className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all duration-300 ease-snap ${!showOriginal ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30' : 'text-neutral-600 hover:text-neutral-400'}`}>
               Processed
             </button>
             <button onClick={() => setShowOriginal(true)}
-              className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all ${showOriginal ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' : 'text-white/30 hover:text-white/50'}`}>
+              className={`px-2.5 py-1 rounded-md text-[10px] font-medium transition-all duration-300 ease-snap ${showOriginal ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30' : 'text-neutral-600 hover:text-neutral-400'}`}>
               Original
             </button>
           </div>
         )}
       </div>
 
-      <div className="relative mt-3 mx-4 rounded-xl overflow-hidden bg-black aspect-video">
+      <div className="relative mt-3 mx-4 rounded-2xl overflow-hidden bg-black aspect-video">
         {displayUrl ? (
           <video ref={videoRef} src={displayUrl} className="w-full h-full object-contain" preload="metadata" playsInline
             onClick={handlePlayPause} onTimeUpdate={handleTimeUpdate} onPlay={handlePlay} onPause={handlePause}
@@ -133,66 +133,66 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
         ) : (
           <div className="w-full h-full flex items-center justify-center">
             <div className="text-center">
-              <Film className="w-8 h-8 text-white/10 mx-auto mb-2" />
-              <p className="text-xs text-white/20">Video preview loading...</p>
+              <Film className="w-8 h-8 text-neutral-700 mx-auto mb-2" />
+              <p className="text-xs text-neutral-700">Video preview loading...</p>
             </div>
           </div>
         )}
         {playbackState === 'paused' && displayUrl && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/30 cursor-pointer" onClick={handlePlayPause}>
-            <div className="w-14 h-14 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all">
+            <div className="w-14 h-14 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all duration-300 ease-snap">
               <Play className="w-6 h-6 text-white ml-1" />
             </div>
           </div>
         )}
         {playbackState === 'loading' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-            <div className="w-10 h-10 border-2 border-orange-400/30 border-t-orange-400 rounded-full animate-spin" />
+            <div className="w-10 h-10 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin" />
           </div>
         )}
         {clip.status === 'processing' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
             <div className="text-center">
-              <div className="w-10 h-10 border-2 border-orange-400/30 border-t-orange-400 rounded-full animate-spin mx-auto mb-2" />
-              <p className="text-xs text-white/50">Processing V-Ramp...</p>
+              <div className="w-10 h-10 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin mx-auto mb-2" />
+              <p className="text-xs text-neutral-400">Processing V-Ramp...</p>
             </div>
           </div>
         )}
         <div className="absolute top-2 left-2">
           <span className={`text-[9px] px-2 py-0.5 rounded-full font-medium ${
-            showOriginal ? 'bg-orange-500/20 text-orange-400' : hasProcessed ? 'bg-cyan-500/20 text-cyan-400' : 'bg-white/10 text-white/40'
+            showOriginal ? 'bg-violet-500/20 text-violet-400' : hasProcessed ? 'bg-cyan-500/20 text-cyan-400' : 'bg-white/10 text-neutral-500'
           }`}>{showOriginal ? 'ORIGINAL' : hasProcessed ? 'V-RAMP' : 'ORIGINAL'}</span>
         </div>
       </div>
 
       <div className="px-4 pt-3 pb-4">
         <div className="relative w-full h-1.5 rounded-full bg-white/5 mb-3 cursor-pointer group" onClick={handleProgressClick}>
-          <div className="absolute top-0 left-0 h-full rounded-full bg-gradient-to-r from-orange-500 to-cyan-400 transition-all duration-100" style={{ width: `${progress}%` }} />
+          <div className="absolute top-0 left-0 h-full rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 transition-all duration-300 ease-snap" style={{ width: `${progress}%` }} />
         </div>
-        <div className="flex items-center justify-between text-[10px] text-white/30 font-mono mb-2">
+        <div className="flex items-center justify-between text-[10px] font-mono-display text-neutral-500 mb-2">
           <span>{formatDuration(timeDisplay.current)}</span>
           <span>{formatDuration(timeDisplay.duration)}</span>
         </div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <button onClick={handlePlayPause} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-white/60 hover:text-white/90 transition-all">
+            <button onClick={handlePlayPause} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-neutral-300 hover:text-white transition-all duration-300 ease-snap">
               {playbackState === 'playing' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             </button>
-            <button onClick={handleRestart} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-white/60 hover:text-white/90 transition-all">
+            <button onClick={handleRestart} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-neutral-300 hover:text-white transition-all duration-300 ease-snap">
               <RotateCcw className="w-4 h-4" />
             </button>
-            <button onClick={toggleMute} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-white/60 hover:text-white/90 transition-all">
+            <button onClick={toggleMute} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-neutral-300 hover:text-white transition-all duration-300 ease-snap">
               {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
           </div>
           <div className="flex items-center gap-2">
             {hasProcessed && (
               <button onClick={handleDownload}
-                className="p-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400/60 hover:text-cyan-400 transition-all">
+                className="p-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 transition-all duration-300 ease-snap">
                 <Download className="w-4 h-4" />
               </button>
             )}
-            <button onClick={handleFullscreen} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-white/60 hover:text-white/90 transition-all">
+            <button onClick={handleFullscreen} className="p-2 rounded-lg bg-white/[0.05] hover:bg-white/10 text-neutral-300 hover:text-white transition-all duration-300 ease-snap">
               <Maximize className="w-4 h-4" />
             </button>
           </div>

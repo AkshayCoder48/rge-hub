@@ -63,7 +63,6 @@ export function UploadZone() {
           }
 
           const data = await response.json();
-          // For clips under 10s, use full video duration; for longer clips, cap at 10s
           const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
 
           const clip: VideoClip = {
@@ -82,7 +81,7 @@ export function UploadZone() {
             speedRamps: createReverseSpeedRamp(trimDuration),
             config: { ...DEFAULT_CONFIG, trimDuration },
             hasAudio: data.hasAudio,
-            originalFile: file, // Store the original File object for re-uploading during process
+            originalFile: file,
             status: 'ready',
           };
 
@@ -131,31 +130,36 @@ export function UploadZone() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`relative rounded-2xl cursor-pointer transition-all duration-500 ${isDragging ? 'scale-[1.02]' : 'scale-100'}`}
+        className={`relative rounded-3xl cursor-pointer transition-all duration-500 ease-snap ${isDragging ? 'scale-[1.02]' : 'scale-100'}`}
       >
-        <div className={`relative rounded-2xl border-2 border-dashed transition-all duration-300 ${
+        {/* Glow ring on drag */}
+        {isDragging && (
+          <div className="absolute -inset-1 rounded-3xl opacity-60 pointer-events-none"
+            style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.3), transparent 70%)', filter: 'blur(20px)' }} />
+        )}
+        <div className={`relative rounded-3xl border-2 border-dashed transition-all duration-300 ease-snap ${
           isDragging
-            ? 'border-transparent bg-[#0f0f17]'
-            : 'border-white/10 bg-[#0f0f17] hover:border-orange-500/50 hover:bg-[#0f0f17]/80'
-        } p-12 md:p-16 flex flex-col items-center justify-center gap-4`}>
-          <div className={`relative transition-all duration-300 ${isDragging ? 'scale-110' : 'scale-100'}`}>
-            <div className={`relative w-16 h-16 md:w-20 md:h-20 rounded-2xl flex items-center justify-center transition-all duration-300 ${
-              isDragging ? 'bg-orange-500/20' : 'bg-white/5'
+            ? 'border-violet-500/50 bg-violet-500/5'
+            : 'border-white/10 bg-white/[0.02] hover:border-violet-500/40 hover:bg-white/[0.03]'
+        } p-12 md:p-16 flex flex-col items-center justify-center gap-5`}>
+          <div className={`relative transition-all duration-300 ease-snap ${isDragging ? 'scale-110' : 'scale-100'}`}>
+            <div className={`relative w-16 h-16 md:w-20 md:h-20 rounded-2xl flex items-center justify-center transition-all duration-300 ease-snap ${
+              isDragging ? 'bg-violet-500/20 shadow-[0_0_30px_-5px_rgba(139,92,246,0.5)]' : 'bg-white/[0.03]'
             }`}>
-              <Upload className={`w-8 h-8 md:w-10 md:h-10 transition-all duration-300 ${
-                isDragging ? 'text-orange-400 animate-bounce' : 'text-white/40'
+              <Upload className={`w-8 h-8 md:w-10 md:h-10 transition-all duration-300 ease-snap ${
+                isDragging ? 'text-violet-400 animate-bounce-subtle' : 'text-neutral-500'
               }`} />
             </div>
           </div>
           <div className="text-center space-y-2">
-            <h3 className={`text-lg md:text-xl font-semibold transition-colors ${isDragging ? 'text-orange-400' : 'text-white/80'}`}>
+            <h3 className={`font-serif-display text-2xl transition-colors duration-300 ${isDragging ? 'text-violet-300' : 'text-white'}`}>
               {isDragging ? 'Release to upload' : 'Drop your video here'}
             </h3>
-            <p className="text-sm text-white/40">or click to browse · Auto-creates reverse speed ramp</p>
+            <p className="text-sm text-neutral-500">or click to browse · auto-creates reverse speed ramp</p>
           </div>
-          <div className="flex items-center gap-2 mt-2">
-            <Film className="w-3.5 h-3.5 text-white/20" />
-            <span className="text-xs text-white/25 tracking-wide">MP4 · MOV · AVI · WEBM · MKV</span>
+          <div className="flex items-center gap-2 mt-1">
+            <Film className="w-3.5 h-3.5 text-neutral-600" />
+            <span className="text-[10px] font-mono-display uppercase tracking-[0.2em] text-neutral-500">MP4 · MOV · AVI · WEBM · MKV</span>
           </div>
         </div>
       </div>
@@ -165,23 +169,25 @@ export function UploadZone() {
       {activeUploads.length > 0 && (
         <div className="mt-4 space-y-2">
           {activeUploads.map((upload, idx) => (
-            <div key={`${upload.fileName}-${idx}`} className="rounded-xl bg-[#0f0f17] border border-white/5 p-4 space-y-2">
+            <div key={`${upload.fileName}-${idx}`} className="rounded-2xl border border-white/5 bg-white/[0.02] p-4 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
                   {upload.status === 'error' ? <AlertCircle className="w-4 h-4 text-red-400 shrink-0" /> :
-                   upload.status === 'done' ? <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" /> :
-                   <Loader2 className="w-4 h-4 text-orange-400 shrink-0 animate-spin" />}
-                  <span className="text-sm text-white/70 truncate">{upload.fileName}</span>
+                   upload.status === 'done' ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" /> :
+                   <Loader2 className="w-4 h-4 text-violet-400 shrink-0 animate-spin" />}
+                  <span className="text-sm text-neutral-300 truncate">{upload.fileName}</span>
                 </div>
-                <span className="text-xs text-white/30 shrink-0 ml-2">
+                <span className="text-xs font-mono-display text-neutral-500 shrink-0 ml-2">
                   {upload.status === 'analyzing' ? 'Analyzing...' : upload.status === 'error' ? 'Failed' : `${Math.round(upload.progress)}%`}
                 </span>
               </div>
               {upload.status !== 'error' && (
-                <div className="w-full h-1.5 rounded-full bg-white/5 overflow-hidden">
-                  <div className="h-full rounded-full transition-all duration-300" style={{
+                <div className="w-full h-1 rounded-full bg-white/5 overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-300 ease-snap" style={{
                     width: `${upload.progress}%`,
-                    background: upload.progress >= 100 ? 'linear-gradient(90deg, #22c55e, #22d3ee)' : 'linear-gradient(90deg, #f97316, #22d3ee)',
+                    background: upload.progress >= 100
+                      ? 'linear-gradient(90deg, #10b981, #06b6d4)'
+                      : 'linear-gradient(90deg, #8b5cf6, #06b6d4)',
                   }} />
                 </div>
               )}

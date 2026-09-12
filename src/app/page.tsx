@@ -2,80 +2,219 @@
 
 import React from 'react';
 import { SpeedRampApp } from '@/components/speed-ramp-app';
-import { Zap, Server } from 'lucide-react';
+import {
+  NavigationPill,
+  MetricsTicker,
+  FeatureCard,
+  CodeBlock,
+  AmbientOrbs,
+  SynapseFooter,
+  ShinyBorderButton,
+} from '@/components/synapse';
+import {
+  Zap,
+  TrendingDown,
+  TrendingUp,
+  Combine,
+  Film,
+  Server,
+  Layers,
+  Gauge,
+  Cpu,
+  ArrowRight,
+  Sparkles,
+} from 'lucide-react';
+
+const DEMO_CODE = `import { createRamp } from '@synapse/engine';
+
+const ramp = await createRamp({
+  file: input.mp4,
+  mode: 'vramp',
+  trimDuration: 10.0,
+  speeds: { start: 4, mid: 0.6, end: 4 },
+  reverse: true,
+  preset: 'ultrafast',
+  crf: 23,
+  outputFps: 30,
+});
+
+// Returns a Blob URL — ready to play or download
+const url = URL.createObjectURL(ramp.blob);`;
 
 export default function Home() {
   return (
-    <div className="min-h-screen flex flex-col bg-[#0a0a0f] relative overflow-hidden">
-      {/* Background effects */}
-      <div className="absolute inset-0 z-0">
-        <div className="absolute inset-0 opacity-[0.03]" style={{
-          backgroundImage: `linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)`,
-          backgroundSize: '60px 60px',
-        }} />
-      </div>
-      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-32 -right-32 w-[500px] h-[500px] rounded-full" style={{ background: 'radial-gradient(circle, rgba(249,115,22,0.08) 0%, transparent 70%)', filter: 'blur(40px)' }} />
-        <div className="absolute -bottom-32 -left-32 w-[500px] h-[500px] rounded-full" style={{ background: 'radial-gradient(circle, rgba(34,211,238,0.06) 0%, transparent 70%)', filter: 'blur(40px)' }} />
-      </div>
+    <div className="min-h-screen flex flex-col bg-[#030303] text-white relative">
+      <AmbientOrbs />
+      <NavigationPill />
 
-      {/* Header */}
-      <header className="relative z-10 border-b border-white/[0.04]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-orange-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-orange-500/20">
-                <Zap className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h1 className="text-lg font-bold bg-gradient-to-r from-orange-400 via-white/90 to-cyan-400 bg-clip-text text-transparent">
-                  VideoFX Studio
-                </h1>
-                <p className="text-[10px] text-white/25 tracking-wider uppercase">
-                  Speed ramp
-                </p>
-              </div>
+      {/* ===== HERO ===== */}
+      <section className="relative z-10 pt-40 pb-20 px-6">
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(ellipse 80% 50% at 50% 0%, rgba(139,92,246,0.4) 0%, transparent 60%), radial-gradient(ellipse 60% 40% at 0% 50%, rgba(6,182,212,0.08) 0%, transparent 50%)',
+          }}
+        />
+        <div className="relative max-w-5xl mx-auto text-center">
+          {/* Pill badge */}
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full glass mb-8 animate-fade-up">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75 animate-ping" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-violet-400" />
+            </span>
+            <span className="text-[11px] font-mono-display uppercase tracking-[0.2em] text-neutral-300">
+              Synapse Engine v1.0
+            </span>
+          </div>
+
+          {/* Massive heading */}
+          <h1 className="font-serif-display text-6xl sm:text-7xl md:text-8xl lg:text-9xl leading-[0.9] tracking-tight mb-8 animate-fade-up stagger-1">
+            Speed ramp,
+            <br />
+            <span className="text-shimmer italic">reengineered.</span>
+          </h1>
+
+          {/* Subtext */}
+          <p className="max-w-2xl mx-auto text-lg text-neutral-400 leading-relaxed mb-10 animate-fade-up stagger-2">
+            Upload a clip and Synapse auto-generates a V-shaped reverse speed ramp —
+            forward at 4x→0.6x, reversed at 0.6x→4x, fused into one seamless cut.
+            Powered by server-side FFmpeg.
+          </p>
+
+          {/* CTAs */}
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-fade-up stagger-3">
+            <a href="#studio">
+              <ShinyBorderButton innerClassName="gap-2">
+                <Zap className="w-4 h-4 text-violet-400" />
+                Launch Studio
+              </ShinyBorderButton>
+            </a>
+            <a
+              href="#features"
+              className="group inline-flex items-center gap-1.5 px-4 py-3 text-sm text-neutral-400 hover:text-white transition-colors duration-300 ease-snap"
+            >
+              Explore features
+              <ArrowRight className="w-3.5 h-3.5 transition-transform duration-300 ease-snap group-hover:translate-x-1" />
+            </a>
+          </div>
+
+          {/* Speed preview badges */}
+          <div className="flex flex-wrap items-center justify-center gap-3 mt-16 animate-fade-up stagger-4">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full glass-light">
+              <TrendingDown className="w-3.5 h-3.5 text-violet-400" />
+              <span className="text-xs font-mono-display text-neutral-300">4x → 0.6x</span>
             </div>
-
-            {/* Capability badge */}
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.03] border border-white/5">
-              <Server className="w-3.5 h-3.5 text-orange-400/60" />
-              <span className="text-xs text-white/40 font-medium">FFmpeg Powered</span>
+            <div className="text-neutral-600 text-xs">then</div>
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full glass-light">
+              <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-xs font-mono-display text-neutral-300">0.6x → 4x</span>
             </div>
           </div>
         </div>
-      </header>
+      </section>
 
-      {/* Main */}
-      <main className="relative z-10 flex-1">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* ===== METRICS TICKER ===== */}
+      <MetricsTicker />
+
+      {/* ===== STUDIO (Speed Ramp App) ===== */}
+      <section id="studio" className="relative z-10 py-24 px-6 scroll-mt-24">
+        <div className="max-w-7xl mx-auto">
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/20 text-[11px] font-mono-display uppercase tracking-[0.2em] text-violet-400 mb-4">
+              <Sparkles className="w-3 h-3" /> Studio
+            </div>
+            <h2 className="font-serif-display text-4xl md:text-6xl leading-tight mb-3">
+              The <span className="italic text-shimmer">studio</span>
+            </h2>
+            <p className="text-sm text-neutral-400 max-w-md mx-auto">
+              Drop a video below. Synapse handles the rest.
+            </p>
+          </div>
           <SpeedRampApp />
         </div>
-      </main>
+      </section>
 
-      {/* Footer */}
-      <footer className="relative z-10 border-t border-white/[0.04] mt-auto">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-center gap-2 text-xs text-white/15">
-            <Server className="w-3 h-3" />
-            <span>Speed ramp uses server-side FFmpeg processing.</span>
+      {/* ===== FEATURE GRID ===== */}
+      <section id="features" className="relative z-10 py-24 px-6 scroll-mt-24">
+        <div className="max-w-7xl mx-auto">
+          <div className="text-center mb-16">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-[11px] font-mono-display uppercase tracking-[0.2em] text-cyan-400 mb-4">
+              <Layers className="w-3 h-3" /> Capabilities
+            </div>
+            <h2 className="font-serif-display text-4xl md:text-6xl leading-tight">
+              Built for <span className="italic text-shimmer">precision</span>
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <FeatureCard
+              icon={Gauge}
+              title="V-Shaped Ramp"
+              description="Continuous logarithmic setpts interpolation produces buttery speed transitions. No jitter, no frame drops."
+              accent="violet"
+              delay={0.1}
+            />
+            <FeatureCard
+              icon={Combine}
+              title="Seamless Fusion"
+              description="Forward ramp + reversed ramp are concatenated into a single clip with perfectly aligned audio."
+              accent="cyan"
+              delay={0.2}
+            />
+            <FeatureCard
+              icon={Server}
+              title="FFmpeg Native"
+              description="Runs on a hardened FFmpeg 6.0 pipeline with libx264, libvpx, and aac. Ultrafast presets keep latency under 300ms."
+              accent="emerald"
+              delay={0.3}
+            />
+            <FeatureCard
+              icon={Cpu}
+              title="Batch Engine"
+              description="Queue unlimited clips. Synapse processes them sequentially with per-clip progress and error isolation."
+              accent="violet"
+              delay={0.4}
+            />
+            <FeatureCard
+              icon={Film}
+              title="Smart Trim"
+              description="Clips under 10s use full duration automatically. Longer clips default to the first 10s — adjustable via slider."
+              accent="cyan"
+              delay={0.5}
+            />
+            <FeatureCard
+              icon={Layers}
+              title="Multi-Format"
+              description="Export MP4 (H.264) or WebM (VP9). Tune CRF, FPS, preset, scale, and codec from the config panel."
+              accent="emerald"
+              delay={0.6}
+            />
           </div>
         </div>
-      </footer>
+      </section>
 
-      <style jsx global>{`
-        @keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-fade-in { animation: fade-in 0.6s ease-out; }
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
-        input[type='range'] { -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; height: 4px; }
-        input[type='range']::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.06); }
-        input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #f97316; margin-top: -5px; box-shadow: 0 0 8px rgba(249,115,22,0.3); }
-        input[type='range']::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.06); }
-        input[type='range']::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #f97316; border: none; }
-      `}</style>
+      {/* ===== CODE INTEGRATION BLOCK ===== */}
+      <section id="api" className="relative z-10 py-24 px-6 scroll-mt-24">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[11px] font-mono-display uppercase tracking-[0.2em] text-emerald-400 mb-4">
+              <Server className="w-3 h-3" /> API
+            </div>
+            <h2 className="font-serif-display text-4xl md:text-6xl leading-tight mb-3">
+              One endpoint. <span className="italic text-shimmer">Total control.</span>
+            </h2>
+            <p className="text-sm text-neutral-400 max-w-lg mx-auto">
+              Hit <code className="px-1.5 py-0.5 rounded bg-white/5 font-mono-display text-violet-400 text-xs">/api/speedramp</code> with FormData.
+              Get back a processed video blob.
+            </p>
+          </div>
+          <CodeBlock filename="ramp.ts" code={DEMO_CODE} />
+        </div>
+      </section>
+
+      {/* ===== FOOTER ===== */}
+      <SynapseFooter />
     </div>
   );
 }
