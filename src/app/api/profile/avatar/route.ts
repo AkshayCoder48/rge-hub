@@ -10,6 +10,9 @@ import { getSession } from '@/lib/session';
 import { getProfile, upsertProfile } from '@/lib/resources';
 import { uploadFile, getFileUrl } from '@/lib/onyxbase';
 
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     const sessionResult = await getSession();
@@ -50,7 +53,13 @@ export async function POST(request: NextRequest) {
 
     profile.avatar = avatarUrl;
     profile.updatedAt = new Date().toISOString();
-    await upsertProfile(profile);
+    const saved = await upsertProfile(profile);
+    if (!saved) {
+      return NextResponse.json(
+        { ok: false, error: 'Avatar uploaded but profile save failed — please retry.', retryable: true },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ ok: true, avatarUrl });
   } catch (err) {

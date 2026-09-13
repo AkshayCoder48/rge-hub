@@ -461,11 +461,21 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
       if (avatarFile) {
         const formData = new FormData();
         formData.append('file', avatarFile);
-        const avatarRes = await fetch('/api/profile/avatar', {
-          method: 'POST',
-          body: formData,
-        });
-        const avatarData = await avatarRes.json();
+        const avatarCtrl = new AbortController();
+        const avatarTimer = setTimeout(() => avatarCtrl.abort(), 60000);
+        let avatarRes: Response;
+        try {
+          avatarRes = await fetch('/api/profile/avatar', {
+            method: 'POST',
+            body: formData,
+            signal: avatarCtrl.signal,
+          });
+        } catch {
+          clearTimeout(avatarTimer);
+          throw new Error('Avatar upload timed out — please retry.');
+        }
+        clearTimeout(avatarTimer);
+        const avatarData = await avatarRes.json().catch(() => ({}));
         if (!avatarData.ok) {
           throw new Error(avatarData.error || 'Avatar upload failed');
         }
@@ -481,12 +491,22 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
 
       // 3. PATCH if any field changed
       if (Object.keys(patchBody).length > 0) {
-        const updateRes = await fetch('/api/profile/update', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(patchBody),
-        });
-        const updateData = await updateRes.json();
+        const updateCtrl = new AbortController();
+        const updateTimer = setTimeout(() => updateCtrl.abort(), 60000);
+        let updateRes: Response;
+        try {
+          updateRes = await fetch('/api/profile/update', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patchBody),
+            signal: updateCtrl.signal,
+          });
+        } catch {
+          clearTimeout(updateTimer);
+          throw new Error('Profile save timed out — please retry.');
+        }
+        clearTimeout(updateTimer);
+        const updateData = await updateRes.json().catch(() => ({}));
         if (!updateData.ok) {
           throw new Error(updateData.error || 'Profile update failed');
         }

@@ -42,6 +42,7 @@ import {
 import { getFileUrl } from '@/lib/onyxbase';
 import type { UploadErrorCode } from '@/lib/upload-errors';
 
+export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 function fail(code: UploadErrorCode, error: string, status: number, extra?: Record<string, unknown>) {

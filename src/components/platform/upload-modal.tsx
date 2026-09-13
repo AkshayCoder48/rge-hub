@@ -422,10 +422,18 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
-      const res = await fetch('/api/resources/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // Bounded wait: the server answers in seconds when healthy; if the
+      // backend is flooded the request is aborted here so "Saving…" can never
+      // spin forever. Retry is safe (same clientId → idempotent, deduped).
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 65000);
+      let res: Response;
+      try {
+        res = await fetch('/api/resources/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
+          body: JSON.stringify({
           type,
           title: item.title.trim(),
           description,
@@ -443,7 +451,15 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
           published,
           clientId: item.clientId,
         }),
-      });
+        });
+      } catch (e) {
+        clearTimeout(timer);
+        throw {
+          code: 'UPLOAD_TIMEOUT' as UploadErrorCode,
+          error: 'Saving timed out — your file is kept, retry saving (no re-upload needed).',
+        };
+      }
+      clearTimeout(timer);
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
         return { resource: data.resource as Resource, verified: true, pendingVerification: false };
@@ -464,17 +480,21 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     async (resourceId: string): Promise<Resource> => {
       let lastErr = 'Verification failed';
       for (let attempt = 0; attempt < 5; attempt++) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 25000);
         try {
           const res = await fetch(
             `/api/resources/verify?id=${encodeURIComponent(resourceId)}&type=${encodeURIComponent(type)}`,
-            { cache: 'no-store' }
+            { cache: 'no-store', signal: ctrl.signal }
           );
           const data = await res.json().catch(() => ({}));
+          clearTimeout(timer);
           if (data.ok && data.verified && data.resource) {
             return data.resource as Resource;
           }
           lastErr = (data.error as string) || 'Not yet confirmed';
         } catch {
+          clearTimeout(timer);
           lastErr = 'Network error during verification';
         }
         await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));

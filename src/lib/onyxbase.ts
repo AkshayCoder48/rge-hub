@@ -99,7 +99,10 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
           },
           body: JSON.stringify({ key, value, collection }),
         },
-        60000
+        // BOUNDED: backend /v1/set normally answers in 3-12s. 22s × 2 attempts
+        // + 12s honor-cap worst ≈ 56s — fails fast with a retryable error
+        // instead of hanging the function into a 504 ("stuck at saving").
+        22000
       );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -450,14 +453,21 @@ export async function uploadFile(
   if (label) formData.append('label', label);
 
   let lastError: Error | null = null;
-  // Retry with backoff for Telegram rate limits
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Retry with backoff for Telegram rate limits.
+  // BOUNDED: 55s per-attempt fetch timeout + 10s throttle-wait cap + 2 attempts,
+  // so a slow/flooded backend fails fast with a retryable error instead of
+  // hanging the serverless function into a 504 ("stuck at saving").
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(`${ONYXBASE_BASE_URL}/v1/files`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-        body: formData,
-      });
+      const res = await fetchWithTimeout(
+        `${ONYXBASE_BASE_URL}/v1/files`,
+        {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+          body: formData,
+        },
+        55000
+      );
       if (res.ok) {
         const data = await res.json();
         if (data.file) {
@@ -471,7 +481,7 @@ export async function uploadFile(
       if (errText.includes('retry after') || res.status === 429 || res.status === 413) {
         // Extract retry seconds
         const match = errText.match(/retry after (\d+)/i);
-        const wait = match ? parseInt(match[1]) : 5 * (attempt + 1);
+        const wait = match ? Math.min(parseInt(match[1]), 10) : 5 * (attempt + 1);
         console.warn(`[OnyxBase] upload throttled, waiting ${wait}s (attempt ${attempt + 1})`);
         await new Promise(r => setTimeout(r, wait * 1000));
         lastError = new Error(errText);
@@ -736,17 +746,23 @@ export async function uploadFileResult(
   timings.upload_init_ms = Date.now() - tInit;
 
   let lastError = 'Unknown upload error';
-  const MAX_ATTEMPTS = 3;
+  // BOUNDED: 2 attempts × 55s fetch timeout so a slow/flooded backend fails
+  // fast with a retryable error instead of hanging into a 504 ("stuck at saving").
+  const MAX_ATTEMPTS = 2;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     timings.attempts = attempt;
     const tTransfer = Date.now();
     try {
-      const res = await fetch(`${ONYXBASE_BASE_URL}/v1/files`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-        body: formData,
-      });
+      const res = await fetchWithTimeout(
+        `${ONYXBASE_BASE_URL}/v1/files`,
+        {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+          body: formData,
+        },
+        55000
+      );
       timings.transfer_ms += Date.now() - tTransfer;
 
       if (res.ok) {
