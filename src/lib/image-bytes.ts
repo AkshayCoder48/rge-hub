@@ -123,14 +123,14 @@ export async function loadImageBytes(
 ): Promise<{ bytes: Buffer; mimeType: string; size: number } | null> {
   try {
     // Quorum reads — backend replicas diverge, single GETs are coin flips.
-    const manifest = await kvGetQuorum<BytesManifest>(manifestKey(fileKey), BYTES_COLLECTION, 5);
+    const manifest = await kvGetQuorum<BytesManifest>(manifestKey(fileKey), BYTES_COLLECTION, 3);
     if (!manifest || manifest.v !== 1 || !manifest.shards || manifest.shards > 64) {
       return null;
     }
     // Parallel quorum shard reads for speed + reliability.
     const parts = await Promise.all(
       Array.from({ length: manifest.shards }, (_, i) =>
-        kvGetQuorum<string>(shardKey(fileKey, i), BYTES_COLLECTION, 3)
+        kvGetQuorum<string>(shardKey(fileKey, i), BYTES_COLLECTION, 2)
       )
     );
     if (parts.some((p) => typeof p !== 'string' || p.length === 0)) {

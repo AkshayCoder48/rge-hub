@@ -74,33 +74,42 @@ async function fetchWithTimeout(
 }
 
 /**
- * Set a key-value pair in a collection.
+ * Set a key-value pair — DURABLE write with retries. Returns true ONLY when
+ * the backend confirms `durable: true` (verified Telegram pin). On flood
+ * (`durable: false`, 5xx, timeout) retries 3x with 4s spacing — floods
+ * clear in seconds and the retry then succeeds. Retries are idempotent
+ * (same key+value), so a landed-but-unconfirmed write is harmless.
  */
 export async function kvSet(key: string, value: any, collection: string = 'default'): Promise<boolean> {
-  try {
-    const res = await fetchWithTimeout(
-      `${ONYXBASE_BASE_URL}/v1/set`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
-          'Content-Type': 'application/json',
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 4000));
+    try {
+      const res = await fetchWithTimeout(
+        `${ONYXBASE_BASE_URL}/v1/set`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ key, value, collection }),
         },
-        body: JSON.stringify({ key, value, collection }),
-      },
-      15000
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      console.error('[OnyxBase] kvSet failed:', res.status, text.slice(0, 200));
-      return false;
+        45000
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} failed:`, res.status, text.slice(0, 120));
+        continue;
+      }
+      const data = await res.json().catch(() => null);
+      if (data?.ok === true && data?.durable === true) return true;
+      console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} not durable, retrying`);
+    } catch (err) {
+      console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} error/timeout:`, err instanceof Error ? err.message : err);
     }
-    const data = await res.json().catch(() => null);
-    return data?.ok === true;
-  } catch (err) {
-    console.error('[OnyxBase] kvSet error/timeout:', err instanceof Error ? err.message : err);
-    return false;
   }
+  console.error('[OnyxBase] kvSet exhausted retries for key:', key.slice(0, 80));
+  return false;
 }
 
 export type KVReadStatus = 'found' | 'missing' | 'error';
@@ -233,12 +242,11 @@ export async function kvGetQuorum<T = any>(
 }
 
 /**
- * SPREAD writes — PARALLEL SETs so copies land on different backend
- * instances. Proven: the backend sprays parallel requests across
- * per-instance memory (4 parallel SETs → all-200, then all-404 from a
- * fresh reader), so parallel copies maximize the number of instances
- * holding the value — exactly what quorum reads then exploit.
- * True if ANY copy landed.
+ * Durable write (name kept for existing callers). Spread-copies were a
+ * workaround for the backend's spray era; the backend now pins every
+ * write durably, so ONE durable kvSet (with its own retries) is both
+ * faster and kinder to Telegram rate limits than parallel copies
+ * racing the same pin.
  */
 export async function kvSetSpread(
   key: string,
@@ -246,10 +254,8 @@ export async function kvSetSpread(
   collection: string = 'default',
   copies = 3
 ): Promise<boolean> {
-  const results = await Promise.all(
-    Array.from({ length: copies }, () => kvSet(key, value, collection))
-  );
-  return results.some(Boolean);
+  void copies;
+  return kvSet(key, value, collection);
 }
 
 /**
@@ -788,11 +794,9 @@ export async function kvGetWithRetry<T = any>(
 }
 
 /**
- * Two-phase persistent write (PRD §9, §14):
- * Phase 1 — spread write (copies across replicas); Phase 2 — quorum
- * read-back (any replica). Sequential retries are useless against divergent
- * replicas, so verification is ONE parallel wave, not a sleep cascade.
- * Only { ok: true, verified: true } means the record is durable and readable.
+ * Two-phase persistent write: Phase 1 — durable kvSet (backend-verified
+ * pin, with retries); Phase 2 — light quorum read-back. Only
+ * { ok: true, verified: true } means the record is durable and readable.
  */
 export async function kvSetVerified(
   key: string,
@@ -800,11 +804,11 @@ export async function kvSetVerified(
   collection: string = 'default',
 ): Promise<{ ok: boolean; verified: boolean; attempts: number; ms: number }> {
   const t0 = Date.now();
-  const ok = await kvSetSpread(key, value, collection, 3);
+  const ok = await kvSet(key, value, collection);
   if (!ok) {
     return { ok: false, verified: false, attempts: 0, ms: Date.now() - t0 };
   }
-  const readBack = await kvGetQuorum(key, collection, 5);
+  const readBack = await kvGetQuorum(key, collection, 3);
   return {
     ok: true,
     verified: readBack !== null && readBack !== undefined,

@@ -81,7 +81,7 @@ export async function saveChunk(
   // Best-effort manifest hint (racy by nature — assembly never trusts it).
   // Spread-written so at least one copy is findable from any instance.
   try {
-    const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 4);
+    const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 2);
     const next: ChunkManifest =
       manifest && manifest.total === total
         ? manifest
@@ -110,7 +110,7 @@ export async function assembleChunks(
 > {
   if (!isValidUploadId(uploadId)) return { ok: false, error: 'Bad upload id' };
   // Manifest (tiny) via quorum — only `total`/names are used from it.
-  const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 6);
+  const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 3);
   if (!manifest || manifest.v !== 1 || !manifest.total) {
     return { ok: false, error: 'Upload session not found. Please re-upload.' };
   }
@@ -119,7 +119,7 @@ export async function assembleChunks(
   // backend instances — first-hit-wins keeps the common case to 1 round).
   const parts = await Promise.all(
     Array.from({ length: manifest.total }, (_, i) =>
-      kvGetQuorum<string>(chunkKey(uploadId, i), CHUNKS_COLLECTION, 4)
+      kvGetQuorum<string>(chunkKey(uploadId, i), CHUNKS_COLLECTION, 2)
     )
   );
   const missing: number[] = [];
