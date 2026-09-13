@@ -7,15 +7,15 @@
  * the consumer (analyze / speedramp / resource upload-complete) in ONE
  * request — so reassembly never depends on serverless instance affinity.
  *
- * BACKEND REALITY (proven by probe): OnyxBase sprays parallel requests
- * across per-instance memory — 4 parallel SETs return all-200 yet a fresh
- * reader GETs all-404. Mitigations in this file:
- * - The client uploads chunks SEQUENTIALLY (see chunked-client.ts), so all
- *   keys land on one warm backend instance.
- * - The manifest is spread-written (parallel copies → many instances).
- * - Assembly verifies the ACTUAL chunk keys via parallel quorum reads
- *   (sprayed reads find whichever instance holds each key) — never the
- *   racy manifest `received` counter (parallel writers clobber it).
+ * BACKEND REALITY: OnyxBase pins every write durably (Telegram manifest)
+ * and answers `durable: true` only for verified pins — kvSet retries to
+ * that guarantee. This file keeps its belt-and-suspenders shape anyway:
+ * - The client uploads chunks SEQUENTIALLY (see chunked-client.ts):
+ *   Telegram serializes same-chat pins, so sequential writes pin fast
+ *   while parallel bursts only fail-fast and retry.
+ * - Assembly verifies the ACTUAL chunk keys via light quorum reads —
+ *   never the racy manifest `received` counter (parallel writers
+ *   clobber it).
  *
  * SAFETY (PRD §43-44): chunk keys live in their own collection with the
  * `chunk:{uploadId}:{index}` shape plus a manifest. Cleanup deletes ONLY
