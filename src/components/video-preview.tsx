@@ -125,13 +125,13 @@ export function VideoPreview({ clipId }: VideoPreviewProps) {
         )}
       </div>
 
-      <div className="relative mt-3 mx-4 rounded-2xl overflow-hidden bg-black aspect-video">
+      <div className="relative mt-3 mx-4 rounded-2xl overflow-hidden bg-black/40 flex items-center justify-center" style={{ minHeight: '200px', maxHeight: '62vh' }}>
         {displayUrl ? (
-          <video ref={videoRef} src={displayUrl} className="w-full h-full object-contain" preload="metadata" playsInline
+          <video ref={videoRef} src={displayUrl} className="max-w-full object-contain bg-transparent" style={{ maxHeight: '62vh' }} preload="metadata" playsInline
             onClick={handlePlayPause} onTimeUpdate={handleTimeUpdate} onPlay={handlePlay} onPause={handlePause}
             onWaiting={handleWaiting} onCanPlay={handleCanPlay} />
         ) : (
-          <div className="w-full h-full flex items-center justify-center">
+          <div className="w-full flex items-center justify-center" style={{ minHeight: '200px' }}>
             <div className="text-center">
               <Film className="w-8 h-8 text-neutral-700 mx-auto mb-2" />
               <p className="text-xs text-neutral-700">Video preview loading...</p>

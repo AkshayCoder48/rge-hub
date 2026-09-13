@@ -5,6 +5,7 @@ import { useAppStore, formatDuration, formatFileSize, createReverseSpeedRamp, DE
 import { Film, Trash2, Clock, MonitorPlay, Plus, Loader2, Combine } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import type { VideoClip } from '@/lib/types';
+import { probeVideoLocal, uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
 export function ClipList() {
   const clips = useAppStore((s) => s.clips);
@@ -15,6 +16,64 @@ export function ClipList() {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingCount, setUploadingCount] = useState(0);
+
+  const analyzeFile = async (file: File): Promise<Record<string, unknown>> => {
+    // 1. Instant local probe (no upload) as the safety net.
+    let local: { duration: number; width: number; height: number } | null = null;
+    try {
+      local = await probeVideoLocal(file);
+    } catch {
+      local = null;
+    }
+
+    // 2. Server analysis — direct for small files, chunked for large ones
+    // (defeats the ~4.5MB Vercel request cap that caused 413s).
+    try {
+      let data: Record<string, unknown>;
+      if (file.size <= DIRECT_UPLOAD_LIMIT) {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('/api/analyze', { method: 'POST', body: formData });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ error: 'Upload failed' }));
+          throw new Error((err.error as string) || 'Upload failed');
+        }
+        data = await response.json();
+      } else {
+        const { uploadId } = await uploadInChunks(file);
+        const response = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uploadId }),
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({ error: 'Upload failed' }));
+          throw new Error((err.error as string) || 'Upload failed');
+        }
+        data = await response.json();
+      }
+      return data;
+    } catch (err) {
+      // 3. Graceful degradation: local metadata still yields a usable clip.
+      if (!local || (!local.duration && !local.width)) throw err;
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+      return {
+        id: crypto.randomUUID(),
+        fileName: file.name,
+        originalName: file.name,
+        duration: local.duration || 0,
+        width: local.width || 0,
+        height: local.height || 0,
+        fps: 30,
+        codec: 'unknown',
+        bitrate: 0,
+        format: ext,
+        fileSize: file.size,
+        hasAudio: true,
+        audioCodec: null,
+      };
+    }
+  };
 
   const handleFileUpload = async (files: FileList | File[]) => {
     const videoFiles = Array.from(files).filter((f) => {
@@ -32,23 +91,19 @@ export function ClipList() {
 
     for (const file of videoFiles) {
       try {
-        const formData = new FormData();
-        formData.append('file', file);
-        const response = await fetch('/api/analyze', { method: 'POST', body: formData });
-        if (!response.ok) throw new Error('Upload failed');
-        const data = await response.json();
-
-        const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
+        const data = await analyzeFile(file);
+        const duration = Number(data.duration) || 0;
+        const trimDuration = Math.min(duration || MAX_AUTO_TRIM_DURATION, MAX_AUTO_TRIM_DURATION);
 
         const clip: VideoClip = {
-          id: data.id, fileName: data.fileName, originalName: data.originalName,
-          duration: data.duration, width: data.width, height: data.height,
-          fps: data.fps, codec: data.codec, bitrate: data.bitrate,
-          format: data.format, fileSize: data.fileSize,
+          id: String(data.id), fileName: String(data.fileName), originalName: String(data.originalName),
+          duration, width: Number(data.width) || 0, height: Number(data.height) || 0,
+          fps: Number(data.fps) || 0, codec: String(data.codec || 'unknown'), bitrate: Number(data.bitrate) || 0,
+          format: String(data.format || ''), fileSize: Number(data.fileSize) || file.size,
           trimDuration,
           speedRamps: createReverseSpeedRamp(trimDuration),
           config: { ...DEFAULT_CONFIG, trimDuration },
-          hasAudio: data.hasAudio,
+          hasAudio: Boolean(data.hasAudio),
           originalFile: file,
           status: 'ready',
         };

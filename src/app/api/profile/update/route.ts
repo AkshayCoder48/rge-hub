@@ -13,6 +13,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import { getProfile, upsertProfile, getProfileByUsername } from '@/lib/resources';
+import {
+  isReservedUsername,
+  isReservedDisplayName,
+  reservedUsernameMessage,
+  reservedDisplayNameMessage,
+} from '@/lib/reserved';
 
 export async function PATCH(request: NextRequest) {
   try {
@@ -43,6 +49,11 @@ export async function PATCH(request: NextRequest) {
         );
       }
 
+      // Reserved identities can never be taken (anti-impersonation)
+      if (isReservedUsername(normalized)) {
+        return NextResponse.json({ ok: false, error: reservedUsernameMessage() }, { status: 400 });
+      }
+
       // Check uniqueness
       const existing = await getProfileByUsername(normalized);
       if (existing && existing.userId !== profile.userId) {
@@ -55,8 +66,13 @@ export async function PATCH(request: NextRequest) {
       profile.username = normalized;
     }
 
-    // PATCH semantics: only update provided fields
-    if (displayName !== undefined) profile.displayName = displayName.trim();
+    // Display name changes also respect the reserved list (anti-impersonation)
+    if (displayName !== undefined) {
+      if (displayName.trim() && isReservedDisplayName(displayName)) {
+        return NextResponse.json({ ok: false, error: reservedDisplayNameMessage() }, { status: 400 });
+      }
+      profile.displayName = displayName.trim();
+    }
     if (bio !== undefined) profile.bio = bio;
     if (avatar !== undefined) profile.avatar = avatar;
 

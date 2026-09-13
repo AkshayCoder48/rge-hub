@@ -1,9 +1,19 @@
+/**
+ * POST /api/analyze
+ * Probe a video file for metadata (duration, dimensions, fps, codec, audio).
+ *
+ * Accepts TWO input shapes (fixes Vercel FUNCTION_PAYLOAD_TOO_LARGE 413):
+ *  1. multipart/form-data with "file" — small videos (≤ ~4.5MB per request)
+ *  2. application/json { uploadId } — large videos previously sliced to
+ *     /api/uploads/chunk; assembled server-side in this same request.
+ */
 import { NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { spawn } from 'child_process';
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { UPLOADS_DIR, TMP_DIR, getFfmpegPath, getFfprobePath, hasFfprobe } from '@/lib/paths';
+import { assembleChunks } from '@/lib/chunks';
 
 export const maxDuration = 60;
 
@@ -105,32 +115,59 @@ export async function POST(request: Request) {
     mkdirSync(UPLOADS_DIR, { recursive: true });
     mkdirSync(TMP_DIR, { recursive: true });
 
-    const formData = await request.formData();
-    const file = formData.get('file');
+    // ---- Input: multipart "file" (small) OR JSON { uploadId } (large) ----
+    const contentType = request.headers.get('content-type') || '';
+    let fileName = '';
+    let fileType = '';
+    let buffer: Buffer;
 
-    if (!file || !(file instanceof File)) {
-      return NextResponse.json({ error: 'No video file provided.' }, { status: 400 });
+    if (contentType.includes('application/json')) {
+      const body = await request.json().catch(() => null);
+      const uploadId = body?.uploadId;
+      if (!uploadId) {
+        return NextResponse.json(
+          { error: 'No video file provided. Send multipart "file" or JSON { uploadId }.' },
+          { status: 400 }
+        );
+      }
+      const assembled = await assembleChunks(uploadId);
+      if (!assembled.ok) {
+        return NextResponse.json({ error: assembled.error }, { status: 400 });
+      }
+      buffer = assembled.bytes;
+      fileName = assembled.fileName;
+      fileType = assembled.mimeType;
+    } else {
+      const formData = await request.formData();
+      const file = formData.get('file');
+
+      if (!file || !(file instanceof File)) {
+        return NextResponse.json({ error: 'No video file provided.' }, { status: 400 });
+      }
+      fileName = file.name;
+      fileType = file.type;
+      buffer = Buffer.from(await file.arrayBuffer());
     }
 
     const validVideoExtensions = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.mpeg', '.3gp', '.m4v'];
-    const fileExt = path.extname(file.name).toLowerCase();
-    const isVideoType = file.type.startsWith('video/');
-    const isOctetStream = file.type === 'application/octet-stream';
+    const fileExt = path.extname(fileName).toLowerCase();
+    const isVideoType = fileType.startsWith('video/');
+    const isOctetStream = fileType === 'application/octet-stream';
     const hasValidExt = validVideoExtensions.includes(fileExt);
 
     if (!isVideoType && !isOctetStream && !hasValidExt) {
-      return NextResponse.json({ error: `Invalid file type: ${file.type}` }, { status: 400 });
+      return NextResponse.json({ error: `Invalid file type: ${fileType}` }, { status: 400 });
     }
 
-    // Vercel size check
+    // Real ceiling (checked AFTER assembly, so chunked uploads work).
     const isVercel = !!process.env.VERCEL;
     const maxFileSize = isVercel ? 50 * 1024 * 1024 : 500 * 1024 * 1024;
-    const fileSizeMB = Math.round(file.size / 1024 / 1024);
+    const fileSizeMB = Math.round(buffer.length / 1024 / 1024);
 
-    if (file.size > maxFileSize) {
+    if (buffer.length > maxFileSize) {
       return NextResponse.json({
         error: isVercel
-          ? `File too large (${fileSizeMB}MB). Vercel serverless limits request body size. Deploy on Render/Docker for larger files.`
+          ? `File too large (${fileSizeMB}MB). Maximum on Vercel is 50MB. For larger videos, deploy on Render or Docker.`
           : `File too large (${fileSizeMB}MB). Maximum is 500MB.`,
       }, { status: 400 });
     }
@@ -139,7 +176,6 @@ export async function POST(request: Request) {
     const ext = fileExt || '.mp4';
     const filePath = path.join(TMP_DIR, `${id}_analyze${ext}`);
 
-    const buffer = Buffer.from(await file.arrayBuffer());
     writeFileSync(filePath, buffer);
 
     try {
@@ -149,7 +185,7 @@ export async function POST(request: Request) {
       return NextResponse.json({
         id,
         fileName: `${id}${ext}`,
-        originalName: file.name,
+        originalName: fileName,
         duration: Math.round(probe.duration * 1000) / 1000,
         width: probe.width,
         height: probe.height,

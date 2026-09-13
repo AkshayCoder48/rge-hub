@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { loginByEmailPassword } from '@/lib/onyxbase';
 import { getProfile, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
+import { isReservedUsername } from '@/lib/reserved';
 
 export async function POST(request: NextRequest) {
   try {
@@ -39,7 +40,11 @@ export async function POST(request: NextRequest) {
     if (!profile) {
       // Auto-create a minimal profile for first login
       const now = new Date().toISOString();
-      const username = (loginResult.name || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '') || `user_${loginResult.userId!.slice(-6)}`;
+      let username = (loginResult.name || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '') || `user_${loginResult.userId!.slice(-6)}`;
+      // Never auto-assign a reserved (staff-lookalike) username
+      if (isReservedUsername(username)) {
+        username = `user_${loginResult.userId!.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase() || 'member'}`;
+      }
       profile = {
         userId: loginResult.userId!,
         username,
@@ -82,6 +87,7 @@ export async function POST(request: NextRequest) {
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,
+      email: profile.email,
       avatar: profile.avatar,
       bio: profile.bio,
       apiKey: profile.apiKey,

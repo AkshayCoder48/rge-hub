@@ -4,6 +4,7 @@ import React, { useState, useCallback } from 'react';
 import { useAppStore } from '@/lib/store';
 import { PlayCircle, Loader2, CheckCircle2, AlertCircle, Film, Combine, Download } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
 interface ProcessAllProgress {
   clipId: string;
@@ -54,17 +55,29 @@ export function ProcessAll() {
       setProcessingState({ isProcessing: true, progress: Math.round((i / processableClips.length) * 100), currentClipId: clip.id, message: `Processing ${i + 1}/${processableClips.length}` });
 
       try {
-        const formData = new FormData();
-        formData.append('file', clip.originalFile!);
-        formData.append('config', JSON.stringify({
+        const apiConfig = {
           ...clip.config,
           trimDuration: clip.trimDuration,
-        }));
+        };
+        // Large files go chunked (defeats the ~4.5MB Vercel request cap).
+        let response: Response;
+        if (clip.originalFile!.size <= DIRECT_UPLOAD_LIMIT) {
+          const formData = new FormData();
+          formData.append('file', clip.originalFile!);
+          formData.append('config', JSON.stringify(apiConfig));
 
-        const response = await fetch('/api/speedramp', {
-          method: 'POST',
-          body: formData,
-        });
+          response = await fetch('/api/speedramp', {
+            method: 'POST',
+            body: formData,
+          });
+        } else {
+          const { uploadId } = await uploadInChunks(clip.originalFile!);
+          response = await fetch('/api/speedramp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, config: apiConfig }),
+          });
+        }
 
         if (!response.ok) {
           let errorMsg = 'Failed to process video';

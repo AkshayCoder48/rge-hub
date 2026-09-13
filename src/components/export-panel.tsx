@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useAppStore, formatDuration, DEFAULT_CONFIG } from '@/lib/store';
 import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine, Zap, ChevronDown, ChevronUp, Code2 } from 'lucide-react';
 import type { SpeedRampConfig } from '@/lib/types';
+import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
 interface ExportPanelProps { clipId: string; }
 
@@ -75,15 +76,37 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
         codec: config.codec ?? 'libx264',
       };
 
-      const formData = new FormData();
-      formData.append('file', clip.originalFile);
-      formData.append('config', JSON.stringify(apiConfig));
+      // Large files go chunked (defeats the ~4.5MB Vercel request cap);
+      // small files keep the fast single-request path.
+      let response: Response;
+      if (clip.originalFile.size <= DIRECT_UPLOAD_LIMIT) {
+        const formData = new FormData();
+        formData.append('file', clip.originalFile);
+        formData.append('config', JSON.stringify(apiConfig));
 
-      const response = await fetch('/api/speedramp', {
-        method: 'POST',
-        body: formData,
-        signal: controller.signal,
-      });
+        response = await fetch('/api/speedramp', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
+      } else {
+        setProcessingState({ message: 'Uploading video in chunks…', progress: 0 });
+        const { uploadId } = await uploadInChunks(clip.originalFile, {
+          signal: controller.signal,
+          onProgress: (p) =>
+            setProcessingState({
+              progress: Math.round(p.pct * 0.3),
+              message: `Uploading video… ${p.pct}%`,
+            }),
+        });
+        setProcessingState({ message: `Processing ${config.mode} speed ramp...` });
+        response = await fetch('/api/speedramp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uploadId, config: apiConfig }),
+          signal: controller.signal,
+        });
+      }
 
       clearInterval(progressInterval);
       clearTimeout(timeoutId);

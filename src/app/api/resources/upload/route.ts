@@ -3,8 +3,14 @@
  * Phase 1 of the two-phase upload pipeline (PRD §9): raw file → storage.
  *
  * - Validates type + size BEFORE any network work (PRD §38, §39).
+ * - Runs the unified file pipeline: OnyxBase object store + durable
+ *   lossless KV byte store (images) + best-effort external mirror.
  * - Returns structured error codes (PRD §47) and per-stage timings (PRD §3).
  * - On storage throttling answers 429 + retryAfter instead of hanging ~60s.
+ *
+ * NOTE (Vercel): a single request body is capped at ~4.5MB by the platform.
+ * Larger files MUST use the chunked path: POST chunks to /api/uploads/chunk
+ * then POST /api/resources/upload-complete with the uploadId.
  *
  * Auth required.
  * Form fields:
@@ -14,12 +20,15 @@
  *   - kind (optional): 'image' | 'clip' | 'xml' — enables strict type validation
  *
  * Returns:
- *   { ok: true, fileId, url, fileName, mimeType, size, thumbnailFileId?, thumbnailUrl?, timings }
+ *   { ok: true, fileId, url, storageUrl, mirrorUrl?, mirrorHost?,
+ *     bytesStored?, bytesShards?, fileName, mimeType, size,
+ *     thumbnailFileId?, thumbnailUrl?, timings }
  *   { ok: false, code, error, retryAfter?, timings? }
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
-import { uploadFileResult, getFileUrl, MAX_SIMPLE_UPLOAD_BYTES } from '@/lib/onyxbase';
+import { storeResourceFile } from '@/lib/file-pipeline';
+import { MAX_SIMPLE_UPLOAD_BYTES } from '@/lib/onyxbase';
 import type { UploadErrorCode } from '@/lib/upload-errors';
 
 // Allow long uploads on Vercel (Pro: up to 300s; Hobby caps at 60s).
@@ -35,7 +44,7 @@ function extOf(name: string): string {
   return m ? m[1] : '';
 }
 
-function validateKind(
+export function validateKind(
   kind: string | null,
   fileName: string,
   mimeType: string
@@ -60,7 +69,7 @@ function validateKind(
   return { ok: true };
 }
 
-function fail(
+export function fail(
   code: UploadErrorCode,
   error: string,
   status: number,
@@ -90,10 +99,11 @@ export async function POST(request: NextRequest) {
     const mimeType =
       file instanceof File && file.type ? file.type : 'application/octet-stream';
     const labelStr = typeof label === 'string' ? label : undefined;
-    const kindStr = typeof kind === 'string' ? kind : null;
+    const kindStr =
+      kind === 'image' || kind === 'clip' || kind === 'xml' ? kind : undefined;
 
     // Validate type BEFORE uploading (PRD §38)
-    const kindCheck = validateKind(kindStr, fileName, mimeType);
+    const kindCheck = validateKind(kindStr ?? null, fileName, mimeType);
     if (!kindCheck.ok) {
       return fail('FILE_TYPE_ERROR', kindCheck.error, 400);
     }
@@ -113,29 +123,38 @@ export async function POST(request: NextRequest) {
       return fail('UPLOAD_STORAGE_ERROR', 'File is empty (0 bytes)', 400);
     }
 
-    const uploaded = await uploadFileResult(file, fileName, mimeType, labelStr);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const stored = await storeResourceFile(bytes, fileName, mimeType, {
+      kind: kindStr,
+      label: labelStr,
+    });
 
-    if (!uploaded.ok) {
-      if (uploaded.code === 'UPLOAD_THROTTLED') {
+    if (!stored.ok) {
+      if (stored.code === 'UPLOAD_THROTTLED') {
         return fail('UPLOAD_THROTTLED', 'Storage is busy (rate limited). Please retry shortly.', 429, {
-          retryAfter: uploaded.retryAfterSecs ?? 10,
-          timings: uploaded.timings,
+          retryAfter: stored.retryAfter ?? 10,
+          timings: stored.timings,
         });
       }
       return fail('UPLOAD_STORAGE_ERROR', 'Failed to upload file to storage', 500, {
-        detail: uploaded.error,
-        timings: uploaded.timings,
+        detail: stored.error,
+        timings: stored.timings,
       });
     }
 
     const response: Record<string, unknown> = {
       ok: true,
-      fileId: uploaded.file.fileId,
-      url: uploaded.file.url || getFileUrl(uploaded.file.fileId),
-      fileName: uploaded.file.fileName || fileName,
-      mimeType: uploaded.file.mimeType || mimeType,
-      size: uploaded.file.size ?? size,
-      timings: uploaded.timings,
+      fileId: stored.fileId,
+      url: stored.url,
+      storageUrl: stored.storageUrl,
+      mirrorUrl: stored.mirrorUrl,
+      mirrorHost: stored.mirrorHost,
+      bytesStored: stored.bytesStored,
+      bytesShards: stored.bytesShards,
+      fileName: stored.fileName,
+      mimeType: stored.mimeType,
+      size: stored.size,
+      timings: stored.timings,
     };
 
     // Optional thumbnail upload (best-effort; must not fail the main upload)
@@ -145,16 +164,14 @@ export async function POST(request: NextRequest) {
           thumbnail instanceof File ? thumbnail.name : `thumbnail-${Date.now()}`;
         const thumbMime =
           thumbnail instanceof File && thumbnail.type ? thumbnail.type : 'image/jpeg';
-        const thumbUploaded = await uploadFileResult(
-          thumbnail,
-          thumbName,
-          thumbMime,
-          `${labelStr || fileName}-thumb`
-        );
-        if (thumbUploaded.ok && thumbUploaded.file.fileId) {
-          response.thumbnailFileId = thumbUploaded.file.fileId;
-          response.thumbnailUrl =
-            thumbUploaded.file.url || getFileUrl(thumbUploaded.file.fileId);
+        const thumbBytes = Buffer.from(await thumbnail.arrayBuffer());
+        const thumbStored = await storeResourceFile(thumbBytes, thumbName, thumbMime, {
+          kind: 'image',
+          label: `${labelStr || fileName}-thumb`,
+        });
+        if (thumbStored.ok && thumbStored.fileId) {
+          response.thumbnailFileId = thumbStored.fileId;
+          response.thumbnailUrl = thumbStored.url;
         }
       } catch (e) {
         console.warn('[resources/upload] thumbnail upload failed (non-fatal):', e);

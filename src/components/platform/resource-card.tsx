@@ -17,7 +17,10 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
   // Red Noir: all type icons use the same red accent
   const typeColor = 'text-[#ef233c]';
 
-  const isAdminResource = resource.ownerName?.toLowerCase() === 'railguyedits' || resource.xmlSource === 'admin';
+  // Admin badge comes ONLY from the server-stamped flag — never from the
+  // owner name (anyone can type "RailGuyEdits" as a display name).
+  const isAdminResource =
+    resource.isOwnerAdmin === true || (resource.type === 'xml' && resource.xmlSource === 'admin');
 
   return (
     <div

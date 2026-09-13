@@ -49,6 +49,15 @@ export interface Resource {
   size?: number;
   status?: ResourceStatus;
   clientId?: string; // idempotency key supplied by the uploader (PRD §25)
+  // Permanence (byte store + mirrors)
+  bytesStored?: boolean; // original bytes durably stored → served via /api/img/[id]
+  bytesShards?: number;
+  storageUrl?: string; // OnyxBase direct URL (fallback)
+  mirrorUrl?: string; // best-effort external mirror (fallback)
+  mirrorHost?: string;
+  // Server-stamped ownership flag — the ONLY source for "Admin" badges.
+  // Never derive admin display from ownerName (user-controlled).
+  isOwnerAdmin?: boolean;
   tags: string[];
   category?: string;
   duration?: number; // for clips (seconds)

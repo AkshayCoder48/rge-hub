@@ -15,11 +15,16 @@
  *   resource payload, so the client can retry verification WITHOUT
  *   re-uploading the file or deleting anything (PRD §22, §23).
  *
+ * Permanence: when Phase 1 durably stored image bytes (bytesStored), the
+ * canonical downloadUrl becomes our on-domain /api/img/[id] route —
+ * original lossless bytes with immutable caching (never rots).
+ *
  * Auth required.
  * Body: {
  *   type, title, description, fileId, thumbnailFileId?, tags?, category?,
  *   duration?, published?, xmlSource?, downloadUrl?, thumbnailUrl?,
- *   clientId?, fileName?, mimeType?, size?
+ *   clientId?, fileName?, mimeType?, size?,
+ *   storageUrl?, mirrorUrl?, mirrorHost?, bytesStored?, bytesShards?
  * }
  *
  * Returns: { ok: true, resource, verified, deduped? }
@@ -41,6 +46,16 @@ export const dynamic = 'force-dynamic';
 
 function fail(code: UploadErrorCode, error: string, status: number, extra?: Record<string, unknown>) {
   return NextResponse.json({ ok: false, code, error, ...extra }, { status });
+}
+
+function absoluteUrl(request: NextRequest, path: string): string {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, '');
+  if (configured) return `${configured}${path}`;
+  const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+  const proto =
+    request.headers.get('x-forwarded-proto') || (host?.includes('localhost') ? 'http' : 'https');
+  if (host) return `${proto}://${host}${path}`;
+  return path;
 }
 
 export async function POST(request: NextRequest) {
@@ -69,6 +84,11 @@ export async function POST(request: NextRequest) {
       fileName,
       mimeType,
       size,
+      storageUrl,
+      mirrorUrl,
+      mirrorHost,
+      bytesStored,
+      bytesShards,
     } = body || {};
 
     // Validate
@@ -104,6 +124,14 @@ export async function POST(request: NextRequest) {
     }
 
     const now = new Date().toISOString();
+    const durablyStored = bytesStored === true && resourceType === 'image';
+
+    // Canonical URL: durable on-domain bytes for images; else mirror/storage.
+    const canonicalUrl = durablyStored
+      ? absoluteUrl(request, `/api/img/${id}`)
+      : typeof downloadUrl === 'string'
+        ? downloadUrl
+        : getFileUrl(fileId);
 
     // CRITICAL: ownerId comes from the authenticated session, never from client input
     const resource: Resource = {
@@ -115,7 +143,7 @@ export async function POST(request: NextRequest) {
       description: typeof description === 'string' ? description : '',
       fileId,
       thumbnailFileId: typeof thumbnailFileId === 'string' ? thumbnailFileId : undefined,
-      downloadUrl: typeof downloadUrl === 'string' ? downloadUrl : getFileUrl(fileId),
+      downloadUrl: canonicalUrl,
       thumbnailUrl:
         typeof thumbnailUrl === 'string'
           ? thumbnailUrl
@@ -127,6 +155,13 @@ export async function POST(request: NextRequest) {
       size: typeof size === 'number' && !Number.isNaN(size) ? size : undefined,
       status: 'ready',
       clientId: typeof clientId === 'string' ? clientId : undefined,
+      bytesStored: durablyStored,
+      bytesShards: typeof bytesShards === 'number' ? bytesShards : undefined,
+      storageUrl: typeof storageUrl === 'string' ? storageUrl : getFileUrl(fileId),
+      mirrorUrl: typeof mirrorUrl === 'string' ? mirrorUrl : undefined,
+      mirrorHost: typeof mirrorHost === 'string' ? mirrorHost : undefined,
+      // Server-stamped from the verified session — the ONLY admin signal for badges.
+      isOwnerAdmin: session.isAdmin === true,
       tags: Array.isArray(tags) ? tags.filter((t: unknown) => typeof t === 'string') : [],
       category: typeof category === 'string' && category.trim() ? category.trim() : undefined,
       duration: typeof duration === 'number' && !Number.isNaN(duration) ? duration : undefined,

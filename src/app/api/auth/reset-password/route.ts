@@ -106,6 +106,7 @@ export async function POST(request: NextRequest) {
       userId: updatedProfile.userId,
       username: updatedProfile.username,
       displayName: updatedProfile.displayName,
+      email: updatedProfile.email,
       avatar: updatedProfile.avatar,
       bio: updatedProfile.bio,
       apiKey: updatedProfile.apiKey,

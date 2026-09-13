@@ -13,6 +13,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getResourceAny, getProfileByUsername, type Resource } from '@/lib/resources';
 import { CopyLinkButton } from './copy-link';
+import { SafeImage } from './safe-image';
 
 export const dynamic = 'force-dynamic';
 
@@ -156,7 +157,13 @@ export default async function ResourcePage({ params }: { params: Promise<{ id: s
           <div className="bg-black/60 flex items-center justify-center p-4 sm:p-6 min-h-[240px]">
             {resource.type === 'image' && preview ? (
               // Plain <img> keeps full original resolution with zero optimization cost.
-              <img src={preview} alt={resource.title} className="max-w-full max-h-[70vh] object-contain rounded-xl" />
+              // Fallback chain: canonical → mirror → storage, swapped on error.
+              <SafeImage
+                src={preview}
+                fallbacks={[resource.mirrorUrl, resource.storageUrl]}
+                alt={resource.title}
+                className="max-w-full max-h-[70vh] object-contain rounded-xl"
+              />
             ) : resource.type === 'clip' && resource.downloadUrl ? (
               <video
                 src={resource.downloadUrl}

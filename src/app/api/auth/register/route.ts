@@ -26,6 +26,12 @@ import {
   type Profile,
 } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
+import {
+  isReservedUsername,
+  isReservedDisplayName,
+  reservedUsernameMessage,
+  reservedDisplayNameMessage,
+} from '@/lib/reserved';
 
 export async function POST(request: NextRequest) {
   try {
@@ -56,6 +62,14 @@ export async function POST(request: NextRequest) {
         { ok: false, error: 'Username must be 3-20 characters, lowercase letters, numbers, and underscores only' },
         { status: 400 }
       );
+    }
+
+    // Reserved identities can never be taken (anti-impersonation)
+    if (isReservedUsername(normalizedUsername)) {
+      return NextResponse.json({ ok: false, error: reservedUsernameMessage() }, { status: 400 });
+    }
+    if (isReservedDisplayName(displayName)) {
+      return NextResponse.json({ ok: false, error: reservedDisplayNameMessage() }, { status: 400 });
     }
 
     // CHECK 1: Is email already registered in our platform profiles?
@@ -136,6 +150,7 @@ export async function POST(request: NextRequest) {
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,
+      email: profile.email,
       avatar: profile.avatar,
       bio: profile.bio,
       apiKey: profile.apiKey,

@@ -10,9 +10,10 @@ import { ResourcesView } from '@/components/platform/views/resources-view';
 import { CommunityView } from '@/components/platform/views/community-view';
 import { ProfileView } from '@/components/platform/views/profile-view';
 import { SpeedRampStudio } from '@/components/platform/views/speed-ramp-studio';
+import { AdminView } from '@/components/platform/views/admin-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 
-export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio';
+export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin';
 
 export function PlatformApp() {
   const { user, status, loading } = useAuth();
@@ -32,9 +33,14 @@ export function PlatformApp() {
     }
   }, [user, fetchAll, fetchMine]);
 
-  const navigate = useCallback((v: ViewKey) => {
-    setView(v);
-  }, []);
+  const navigate = useCallback(
+    (v: ViewKey) => {
+      // Admin view is only reachable with a verified admin session.
+      if (v === 'admin' && !user?.isAdmin) return;
+      setView(v);
+    },
+    [user?.isAdmin]
+  );
 
   const openUpload = useCallback((type: 'image' | 'clip' | 'xml') => {
     setUploadType(type);
@@ -115,6 +121,7 @@ export function PlatformApp() {
           {view === 'community' && <CommunityView key={`community-${uploadVersion}`} />}
           {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} />}
           {view === 'studio' && <SpeedRampStudio />}
+          {view === 'admin' && user.isAdmin && <AdminView key={`admin-${uploadVersion}`} />}
         </main>
       </div>
 

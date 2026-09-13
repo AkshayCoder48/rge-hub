@@ -1,16 +1,18 @@
 /**
  * Server-side session management for the RailGuyEdits platform.
  *
- * CRITICAL FIX: Sessions are stored as stateless HMAC-signed cookies.
- * This prevents the auto-logout bug where OnyxBase KV was inconsistently
- * returning NULL for session records between requests.
- *
+ * Sessions are stored as stateless HMAC-signed cookies.
  * The session data is encoded as base64 JSON, signed with HMAC-SHA256
  * using a server secret. The cookie is httpOnly and secure.
  *
- * For revocation (logout), we maintain a lightweight in-memory set of
- * revoked session IDs. In production this would use a KV store, but
- * for now in-memory is sufficient since logout is rare.
+ * SECURITY (admin impersonation fix):
+ * - Admin rights come ONLY from the admin EMAIL (ADMIN_EMAIL env) or an
+ *   explicit ADMIN_USER_IDS allowlist. Username / display name NEVER grant
+ *   admin — anyone can type "RailGuyEdits" as a display name.
+ * - isAdmin is RECOMPUTED from the session email on every getSession() call,
+ *   so stale/tampered cookies can never retain admin rights.
+ * - For revocation (logout), we maintain a lightweight in-memory set of
+ *   revoked session IDs.
  */
 
 import { cookies } from 'next/headers';
@@ -30,6 +32,7 @@ export interface SessionData {
   userId: string;
   username: string;
   displayName: string;
+  email?: string;
   avatar?: string;
   bio?: string;
   apiKey: string;
@@ -95,6 +98,7 @@ export async function createSession(user: {
   userId: string;
   username: string;
   displayName: string;
+  email?: string;
   avatar?: string;
   bio?: string;
   apiKey: string;
@@ -109,6 +113,7 @@ export async function createSession(user: {
     userId: user.userId,
     username: user.username,
     displayName: user.displayName,
+    email: user.email,
     avatar: user.avatar,
     bio: user.bio,
     apiKey: user.apiKey,
@@ -137,6 +142,10 @@ export async function createSession(user: {
  *
  * This is stateless — no OnyxBase read required.
  * The session data is decoded and verified from the cookie itself.
+ *
+ * SECURITY: isAdmin is recomputed from the session email on EVERY call.
+ * Sessions minted before this fix (no email stored) resolve to non-admin —
+ * the admin simply logs in again to get a fresh session.
  */
 export async function getSession(): Promise<SessionResult> {
   try {
@@ -156,6 +165,9 @@ export async function getSession(): Promise<SessionResult> {
     if (new Date(session.expiresAt).getTime() < Date.now()) {
       return { status: 'expired' };
     }
+
+    // Recompute admin from verified email — never trust the stored flag.
+    session.isAdmin = isAdminUser({ email: session.email, userId: session.userId });
 
     return { status: 'ok', session };
   } catch (err) {
@@ -186,15 +198,22 @@ export async function destroySession(): Promise<void> {
 }
 
 /**
- * Check if a user is the admin (RailGuyEdits).
+ * Check if a user is the admin.
+ *
+ * SECURITY: ONLY the admin email (or an explicitly allowlisted userId)
+ * grants admin. Username and displayName are user-controlled vanity
+ * strings and MUST never confer privileges.
  */
-export function isAdminUser(user: { username?: string; displayName?: string; email?: string }): boolean {
-  const adminEmail = process.env.ADMIN_EMAIL || 'railguyedits@gmail.com';
-  const adminUsername = 'railguyedits';
-  const adminDisplay = 'RailGuyEdits';
+export function isAdminUser(user: { email?: string; userId?: string; username?: string; displayName?: string }): boolean {
+  // Explicit userId allowlist (comma-separated) — strongest signal.
+  const allowlist = (process.env.ADMIN_USER_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (user.userId && allowlist.includes(user.userId)) return true;
 
-  if (user.email && user.email.toLowerCase() === adminEmail.toLowerCase()) return true;
-  if (user.username && user.username.toLowerCase() === adminUsername.toLowerCase()) return true;
-  if (user.displayName && user.displayName.toLowerCase() === adminDisplay.toLowerCase()) return true;
+  const adminEmail = (process.env.ADMIN_EMAIL || 'railguyedits@gmail.com').toLowerCase().trim();
+  if (user.email && user.email.toLowerCase().trim() === adminEmail) return true;
+
   return false;
 }

@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import { mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import { readFile, stat } from 'fs/promises';
 import { UPLOADS_DIR, PROCESSED_DIR, TMP_DIR, getFfmpegPath, getFfprobePath, hasFfprobe } from '@/lib/paths';
+import { assembleChunks } from '@/lib/chunks';
 
 // ============================================
 // SPEED RAMP API - Full Parameter Configuration
@@ -599,13 +600,50 @@ export async function POST(request: Request) {
     const ffmpegPath = getFfmpegPath();
     console.log(`[SpeedRamp] Using ffmpeg at: ${ffmpegPath}`);
 
-    const formData = await request.formData();
-    const file = formData.get('file');
-    const configRaw = formData.get('config') as string | null;
-    const trimDurationStr = formData.get('trimDuration') as string | null;
+    // ---- Input: multipart "file" (small) OR JSON { uploadId } (large) ----
+    // Vercel caps a single request body at ~4.5MB, so large videos are sent
+    // chunked: the client POSTs slices to /api/uploads/chunk, then calls
+    // here with JSON { uploadId, config }. The bytes are assembled
+    // server-side in this same request — no instance-affinity dependency.
+    const contentType = request.headers.get('content-type') || '';
+    let fileName = '';
+    let fileType = '';
+    let buffer: Buffer;
+    let configRaw: string | null = null;
+    let trimDurationStr: string | null = null;
 
-    if (!file || !(file instanceof File)) {
-      return NextResponse.json({ error: 'No video file provided.' }, { status: 400 });
+    if (contentType.includes('application/json')) {
+      const body = await request.json().catch(() => null);
+      const uploadId = body?.uploadId;
+      if (!uploadId) {
+        return NextResponse.json(
+          { error: 'No video file provided. Send multipart "file" or JSON { uploadId }.' },
+          { status: 400 }
+        );
+      }
+      const assembled = await assembleChunks(uploadId);
+      if (!assembled.ok) {
+        return NextResponse.json({ error: assembled.error }, { status: 400 });
+      }
+      buffer = assembled.bytes;
+      fileName = assembled.fileName;
+      fileType = assembled.mimeType;
+      if (body?.config !== undefined) {
+        configRaw = typeof body.config === 'string' ? body.config : JSON.stringify(body.config);
+      }
+      if (body?.trimDuration !== undefined) trimDurationStr = String(body.trimDuration);
+    } else {
+      const formData = await request.formData();
+      const file = formData.get('file');
+      configRaw = formData.get('config') as string | null;
+      trimDurationStr = formData.get('trimDuration') as string | null;
+
+      if (!file || !(file instanceof File)) {
+        return NextResponse.json({ error: 'No video file provided.' }, { status: 400 });
+      }
+      fileName = file.name;
+      fileType = file.type;
+      buffer = Buffer.from(await file.arrayBuffer());
     }
 
     const config = parseConfig(configRaw);
@@ -616,25 +654,26 @@ export async function POST(request: Request) {
 
     // Validate file type
     const validVideoExtensions = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.mpeg', '.3gp', '.m4v'];
-    const fileExt = path.extname(file.name).toLowerCase();
-    const isVideoType = file.type.startsWith('video/');
-    const isOctetStream = file.type === 'application/octet-stream';
+    const fileExt = path.extname(fileName).toLowerCase();
+    const isVideoType = fileType.startsWith('video/');
+    const isOctetStream = fileType === 'application/octet-stream';
     const hasValidExt = validVideoExtensions.includes(fileExt);
 
     if (!isVideoType && !isOctetStream && !hasValidExt) {
-      return NextResponse.json({ error: `Invalid file type: ${file.type}` }, { status: 400 });
+      return NextResponse.json({ error: `Invalid file type: ${fileType}` }, { status: 400 });
     }
 
-    // File size limit with Vercel-specific messaging
-    // Vercel Hobby: 4.5MB limit, Pro: 50MB
+    // File size limit (applies AFTER assembly, so chunked uploads work).
+    // Vercel request bodies cap at ~4.5MB per request — the chunked path
+    // bypasses that; this is the real processing ceiling instead.
     const isVercel = !!process.env.VERCEL;
     const maxFileSize = isVercel ? 50 * 1024 * 1024 : 500 * 1024 * 1024; // 50MB on Vercel, 500MB elsewhere
-    const fileSizeMB = Math.round(file.size / 1024 / 1024);
+    const fileSizeMB = Math.round(buffer.length / 1024 / 1024);
 
-    if (file.size > maxFileSize) {
+    if (buffer.length > maxFileSize) {
       if (isVercel) {
         return NextResponse.json({
-          error: `File too large (${fileSizeMB}MB). Vercel serverless has a request body size limit. Maximum on Pro plan is 50MB. For larger videos, deploy on Render or Docker.`,
+          error: `File too large (${fileSizeMB}MB). Maximum on Vercel is 50MB. For larger videos, deploy on Render or Docker.`,
           hint: 'Deploy on Render (free tier) or Docker for unlimited video processing.',
         }, { status: 400 });
       }
@@ -646,7 +685,6 @@ export async function POST(request: Request) {
     const inputPath = path.join(TMP_DIR, `${jobId}_input${ext}`);
 
     // Save uploaded file
-    const buffer = Buffer.from(await file.arrayBuffer());
     writeFileSync(inputPath, buffer);
 
     // Probe video
@@ -663,7 +701,7 @@ export async function POST(request: Request) {
     const outputBuffer = await readFile(outputFile);
     const fileStats = await stat(outputFile);
     const processingTime = Date.now() - startTime;
-    const originalName = file.name.replace(/\.[^/.]+$/, '');
+    const originalName = fileName.replace(/\.[^/.]+$/, '');
 
     console.log(`[SpeedRamp] Complete in ${processingTime}ms, output: ${fileStats.size} bytes`);
 

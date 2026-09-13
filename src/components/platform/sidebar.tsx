@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   ChevronRight,
+  Shield,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -36,7 +37,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
   const { logout } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Admin section completely removed from sidebar
+  // Admin entry is visible ONLY to verified admins (email-based check, server-side).
   const navItems: { key: ViewKey; label: string; icon: typeof Home; section?: string }[] = [
     { key: 'home', label: 'Home', icon: Home },
     { key: 'studio', label: 'Speed Ramp Studio', icon: Zap },
@@ -45,6 +46,9 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'xmls', label: 'XMLs', icon: FileCode },
     { key: 'community', label: 'Community', icon: Users, section: 'Discover' },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
+    ...(user.isAdmin
+      ? [{ key: 'admin' as ViewKey, label: 'Admin', icon: Shield, section: 'Staff' }]
+      : []),
   ];
 
   const handleNav = (v: ViewKey) => {

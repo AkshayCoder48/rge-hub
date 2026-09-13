@@ -21,6 +21,7 @@ import {
   type UploadErrorCode,
   uploadErrorMessage,
 } from '@/lib/upload-errors';
+import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
 /**
  * Upload pipeline UI — explicit state machine (PRD §8, §20, §21, §36, §37, §48).
@@ -240,9 +241,93 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
   );
 
   // ---------- Phase 1: file transfer with real progress ----------
+  //
+  // Small files use a single XHR (real upload progress). Large files are
+  // sliced into chunks (defeats the ~4.5MB Vercel request cap) and the
+  // server assembles + stores them via /api/resources/upload-complete.
+
+  interface TransferResult {
+    fileId: string;
+    fileUrl: string;
+    fileName: string;
+    mimeType: string;
+    size: number;
+    storageUrl?: string;
+    mirrorUrl?: string;
+    mirrorHost?: string;
+    bytesStored?: boolean;
+    bytesShards?: number;
+    timings?: Record<string, number>;
+  }
+
+  const uploadTransferChunked = useCallback(
+    async (item: QueueItem): Promise<TransferResult> => {
+      updateItem(item.uid, {
+        progress: { loaded: 0, total: item.file.size, pct: 0, speedBps: null, etaSecs: null },
+      });
+      const t0 = Date.now();
+      const { uploadId } = await uploadInChunks(item.file, {
+        onProgress: (p) => {
+          const elapsed = Math.max((Date.now() - t0) / 1000, 0.001);
+          const speed = p.sentBytes / elapsed;
+          updateItem(item.uid, {
+            progress: {
+              loaded: p.sentBytes,
+              total: p.totalBytes,
+              pct: Math.min(95, p.pct),
+              speedBps: speed,
+              etaSecs: speed > 0 ? (p.totalBytes - p.sentBytes) / speed : null,
+            },
+          });
+        },
+      });
+      updateItem(item.uid, {
+        progress: { loaded: item.file.size, total: item.file.size, pct: 97, speedBps: null, etaSecs: null },
+      });
+      const res = await fetch('/api/resources/upload-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uploadId,
+          fileName: item.file.name,
+          mimeType: item.file.type || 'application/octet-stream',
+          label: `${type}_${item.clientId}`,
+          kind: type,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw {
+          code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR',
+          error: (data.error as string) || `Upload failed (HTTP ${res.status})`,
+        };
+      }
+      updateItem(item.uid, {
+        progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
+      });
+      return {
+        fileId: data.fileId as string,
+        fileUrl: data.url as string,
+        fileName: (data.fileName as string) || item.file.name,
+        mimeType: (data.mimeType as string) || item.file.type,
+        size: (data.size as number) ?? item.file.size,
+        storageUrl: data.storageUrl as string | undefined,
+        mirrorUrl: data.mirrorUrl as string | undefined,
+        mirrorHost: data.mirrorHost as string | undefined,
+        bytesStored: data.bytesStored as boolean | undefined,
+        bytesShards: data.bytesShards as number | undefined,
+        timings: data.timings as Record<string, number> | undefined,
+      };
+    },
+    [type, updateItem]
+  );
 
   const uploadTransfer = useCallback(
-    (item: QueueItem): Promise<{ fileId: string; fileUrl: string; fileName: string; mimeType: string; size: number; timings?: Record<string, number> }> => {
+    (item: QueueItem): Promise<TransferResult> => {
+      // Chunked path for files over the single-request ceiling.
+      if (item.file.size > DIRECT_UPLOAD_LIMIT) {
+        return uploadTransferChunked(item);
+      }
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhrRefs.current.set(item.uid, xhr);
@@ -285,6 +370,11 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
               fileName: (data.fileName as string) || item.file.name,
               mimeType: (data.mimeType as string) || item.file.type,
               size: (data.size as number) ?? item.file.size,
+              storageUrl: data.storageUrl as string | undefined,
+              mirrorUrl: data.mirrorUrl as string | undefined,
+              mirrorHost: data.mirrorHost as string | undefined,
+              bytesStored: data.bytesStored as boolean | undefined,
+              bytesShards: data.bytesShards as number | undefined,
               timings: data.timings as Record<string, number> | undefined,
             });
           } else {
@@ -326,7 +416,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
   const registerResource = useCallback(
     async (
       item: QueueItem,
-      transfer: { fileId: string; fileUrl: string; fileName: string; mimeType: string; size: number }
+      transfer: TransferResult
     ): Promise<{ resource: Resource; verified: boolean; pendingVerification: boolean }> => {
       const tagsArray = tags
         .split(',')
@@ -344,6 +434,11 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
           fileName: transfer.fileName,
           mimeType: transfer.mimeType,
           size: transfer.size,
+          storageUrl: transfer.storageUrl,
+          mirrorUrl: transfer.mirrorUrl,
+          mirrorHost: transfer.mirrorHost,
+          bytesStored: transfer.bytesStored,
+          bytesShards: transfer.bytesShards,
           tags: tagsArray,
           published,
           clientId: item.clientId,

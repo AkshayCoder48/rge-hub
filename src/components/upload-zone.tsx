@@ -5,6 +5,7 @@ import { Upload, Film, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useAppStore, createReverseSpeedRamp, DEFAULT_CONFIG, MAX_AUTO_TRIM_DURATION, RAMP_START, RAMP_MID, RAMP_END } from '@/lib/store';
 import type { VideoClip } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
+import { probeVideoLocal, uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
 const ACCEPTED_EXTENSIONS = '.mp4,.mov,.avi,.webm,.mkv';
 
@@ -21,6 +22,84 @@ export function UploadZone() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addClip = useAppStore((s) => s.addClip);
   const { toast } = useToast();
+
+  const setUpload = useCallback((fileName: string, patch: Partial<UploadProgress>) => {
+    setUploads((prev) => prev.map((u) => (u.fileName === fileName ? { ...u, ...patch } : u)));
+  }, []);
+
+  /**
+   * Analyze one file:
+   *  1. Instant local probe in the browser (duration/dimensions, zero upload).
+   *  2. Server analysis for full metadata (codec/fps/audio) — direct for
+   *     small files, chunked for large ones (defeats the ~4.5MB Vercel cap).
+   *  3. If the server is unreachable, the local probe still yields a
+   *     fully usable clip — ingest never hard-fails with "Upload failed".
+   */
+  const analyzeFile = useCallback(
+    async (file: File) => {
+      let local: { duration: number; width: number; height: number } | null = null;
+      try {
+        local = await probeVideoLocal(file);
+      } catch {
+        local = null;
+      }
+
+      try {
+        let data: Record<string, unknown>;
+        if (file.size <= DIRECT_UPLOAD_LIMIT) {
+          setUpload(file.name, { status: 'analyzing', progress: 60 });
+          const formData = new FormData();
+          formData.append('file', file);
+          const response = await fetch('/api/analyze', { method: 'POST', body: formData });
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+            throw new Error((errorData.error as string) || 'Upload failed');
+          }
+          data = await response.json();
+        } else {
+          setUpload(file.name, { status: 'uploading', progress: 0 });
+          const { uploadId } = await uploadInChunks(file, {
+            onProgress: (p) => setUpload(file.name, { status: 'uploading', progress: p.pct }),
+          });
+          setUpload(file.name, { status: 'analyzing', progress: 95 });
+          const response = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId }),
+          });
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+            throw new Error((errorData.error as string) || 'Upload failed');
+          }
+          data = await response.json();
+        }
+        return { data, localFallback: false };
+      } catch (err) {
+        if (!local || (!local.duration && !local.width)) throw err;
+        // Graceful degradation: local metadata is enough to work with.
+        const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+        return {
+          data: {
+            id: crypto.randomUUID(),
+            fileName: file.name,
+            originalName: file.name,
+            duration: local.duration || 0,
+            width: local.width || 0,
+            height: local.height || 0,
+            fps: 30,
+            codec: 'unknown',
+            bitrate: 0,
+            format: ext,
+            fileSize: file.size,
+            hasAudio: true,
+            audioCodec: null,
+          } as Record<string, unknown>,
+          localFallback: true,
+        };
+      }
+    },
+    [setUpload]
+  );
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -39,67 +118,42 @@ export function UploadZone() {
         setUploads((prev) => [...prev, { fileName: file.name, progress: 0, status: 'uploading' }]);
 
         try {
-          const progressInterval = setInterval(() => {
-            setUploads((prev) => prev.map((u) =>
-              u.fileName === file.name && u.status === 'uploading'
-                ? { ...u, progress: Math.min(u.progress + Math.random() * 15, 90) }
-                : u
-            ));
-          }, 300);
-
-          const formData = new FormData();
-          formData.append('file', file);
-
-          setUploads((prev) => prev.map((u) =>
-            u.fileName === file.name ? { ...u, status: 'analyzing', progress: 60 } : u
-          ));
-
-          const response = await fetch('/api/analyze', { method: 'POST', body: formData });
-          clearInterval(progressInterval);
-
-          if (!response.ok) {
-            const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
-            throw new Error(errorData.error || 'Upload failed');
-          }
-
-          const data = await response.json();
-          const trimDuration = Math.min(data.duration, MAX_AUTO_TRIM_DURATION);
+          const { data, localFallback } = await analyzeFile(file);
+          const duration = Number(data.duration) || 0;
+          const trimDuration = Math.min(duration || MAX_AUTO_TRIM_DURATION, MAX_AUTO_TRIM_DURATION);
 
           const clip: VideoClip = {
-            id: data.id,
-            fileName: data.fileName,
-            originalName: data.originalName,
-            duration: data.duration,
-            width: data.width,
-            height: data.height,
-            fps: data.fps,
-            codec: data.codec,
-            bitrate: data.bitrate,
-            format: data.format,
-            fileSize: data.fileSize,
+            id: String(data.id),
+            fileName: String(data.fileName),
+            originalName: String(data.originalName),
+            duration,
+            width: Number(data.width) || 0,
+            height: Number(data.height) || 0,
+            fps: Number(data.fps) || 0,
+            codec: String(data.codec || 'unknown'),
+            bitrate: Number(data.bitrate) || 0,
+            format: String(data.format || ''),
+            fileSize: Number(data.fileSize) || file.size,
             trimDuration,
             speedRamps: createReverseSpeedRamp(trimDuration),
             config: { ...DEFAULT_CONFIG, trimDuration },
-            hasAudio: data.hasAudio,
+            hasAudio: Boolean(data.hasAudio),
             originalFile: file,
             status: 'ready',
           };
 
           addClip(clip);
-
-          setUploads((prev) => prev.map((u) =>
-            u.fileName === file.name ? { ...u, progress: 100, status: 'done' } : u
-          ));
+          setUpload(file.name, { progress: 100, status: 'done' });
 
           toast({
             title: 'Video uploaded — Reverse Speed Ramp created',
-            description: `${file.name}: First ${trimDuration.toFixed(2)}s → ${RAMP_START}x→${RAMP_MID}x→${RAMP_END}x`,
+            description: localFallback
+              ? `${file.name}: metadata read locally (server analysis unavailable)`
+              : `${file.name}: First ${trimDuration.toFixed(2)}s → ${RAMP_START}x→${RAMP_MID}x→${RAMP_END}x`,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to upload video';
-          setUploads((prev) => prev.map((u) =>
-            u.fileName === file.name ? { ...u, status: 'error', error: message, progress: 0 } : u
-          ));
+          setUpload(file.name, { status: 'error', error: message, progress: 0 });
           toast({ title: 'Upload failed', description: message, variant: 'destructive' });
         }
       }
@@ -108,7 +162,7 @@ export function UploadZone() {
         setUploads((prev) => prev.filter((u) => u.status === 'uploading' || u.status === 'analyzing'));
       }, 3000);
     },
-    [addClip, toast]
+    [addClip, analyzeFile, toast]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
@@ -155,7 +209,7 @@ export function UploadZone() {
             <h3 className={`font-serif-display text-2xl transition-colors duration-300 ${isDragging ? 'text-violet-300' : 'text-white'}`}>
               {isDragging ? 'Release to upload' : 'Drop your video here'}
             </h3>
-            <p className="text-sm text-neutral-500">or click to browse · auto-creates reverse speed ramp</p>
+            <p className="text-sm text-neutral-500">or click to browse · auto-creates reverse speed ramp · large files supported</p>
           </div>
           <div className="flex items-center gap-2 mt-1">
             <Film className="w-3.5 h-3.5 text-neutral-600" />

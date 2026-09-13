@@ -67,7 +67,10 @@ export function ResourceDetailModal({
   const displayName = ownerProfile?.displayName || resource.ownerName;
   const avatar = ownerProfile?.avatar;
   const username = ownerProfile?.username || resource.ownerName;
-  const isAdminResource = resource.ownerName?.toLowerCase() === 'railguyedits' || resource.xmlSource === 'admin';
+  // Admin badge comes ONLY from the server-stamped flag — never from the
+  // owner name (anyone can type "RailGuyEdits" as a display name).
+  const isAdminResource =
+    resource.isOwnerAdmin === true || (resource.type === 'xml' && resource.xmlSource === 'admin');
 
   // Every resource has its own canonical URL on our domain: /r/<id>
   const pageUrl = typeof window !== 'undefined' ? `${window.location.origin}/r/${resource.id}` : `/r/${resource.id}`;

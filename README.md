@@ -313,6 +313,43 @@ DATABASE_URL=file:./dev.db
 
 ---
 
+## RGE Hub Platform — Admin Access
+
+The community platform (images / clips / XMLs / profiles) has one admin role.
+Admin rights come **only from the admin email address** — usernames and display
+names never grant admin, and staff-like names (`railguyedits`, `admin`, …) are
+reserved and cannot be registered by anyone.
+
+### How to open the Admin panel (phone or desktop)
+
+1. Open the site: `https://rge-hub.vercel.app` (in any mobile browser on your phone).
+2. Log in with the **admin email** (`railguyedits@gmail.com`) + its password.
+   - This is the normal login screen — no separate admin URL.
+3. After login, an **Admin** entry appears in the sidebar under a **Staff** section.
+   - On phone: tap the red floating button (bottom-right) to open the sidebar, then tap **Admin**.
+4. The Admin panel shows platform stats, admin XMLs, and recent resources.
+
+> After updating the app, log out and log back in once on your phone so your
+> session picks up the latest security rules.
+
+### Changing the admin email
+
+1. Vercel Dashboard → project `rge-hub` → Settings → Environment Variables.
+2. Set `ADMIN_EMAIL` to the new admin email (Production + Preview).
+3. Redeploy (Deployments → ⋯ → Redeploy) so serverless functions pick it up.
+4. Log in with that email — Admin appears automatically.
+
+Optional: `ADMIN_USER_IDS` (comma-separated userIds) allowlists extra admins
+without changing the email.
+
+### Admin-only capabilities
+
+- View platform stats (`/api/admin/stats`) and the Admin dashboard.
+- Create/manage `admin` XMLs (completely hidden from non-admins).
+- Delete any resource; feature resources.
+
+---
+
 ## License
 
 MIT
