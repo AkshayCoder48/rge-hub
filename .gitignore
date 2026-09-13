@@ -67,3 +67,5 @@ server.log
 # Screenshots
 *.png
 !public/**/*.png
+.env
+
