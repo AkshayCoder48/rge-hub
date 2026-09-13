@@ -9,8 +9,10 @@
  * - 10-minute expiry (enforced server-side on every validation)
  * - Max 5 verification attempts
  * - Rate limited: 1 per 60s per email+purpose
- * - One-time use: consumed=true after success
+ * - One-time use: the record is DELETED on success (replay → "not found")
  * - New OTP invalidates previous OTP for same email+purpose
+ * - Expired/consumed rows are DELETED (access path + piggyback sweeps),
+ *   so the DB never holds dead OTPs — what you see in the DB is live.
  *
  * OTP record shape (stored in OnyxBase KV):
  * {
@@ -20,14 +22,14 @@
  *   purpose: "registration",          // "registration" | "password_reset"
  *   expiresAt: "ISO string",          // 10 min from creation
  *   attempts: 0,                      // incremented on wrong code
- *   consumed: false,                  // set true on success
+ *   consumed: false,                  // legacy flag (success now deletes)
  *   createdAt: "ISO string"
  * }
  *
  * Key format: `otp:{email}:{purpose}` (e.g., `otp:user@example.com:registration`)
  */
 
-import { kvSet, kvGet, kvDelete, kvExport, sendEmail } from './onyxbase';
+import { kvSet, kvDeleteSpread, kvExport, kvGetQuorum, sendEmail } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
@@ -73,6 +75,15 @@ async function hashOtp(code: string, salt: string): Promise<string> {
   return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** Delete one OTP row (spread — best effort across backend replicas). */
+async function deleteOtpRow(key: string): Promise<void> {
+  try {
+    await kvDeleteSpread(key, ONYXBASE_COLLECTIONS.OTPS, 3);
+  } catch {
+    // non-fatal — piggyback sweeps retry later
+  }
+}
+
 /**
  * Send an OTP to an email address for a specific purpose.
  * Stores the OTP record in OnyxBase KV with 10-min expiry.
@@ -84,16 +95,25 @@ export async function sendOtp(
   email: string,
   purpose: OtpPurpose = 'registration'
 ): Promise<{ ok: boolean; error?: string }> {
+  // Piggyback sweep so dead OTPs never pile up in the DB (non-blocking).
+  void cleanupExpiredOtps();
+
   const normalizedEmail = email.toLowerCase().trim();
   const key = otpKey(normalizedEmail, purpose);
 
-  // Check rate limit
-  const existing = await kvGet<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS);
+  // Check rate limit (quorum read — single reads can flap to null).
+  const existing = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 5);
   if (existing) {
-    const elapsed = Date.now() - new Date(existing.createdAt).getTime();
-    if (elapsed < OTP_RATE_LIMIT_MS) {
-      const waitSec = Math.ceil((OTP_RATE_LIMIT_MS - elapsed) / 1000);
-      return { ok: false, error: `Please wait ${waitSec}s before requesting another code.` };
+    const createdMs = new Date(existing.createdAt).getTime();
+    // Stale/expired row? Delete it now so it can't rate-limit or linger.
+    if (new Date(existing.expiresAt).getTime() < Date.now()) {
+      await deleteOtpRow(key);
+    } else {
+      const elapsed = Date.now() - createdMs;
+      if (elapsed < OTP_RATE_LIMIT_MS) {
+        const waitSec = Math.ceil((OTP_RATE_LIMIT_MS - elapsed) / 1000);
+        return { ok: false, error: `Please wait ${waitSec}s before requesting another code.` };
+      }
     }
   }
 
@@ -115,8 +135,17 @@ export async function sendOtp(
     createdAt: now.toISOString(),
   };
 
-  // Store in OnyxBase (this invalidates any previous OTP for this email+purpose)
-  await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
+  // Store in OnyxBase (this invalidates any previous OTP for this email+purpose).
+  // Write + quorum-confirm (2 tries) — never email a code we can't verify.
+  let stored = false;
+  for (let i = 0; i < 2 && !stored; i++) {
+    await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
+    const back = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 5);
+    if (back && back.otpHash === record.otpHash) stored = true;
+  }
+  if (!stored) {
+    return { ok: false, error: 'Failed to store verification code. Please retry.' };
+  }
 
   // Build email content based on purpose
   const subject = purpose === 'password_reset'
@@ -124,24 +153,8 @@ export async function sendOtp(
     : 'RailGuyEdits — Verification Code';
 
   const bodyText = purpose === 'password_reset'
-    ? `Hello,
-
-You requested a password reset for your RailGuyEdits account.
-
-Your password reset code is: ${code}
-
-This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.
-
-— RailGuyEdits Platform`
-    : `Hello,
-
-Your verification code for RailGuyEdits is: ${code}
-
-This code expires in 10 minutes.
-
-If you didn't request this code, you can safely ignore this email.
-
-— RailGuyEdits Platform`;
+    ? `Hello,\n\nYou requested a password reset for your RailGuyEdits account.\n\nYour password reset code is: ${code}\n\nThis code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n— RailGuyEdits Platform`
+    : `Hello,\n\nYour verification code for RailGuyEdits is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you didn't request this code, you can safely ignore this email.\n\n— RailGuyEdits Platform`;
 
   const htmlBody = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
@@ -168,7 +181,8 @@ If you didn't request this code, you can safely ignore this email.
 /**
  * Verify an OTP code.
  * Checks: existence, expiry, attempts, consumed state, and hash match.
- * On success: marks OTP as consumed (one-time use).
+ * On success: DELETES the OTP (one-time use — replay is impossible).
+ * On expiry/attempts-exhausted: DELETES the OTP (dies on time).
  *
  * Returns { ok, error? }
  */
@@ -177,29 +191,32 @@ export async function verifyOtp(
   code: string,
   purpose: OtpPurpose = 'registration'
 ): Promise<{ ok: boolean; error?: string }> {
+  // Piggyback sweep so dead OTPs never pile up in the DB (non-blocking).
+  void cleanupExpiredOtps();
+
   const normalizedEmail = email.toLowerCase().trim();
   const key = otpKey(normalizedEmail, purpose);
 
-  const record = await kvGet<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS);
+  const record = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 6);
   if (!record) {
     return { ok: false, error: 'No verification code found. Please request a new one.' };
   }
 
-  // Check if already consumed
+  // Check if already consumed (legacy rows)
   if (record.consumed) {
+    await deleteOtpRow(key);
     return { ok: false, error: 'This code has already been used. Please request a new one.' };
   }
 
-  // Check expiry
+  // Check expiry — delete ON TIME (the moment it's observed expired).
   if (new Date(record.expiresAt).getTime() < Date.now()) {
-    // Clean up expired OTP (ONLY the OTP record, nothing else)
-    try { await kvDelete(key, ONYXBASE_COLLECTIONS.OTPS); } catch {}
+    await deleteOtpRow(key);
     return { ok: false, error: 'Verification code expired. Please request a new one.' };
   }
 
   // Check attempts
   if (record.attempts >= OTP_MAX_ATTEMPTS) {
-    try { await kvDelete(key, ONYXBASE_COLLECTIONS.OTPS); } catch {}
+    await deleteOtpRow(key);
     return { ok: false, error: 'Too many failed attempts. Please request a new code.' };
   }
 
@@ -213,16 +230,16 @@ export async function verifyOtp(
     return { ok: false, error: `Invalid code. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.` };
   }
 
-  // Success — mark as consumed (do NOT delete yet, in case we need to verify it was used)
-  record.consumed = true;
-  await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
+  // Success — DELETE the code (one-time use; replay → "not found").
+  await deleteOtpRow(key);
 
   return { ok: true };
 }
 
 /**
- * Clean up expired OTP records.
- * ONLY touches the OTPs collection — never touches profiles, resources, or other data.
+ * Sweep expired/consumed OTP rows so the DB holds only live codes.
+ * Runs piggyback (non-blocking) on every send/verify — no cron needed.
+ * ONLY touches the OTPs collection — never profiles, resources, or other data.
  */
 export async function cleanupExpiredOtps(): Promise<number> {
   let cleaned = 0;
@@ -232,16 +249,12 @@ export async function cleanupExpiredOtps(): Promise<number> {
     for (const key of Object.keys(all)) {
       const record = all[key];
       if (!record) continue;
-      // Delete if expired or consumed (and older than 1 hour)
       const isExpired = new Date(record.expiresAt).getTime() < now;
-      const isOldConsumed = record.consumed && (now - new Date(record.createdAt).getTime() > 60 * 60 * 1000);
-      if (isExpired || isOldConsumed) {
+      if (isExpired || record.consumed) {
         // CRITICAL: Only delete if the key starts with "otp:" (safety check)
         if (key.startsWith('otp:')) {
-          try {
-            await kvDelete(key, ONYXBASE_COLLECTIONS.OTPS);
-            cleaned++;
-          } catch {}
+          await deleteOtpRow(key);
+          cleaned++;
         }
       }
     }

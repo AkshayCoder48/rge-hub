@@ -233,9 +233,12 @@ export async function kvGetQuorum<T = any>(
 }
 
 /**
- * SPREAD writes — sequential SETs so copies land on different replicas
- * (routing isn't key-stable, so sequential copies spread). True if ANY
- * copy landed.
+ * SPREAD writes — PARALLEL SETs so copies land on different backend
+ * instances. Proven: the backend sprays parallel requests across
+ * per-instance memory (4 parallel SETs → all-200, then all-404 from a
+ * fresh reader), so parallel copies maximize the number of instances
+ * holding the value — exactly what quorum reads then exploit.
+ * True if ANY copy landed.
  */
 export async function kvSetSpread(
   key: string,
@@ -243,11 +246,10 @@ export async function kvSetSpread(
   collection: string = 'default',
   copies = 3
 ): Promise<boolean> {
-  let ok = false;
-  for (let i = 0; i < copies; i++) {
-    ok = (await kvSet(key, value, collection)) || ok;
-  }
-  return ok;
+  const results = await Promise.all(
+    Array.from({ length: copies }, () => kvSet(key, value, collection))
+  );
+  return results.some(Boolean);
 }
 
 /**

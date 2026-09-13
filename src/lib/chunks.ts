@@ -7,12 +7,22 @@
  * the consumer (analyze / speedramp / resource upload-complete) in ONE
  * request — so reassembly never depends on serverless instance affinity.
  *
+ * BACKEND REALITY (proven by probe): OnyxBase sprays parallel requests
+ * across per-instance memory — 4 parallel SETs return all-200 yet a fresh
+ * reader GETs all-404. Mitigations in this file:
+ * - The client uploads chunks SEQUENTIALLY (see chunked-client.ts), so all
+ *   keys land on one warm backend instance.
+ * - The manifest is spread-written (parallel copies → many instances).
+ * - Assembly verifies the ACTUAL chunk keys via parallel quorum reads
+ *   (sprayed reads find whichever instance holds each key) — never the
+ *   racy manifest `received` counter (parallel writers clobber it).
+ *
  * SAFETY (PRD §43-44): chunk keys live in their own collection with the
  * `chunk:{uploadId}:{index}` shape plus a manifest. Cleanup deletes ONLY
  * keys for the exact uploadId being assembled — never anything else.
  */
 
-import { kvSet, kvGet, kvDelete } from './onyxbase';
+import { kvSet, kvDelete, kvGetQuorum, kvSetSpread } from './onyxbase';
 
 const CHUNKS_COLLECTION = 'upload_chunks';
 
@@ -68,21 +78,28 @@ export async function saveChunk(
   const wrote = await kvSet(chunkKey(uploadId, index), chunkB64, CHUNKS_COLLECTION);
   if (!wrote) return { ok: false, received: 0, error: 'Chunk store failed' };
 
-  // Update manifest (create if missing).
-  let manifest = await kvGet<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION).catch(() => null);
-  if (!manifest || manifest.total !== total) {
-    manifest = { v: 1, total, fileName, mimeType, size, received: [], createdAt: new Date().toISOString() };
+  // Best-effort manifest hint (racy by nature — assembly never trusts it).
+  // Spread-written so at least one copy is findable from any instance.
+  try {
+    const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 4);
+    const next: ChunkManifest =
+      manifest && manifest.total === total
+        ? manifest
+        : { v: 1, total, fileName, mimeType, size, received: [], createdAt: new Date().toISOString() };
+    if (!next.received.includes(index)) {
+      next.received.push(index);
+      next.received.sort((a, b) => a - b);
+    }
+    await kvSetSpread(manifestKey(uploadId), next, CHUNKS_COLLECTION, 3);
+    return { ok: true, received: next.received.length };
+  } catch {
+    return { ok: true, received: index + 1 };
   }
-  if (!manifest.received.includes(index)) {
-    manifest.received.push(index);
-    manifest.received.sort((a, b) => a - b);
-  }
-  await kvSet(manifestKey(uploadId), manifest, CHUNKS_COLLECTION).catch(() => false);
-  return { ok: true, received: manifest.received.length };
 }
 
 /**
- * Assemble all chunks into one Buffer. Verifies completeness first.
+ * Assemble all chunks into one Buffer. Completeness is verified against
+ * the ACTUAL chunk keys via quorum reads — never the racy manifest counter.
  * Best-effort cleanup of this upload's chunk keys afterwards (non-fatal).
  */
 export async function assembleChunks(
@@ -92,26 +109,28 @@ export async function assembleChunks(
   | { ok: false; error: string }
 > {
   if (!isValidUploadId(uploadId)) return { ok: false, error: 'Bad upload id' };
-  const manifest = await kvGet<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION).catch(
-    () => null
-  );
-  if (!manifest || manifest.v !== 1) {
+  // Manifest (tiny) via quorum — only `total`/names are used from it.
+  const manifest = await kvGetQuorum<ChunkManifest>(manifestKey(uploadId), CHUNKS_COLLECTION, 6);
+  if (!manifest || manifest.v !== 1 || !manifest.total) {
     return { ok: false, error: 'Upload session not found. Please re-upload.' };
   }
-  if (manifest.received.length < manifest.total) {
-    return {
-      ok: false,
-      error: `Incomplete upload (${manifest.received.length}/${manifest.total} chunks). Please retry.`,
-    };
-  }
 
+  // Verify EVERY chunk key exists (parallel quorum reads sprayed across
+  // backend instances — first-hit-wins keeps the common case to 1 round).
   const parts = await Promise.all(
     Array.from({ length: manifest.total }, (_, i) =>
-      kvGet<string>(chunkKey(uploadId, i), CHUNKS_COLLECTION).catch(() => null)
+      kvGetQuorum<string>(chunkKey(uploadId, i), CHUNKS_COLLECTION, 4)
     )
   );
-  if (parts.some((p) => typeof p !== 'string' || p.length === 0)) {
-    return { ok: false, error: 'A chunk is missing. Please re-upload.' };
+  const missing: number[] = [];
+  parts.forEach((p, i) => {
+    if (typeof p !== 'string' || p.length === 0) missing.push(i);
+  });
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: `Missing chunks [${missing.join(', ')}] of ${manifest.total}. Please re-upload.`,
+    };
   }
   const bytes = Buffer.concat(
     (parts as string[]).map((p) => Buffer.from(p, 'base64'))

@@ -277,7 +277,61 @@ export async function deleteResourceVerified(
   const collection = collectionForType(type, xmlSource);
   await tombstoneAdd(id);
   const deleted = await kvDeleteSpread(id, collection, 5);
+  // Piggyback: prune day-old tombs so the DB doesn't accumulate them.
+  void pruneOldTombs(24 * 60 * 60 * 1000);
   return { deleted, confirmed: deleted };
+}
+
+/**
+ * Best-effort REAL deletes for an id across every resource collection.
+ * Used when locate-by-type misses (record may still exist — backend flaps),
+ * so "already gone" never skips the actual DELETE calls. Idempotent.
+ */
+export async function blindDeleteResource(id: string): Promise<void> {
+  try {
+    await Promise.all([
+      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.IMAGES, 3),
+      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.CLIPS, 3),
+      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.COMMUNITY_XMLS, 3),
+      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.ADMIN_XMLS, 3),
+    ]);
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Prune tombstones older than `olderThanMs`. Tombs only need to outlive
+ * backend convergence (minutes–hours); day-old tombs are dead weight.
+ * ONLY touches `tomb:*` keys in the tomb collection. Returns pruned count.
+ */
+export async function pruneOldTombs(olderThanMs: number): Promise<number> {
+  try {
+    const [a, b] = await Promise.all([
+      kvList(TOMBSTONE_COLLECTION),
+      kvList(TOMBSTONE_COLLECTION),
+    ]);
+    const keys = [...new Set([...a, ...b])].filter((k) => k.startsWith('tomb:'));
+    if (keys.length === 0) return 0;
+    const now = Date.now();
+    let pruned = 0;
+    await Promise.all(
+      keys.map(async (k) => {
+        try {
+          const v = await kvGet<{ at?: number }>(k, TOMBSTONE_COLLECTION);
+          if (v && typeof v.at === 'number' && now - v.at > olderThanMs) {
+            await kvDeleteSpread(k, TOMBSTONE_COLLECTION, 3);
+            pruned++;
+          }
+        } catch {
+          // skip — next sweep retries
+        }
+      })
+    );
+    return pruned;
+  } catch {
+    return 0;
+  }
 }
 
 /**

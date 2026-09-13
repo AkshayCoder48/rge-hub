@@ -20,6 +20,7 @@ import {
   getResource,
   updateResource,
   deleteResourceVerified,
+  blindDeleteResource,
   tombstoneAdd,
   type Resource,
   type ResourceType,
@@ -249,10 +250,11 @@ export async function DELETE(
 
     const resource = await locateResource(id, type, xmlSource, session.isAdmin);
     if (!resource) {
-      // IDEMPOTENT delete: already gone (or backend-rotted ghost) still
-      // returns success — tombstone it so no listing can ever resurface it.
-      // This is what previously surfaced as a confusing "delete error"
-      // for records the backend had already lost.
+      // IDEMPOTENT delete: locate missed, but the row may still exist
+      // (backend read flaps) — so issue REAL blind deletes in every
+      // collection first, then tombstone. Success is reported, but the
+      // DELETEs genuinely go out; nothing is UI-only.
+      await blindDeleteResource(id);
       await tombstoneAdd(id);
       const { invalidateResources } = await import('@/lib/cache');
       invalidateResources();

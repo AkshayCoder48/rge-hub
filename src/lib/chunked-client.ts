@@ -5,7 +5,10 @@
  *
  * - Files ≤ DIRECT_UPLOAD_LIMIT go through the normal single-request path.
  * - Larger files are sliced into 2.5MB pieces, POSTed to /api/uploads/chunk
- *   (3 concurrent), then the consumer is called with { uploadId }.
+ *   (SEQUENTIALLY — the backend sprays parallel writes across per-instance
+ *   memory where later reads can't find them; restore concurrency only
+ *   after OnyxBase gets shared storage), then the consumer is called
+ *   with { uploadId }.
  * - probeVideoLocal() reads duration/dimensions instantly in-browser with
  *   zero upload — so studio ingest never hard-fails on big files.
  */
@@ -16,7 +19,9 @@ export const DIRECT_UPLOAD_LIMIT = Math.floor(3.5 * 1024 * 1024);
 /** Raw slice size (2.5MB → ~3.4MB base64 JSON, safely under the cap). */
 export const CHUNK_SIZE = Math.floor(2.5 * 1024 * 1024);
 
-const CHUNK_CONCURRENCY = 3;
+// Sequential (1) until OnyxBase has shared storage — parallel chunk POSTs
+// get sprayed across per-instance memory and assembly can't find them.
+const CHUNK_CONCURRENCY = 1;
 
 export function makeUploadId(): string {
   const rand = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
