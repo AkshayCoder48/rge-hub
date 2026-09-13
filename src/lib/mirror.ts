@@ -98,7 +98,7 @@ async function mirrorImghosting(
     if (!mimeType.startsWith('image/')) return { ok: false };
     // Step 1 — fresh edge token per upload (cheap, ~1s).
     const tController = new AbortController();
-    const tTimer = setTimeout(() => tController.abort(), 15000);
+    const tTimer = setTimeout(() => tController.abort(), 10000);
     let token = '';
     let timestamp = '';
     try {
@@ -122,7 +122,7 @@ async function mirrorImghosting(
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(bytes)], { type: mimeType }), fileName);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    const timer = setTimeout(() => controller.abort(), 25000);
     try {
       const res = await fetch('https://upload.imghosting.in/upload', {
         method: 'POST',
