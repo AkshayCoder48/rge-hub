@@ -10,7 +10,8 @@
  *  2. For images ≤10MB: ALSO persist original bytes losslessly in the
  *     durable KV byte store → served permanently from OUR domain
  *     (/api/img/[resourceId]). Zero quality loss — bit-for-bit original.
- *  3. Best-effort external mirror (catbox/telegraph) as an extra fallback.
+ *  3. Best-effort external mirror (images: imghosting.in primary,
+ *     catbox/telegraph fallback) as an extra fallback.
  *
  * Canonical URL priority for images: KV bytes (/api/img/…) > mirror > OnyxBase.
  * For clips/xml: mirror > OnyxBase (bytes store is image-sized only).
