@@ -21,8 +21,18 @@ import crypto from 'crypto';
 export const SESSION_COOKIE = 'rge_session';
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// Server secret for signing cookies — falls back to a dev secret
-const SESSION_SECRET = process.env.SESSION_SECRET || 'railguyedits-dev-secret-change-in-production';
+// Server secret for signing cookies.
+// Priority: explicit SESSION_SECRET env → derived from the server-side
+// OnyxBase API key (stable across boots AND instances, never in the
+// browser, never in git) → per-boot random (fail-secure: sessions just
+// don't survive restarts when nothing is configured).
+function resolveSessionSecret(): string {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const kb = process.env.ONYXBASE_API_KEY;
+  if (kb) return crypto.createHash('sha256').update(`rge-session-v1:${kb}`).digest('hex');
+  return `boot-${crypto.randomBytes(32).toString('hex')}`;
+}
+const SESSION_SECRET = resolveSessionSecret();
 
 // In-memory revoked session set (cleared on server restart, which is fine)
 const revokedSessions = new Set<string>();
