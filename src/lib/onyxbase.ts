@@ -94,7 +94,7 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
           },
           body: JSON.stringify({ key, value, collection }),
         },
-        45000
+        60000
       );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
