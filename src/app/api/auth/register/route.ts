@@ -127,15 +127,13 @@ export async function POST(request: NextRequest) {
       updatedAt: now,
     };
 
+    // Best-effort: the native pin just spent the backend's global pin
+    // budget, so this usually paces (lands ~40s later or at next login).
+    // NEVER fail registration for it — login auto-creates the profile
+    // (get-or-create) and the session below already logs the user in.
     const profileCreated = await upsertProfile(profile);
     if (!profileCreated) {
-      console.error('[register] Failed to persist profile for user:', regResult.userId);
-      // The OnyxBase account was created but profile persistence failed.
-      // The user can still log in (login auto-creates a profile).
-      return NextResponse.json(
-        { ok: false, error: 'Account created but profile setup failed. Please try logging in.' },
-        { status: 500 }
-      );
+      console.warn('[register] profile pending for user (login will heal it):', regResult.userId);
     }
 
     // Check if this is the admin
@@ -159,6 +157,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       ok: true,
+      profilePending: !profileCreated,
       user: {
         userId: profile.userId,
         username: profile.username,
