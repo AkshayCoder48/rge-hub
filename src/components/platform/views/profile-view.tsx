@@ -149,7 +149,7 @@ export function ProfileView() {
   }[] = [
     { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image },
     { key: 'clip', label: 'Clips', icon: Film, count: counts.clip },
-    { key: 'xml', label: 'XMLs', icon: FileCode, count: counts.xml },
+    { key: 'xml', label: 'XMLs & Files', icon: FileCode, count: counts.xml },
   ];
 
   // --- Loading state (profile or store still loading) ---
@@ -266,7 +266,7 @@ export function ProfileView() {
         <div className="relative grid grid-cols-3 gap-3 mt-6 pt-6 border-t border-white/5">
           <StatBlock label="Images" value={counts.image} icon={ImageIcon} />
           <StatBlock label="Clips" value={counts.clip} icon={Film} />
-          <StatBlock label="XMLs" value={counts.xml} icon={FileCode} />
+          <StatBlock label="Files" value={counts.xml} icon={FileCode} />
         </div>
       </section>
 

@@ -27,6 +27,7 @@ import {
   type XmlSource,
 } from '@/lib/resources';
 import { deleteFile } from '@/lib/onyxbase';
+import { isGetsharedUrl, pingGetsharedFile } from '@/lib/getshared';
 
 function isResourceType(v: string | null): v is ResourceType {
   return v === 'image' || v === 'clip' || v === 'xml';
@@ -128,6 +129,13 @@ export async function GET(
           { status: 404 }
         );
       }
+    }
+
+    // Passive keep-alive: every real view of a getshared-backed file registers
+    // activity (resets its 30-day expiry). Fire-and-forget — the cron is the
+    // guarantee, this is a bonus.
+    if (isGetsharedUrl(resource.downloadUrl)) {
+      void pingGetsharedFile(resource.downloadUrl as string, 8000).catch(() => {});
     }
 
     return NextResponse.json({ ok: true, resource });
@@ -269,8 +277,9 @@ export async function DELETE(
       );
     }
 
-    // Delete the OnyxBase file (best-effort; also delete thumbnail if present)
-    if (resource.fileId) {
+    // Delete the OnyxBase file (best-effort; also delete thumbnail if present).
+    // ext: records hold no backend bytes (URL-only) — nothing to delete.
+    if (resource.fileId && !resource.fileId.startsWith('ext:')) {
       try {
         await deleteFile(resource.fileId);
       } catch (e) {

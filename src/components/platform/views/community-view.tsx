@@ -65,7 +65,7 @@ export function CommunityView() {
     { key: 'all', label: 'All', icon: LayoutGrid, count: counts.all },
     { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image },
     { key: 'clip', label: 'Clips', icon: Film, count: counts.clip },
-    { key: 'xml', label: 'XMLs', icon: FileCode, count: counts.xml },
+    { key: 'xml', label: 'XMLs & Files', icon: FileCode, count: counts.xml },
   ];
 
   return (

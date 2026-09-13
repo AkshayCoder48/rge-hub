@@ -127,6 +127,13 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
     const durablyStored = bytesStored === true && resourceType === 'image';
 
+    // URL-only records (getshared direct uploads, pasted file links): no bytes
+    // in OnyxBase — just the external URL. Require a valid http(s) target.
+    const isExternal = typeof fileId === 'string' && fileId.startsWith('ext:');
+    if (isExternal && (typeof downloadUrl !== 'string' || !/^https?:\/\//.test(downloadUrl))) {
+      return fail('UPLOAD_STORAGE_ERROR', 'External records require a valid http(s) downloadUrl', 400);
+    }
+
     // Canonical URL: durable on-domain bytes for images; else mirror/storage.
     const canonicalUrl = durablyStored
       ? absoluteUrl(request, `/api/img/${id}`)
@@ -158,7 +165,8 @@ export async function POST(request: NextRequest) {
       clientId: typeof clientId === 'string' ? clientId : undefined,
       bytesStored: durablyStored,
       bytesShards: typeof bytesShards === 'number' ? bytesShards : undefined,
-      storageUrl: typeof storageUrl === 'string' ? storageUrl : getFileUrl(fileId),
+      storageUrl:
+        typeof storageUrl === 'string' ? storageUrl : isExternal ? canonicalUrl : getFileUrl(fileId),
       mirrorUrl: typeof mirrorUrl === 'string' ? mirrorUrl : undefined,
       mirrorHost: typeof mirrorHost === 'string' ? mirrorHost : undefined,
       // Server-stamped from the verified session — the ONLY admin signal for badges.

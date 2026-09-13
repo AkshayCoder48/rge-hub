@@ -22,6 +22,9 @@ import {
   uploadErrorMessage,
 } from '@/lib/upload-errors';
 import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
+import { GETSHARED_MAX_BYTES } from '@/lib/getshared';
+import { uploadToGetshared } from '@/lib/getshared-client';
+import { Link2, ImagePlus } from 'lucide-react';
 
 /**
  * Upload pipeline UI — explicit state machine (PRD §8, §20, §21, §36, §37, §48).
@@ -40,7 +43,11 @@ import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
  */
 
 // Keep in sync with MAX_SIMPLE_UPLOAD_BYTES in src/lib/onyxbase.ts (server).
+// Files up to this size go through our own storage pipeline (permanent).
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+// Bigger clips/files (up to 5GB) upload straight from the browser to getshared
+// and are stored as URL-only records (no bytes/base64 in OnyxBase).
+const MAX_EXTERNAL_BYTES = GETSHARED_MAX_BYTES;
 
 type ItemStatus =
   | 'queued'
@@ -73,6 +80,13 @@ interface QueueItem {
   fileUrl?: string;
   resourceId?: string;
   timings?: Record<string, number>;
+  /** Which backend stored this file (set during transfer). */
+  via?: 'hub' | 'getshared';
+  /** Optional cover thumbnail (clips + files). Uploaded as an image first. */
+  thumbnailFile?: File;
+  thumbnailPreview?: string;
+  thumbnailFileId?: string;
+  thumbnailUrl?: string;
 }
 
 interface UploadModalProps {
@@ -93,7 +107,8 @@ function fmtBytes(n: number): string {
   if (!n || n <= 0) return '0 B';
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function fmtSpeed(bps: number | null): string {
@@ -141,10 +156,17 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
   const [tags, setTags] = useState('');
   const [published, setPublished] = useState(true);
   const [running, setRunning] = useState(false);
+  const [selectTab, setSelectTab] = useState<'file' | 'link'>('file');
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkTitle, setLinkTitle] = useState('');
+  const [linkSaving, setLinkSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const thumbInputRef = useRef<HTMLInputElement>(null);
+  const thumbTargetUid = useRef<string | null>(null);
 
   const itemsRef = useRef<QueueItem[]>([]);
   const xhrRefs = useRef(new Map<string, XMLHttpRequest>());
+  const gsAbortRefs = useRef(new Map<string, AbortController>());
   const speedRefs = useRef(new Map<string, { loaded: number; t: number; smooth: number | null }>());
   const stopRef = useRef(false);
 
@@ -152,9 +174,10 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     itemsRef.current = items;
   }, [items]);
 
-  // Abort any in-flight XHRs on unmount.
+  // Abort any in-flight transfers on unmount.
   useEffect(() => {
     const m = xhrRefs.current;
+    const g = gsAbortRefs.current;
     return () => {
       m.forEach((xhr) => {
         try {
@@ -162,11 +185,20 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         } catch {}
       });
       m.clear();
+      g.forEach((ctrl) => {
+        try {
+          ctrl.abort();
+        } catch {}
+      });
+      g.clear();
     };
   }, []);
 
   const TypeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
-  const accept = type === 'image' ? 'image/*' : type === 'clip' ? 'video/*' : '.xml,text/xml';
+  // "XMLs & Files" accepts anything (xml, zip, pdf, apk, ...); clips stay video-only.
+  const accept = type === 'image' ? 'image/*' : type === 'clip' ? 'video/*' : undefined;
+  const typeLabel = type === 'xml' ? 'file' : type;
+  const sizeLimit = type === 'image' ? MAX_UPLOAD_BYTES : MAX_EXTERNAL_BYTES;
 
   const updateItem = useCallback((uid: string, patch: Partial<QueueItem>) => {
     setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, ...patch } : it)));
@@ -217,11 +249,14 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
       if (file.size === 0) {
         return { ok: false, code: 'UPLOAD_STORAGE_ERROR', error: 'File is empty (0 bytes)' };
       }
-      if (file.size > MAX_UPLOAD_BYTES) {
+      // Images ride our own pipeline (50MB); clips/files above 50MB go to
+      // getshared direct from the browser (5GB max, URL-only record).
+      const limit = type === 'image' ? MAX_UPLOAD_BYTES : MAX_EXTERNAL_BYTES;
+      if (file.size > limit) {
         return {
           ok: false,
           code: 'FILE_SIZE_ERROR',
-          error: `"${file.name}" is ${fmtBytes(file.size)} — limit is ${fmtBytes(MAX_UPLOAD_BYTES)} per file.`,
+          error: `"${file.name}" is ${fmtBytes(file.size)} — limit is ${fmtBytes(limit)} per file.`,
         };
       }
       const ext = extOf(file.name);
@@ -232,9 +267,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
       if (type === 'clip' && !(mime.startsWith('video/') || CLIP_EXTS.includes(ext))) {
         return { ok: false, code: 'FILE_TYPE_ERROR', error: `"${file.name}" is not a video file.` };
       }
-      if (type === 'xml' && !(mime.includes('xml') || mime === 'text/plain' || ext === 'xml')) {
-        return { ok: false, code: 'FILE_TYPE_ERROR', error: `"${file.name}" is not an XML file.` };
-      }
+      // type 'xml' ("XMLs & Files") accepts any file — no extension check.
       return { ok: true };
     },
     [type]
@@ -322,8 +355,68 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     [type, updateItem]
   );
 
+  // Large clips/files (>50MB, up to 5GB) upload straight from the browser to
+  // getshared and are stored as URL-only records (no bytes/base64 in OnyxBase).
+  const uploadTransferGetshared = useCallback(
+    async (item: QueueItem): Promise<TransferResult> => {
+      const ctrl = new AbortController();
+      gsAbortRefs.current.set(item.uid, ctrl);
+      updateItem(item.uid, {
+        via: 'getshared',
+        progress: { loaded: 0, total: item.file.size, pct: 0, speedBps: null, etaSecs: null },
+      });
+      const t0 = Date.now();
+      try {
+        const g = await uploadToGetshared(item.file, {
+          signal: ctrl.signal,
+          onProgress: (p) => {
+            const elapsed = Math.max((Date.now() - t0) / 1000, 0.001);
+            const speed = p.loaded / elapsed;
+            updateItem(item.uid, {
+              progress: {
+                loaded: p.loaded,
+                total: p.total,
+                pct: p.pct,
+                speedBps: speed,
+                etaSecs: speed > 0 ? (p.total - p.loaded) / speed : null,
+              },
+            });
+          },
+        });
+        updateItem(item.uid, {
+          progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
+        });
+        return {
+          fileId: g.fileId,
+          fileUrl: g.downloadUrl,
+          fileName: item.file.name,
+          mimeType: item.file.type || 'application/octet-stream',
+          size: item.file.size,
+          storageUrl: g.shareUrl,
+          mirrorHost: 'getshared',
+          timings: { total_upload_ms: Date.now() - t0, attempts: 1 },
+        };
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError' || ctrl.signal.aborted) {
+          throw { code: 'UPLOAD_CANCELLED' as UploadErrorCode, cancelled: true };
+        }
+        throw {
+          code: 'UPLOAD_STORAGE_ERROR' as UploadErrorCode,
+          error: err instanceof Error ? err.message : 'Large-file upload failed.',
+        };
+      } finally {
+        gsAbortRefs.current.delete(item.uid);
+      }
+    },
+    [updateItem]
+  );
+
   const uploadTransfer = useCallback(
     (item: QueueItem): Promise<TransferResult> => {
+      // Large clips/files bypass our functions entirely (browser → getshared).
+      if (type !== 'image' && item.file.size > MAX_UPLOAD_BYTES) {
+        return uploadTransferGetshared(item);
+      }
       // Chunked path for files over the single-request ceiling.
       if (item.file.size > DIRECT_UPLOAD_LIMIT) {
         return uploadTransferChunked(item);
@@ -408,7 +501,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         xhr.send(formData);
       });
     },
-    [type, updateItem]
+    [type, updateItem, uploadTransferChunked, uploadTransferGetshared]
   );
 
   // ---------- Phase 2: DB registration (idempotent) ----------
@@ -439,6 +532,8 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
           description,
           fileId: transfer.fileId,
           downloadUrl: transfer.fileUrl,
+          thumbnailFileId: item.thumbnailFileId,
+          thumbnailUrl: item.thumbnailUrl,
           fileName: transfer.fileName,
           mimeType: transfer.mimeType,
           size: transfer.size,
@@ -504,6 +599,51 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     [type]
   );
 
+  // ---------- optional cover thumbnail (clips + files) ----------
+  // Small image uploaded through our own image pipeline (mirrored like images).
+  const uploadThumbnail = useCallback(
+    async (item: QueueItem): Promise<{ thumbnailFileId: string; thumbnailUrl: string }> => {
+      const thumb = item.thumbnailFile!;
+      if (thumb.size <= DIRECT_UPLOAD_LIMIT) {
+        const formData = new FormData();
+        formData.append('file', thumb);
+        formData.append('kind', 'image');
+        formData.append('label', `thumb_${item.clientId}`);
+        const res = await fetch('/api/resources/upload', { method: 'POST', body: formData });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          throw { code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR', error: (data.error as string) || 'Thumbnail upload failed.' };
+        }
+        return {
+          thumbnailFileId: data.fileId as string,
+          thumbnailUrl: ((data.mirrorUrl as string) || (data.url as string)) as string,
+        };
+      }
+      // Large cover image → chunked path, then assemble as an image.
+      const { uploadId } = await uploadInChunks(thumb, {});
+      const res = await fetch('/api/resources/upload-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uploadId,
+          fileName: thumb.name,
+          mimeType: thumb.type || 'image/*',
+          label: `thumb_${item.clientId}`,
+          kind: 'image',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw { code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR', error: (data.error as string) || 'Thumbnail upload failed.' };
+      }
+      return {
+        thumbnailFileId: data.fileId as string,
+        thumbnailUrl: ((data.mirrorUrl as string) || (data.url as string)) as string,
+      };
+    },
+    []
+  );
+
   // ---------- per-item pipeline ----------
 
   const processItem = useCallback(
@@ -520,6 +660,14 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
       }
 
       try {
+        // ---- Phase 0: cover thumbnail (optional; skipped on registration-only retry) ----
+        const thumbCheck = getItem(uid)!;
+        if (!opts.skipTransfer && thumbCheck.thumbnailFile && !thumbCheck.thumbnailFileId) {
+          const t = await uploadThumbnail(thumbCheck);
+          if (stopRef.current) return;
+          updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
+        }
+
         // ---- Phase 1: transfer (skipped on registration-only retry) ----
         let transfer: { fileId: string; fileUrl: string; fileName: string; mimeType: string; size: number };
         let timings = item.timings;
@@ -572,7 +720,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         });
       }
     },
-    [getItem, validateItem, updateItem, uploadTransfer, registerResource, verifyResourceRecord, upsertLocal]
+    [getItem, validateItem, updateItem, uploadTransfer, registerResource, verifyResourceRecord, upsertLocal, uploadThumbnail]
   );
 
   // ---------- queue runner ----------
@@ -611,6 +759,12 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
           xhr.abort();
         } catch {}
       }
+      const gs = gsAbortRefs.current.get(uid);
+      if (gs) {
+        try {
+          gs.abort();
+        } catch {}
+      }
       const it = getItem(uid);
       if (it && it.status !== 'ready') {
         updateItem(uid, { status: 'cancelled', errorCode: 'UPLOAD_CANCELLED', error: null });
@@ -624,6 +778,11 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     xhrRefs.current.forEach((xhr) => {
       try {
         xhr.abort();
+      } catch {}
+    });
+    gsAbortRefs.current.forEach((ctrl) => {
+      try {
+        ctrl.abort();
       } catch {}
     });
     setItems((prev) =>
@@ -708,6 +867,97 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     }
   };
 
+  // ---------- direct file link (no upload; URL-only record) ----------
+  const saveLink = useCallback(async () => {
+    const url = linkUrl.trim();
+    if (!/^https?:\/\/.+\..+/.test(url)) {
+      toast({ title: 'Invalid link', description: 'Paste a full http(s) URL.', variant: 'destructive' });
+      return;
+    }
+    const title = linkTitle.trim() || url;
+    if (!user) {
+      toast({ title: 'Login required', description: 'Please log in to add a link.', variant: 'destructive' });
+      return;
+    }
+    setLinkSaving(true);
+    try {
+      const tagsArray = tags.split(',').map((t) => t.trim()).filter(Boolean);
+      let fileName = url;
+      try {
+        const u = new URL(url);
+        fileName = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || u.hostname);
+      } catch {}
+      const res = await fetch('/api/resources/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type,
+          title,
+          description,
+          fileId: `ext:link:${makeClientId()}`,
+          downloadUrl: url,
+          fileName,
+          mimeType: 'text/uri-list',
+          tags: tagsArray,
+          published,
+          clientId: makeClientId(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error((data.error as string) || 'Failed to save link.');
+      }
+      upsertLocal(data.resource as Resource);
+      toast({ title: 'Link added!', description: published ? 'Published to community.' : 'Saved as draft.' });
+      onSuccess();
+      onClose();
+    } catch (err) {
+      toast({
+        title: 'Could not save link',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setLinkSaving(false);
+    }
+  }, [linkUrl, linkTitle, user, tags, description, published, type, toast, upsertLocal, onSuccess, onClose]);
+
+  // ---------- per-row thumbnail picker (clips + files) ----------
+  const pickThumbnail = useCallback((uid: string) => {
+    thumbTargetUid.current = uid;
+    thumbInputRef.current?.click();
+  }, []);
+
+  const onThumbnailChosen = useCallback(
+    (files: FileList | null) => {
+      const uid = thumbTargetUid.current;
+      thumbTargetUid.current = null;
+      if (!uid || !files || files.length === 0) return;
+      const f = files[0];
+      if (!f.type.startsWith('image/')) {
+        toast({ title: 'Invalid thumbnail', description: 'Please choose an image file.', variant: 'destructive' });
+        return;
+      }
+      if (f.size > 10 * 1024 * 1024) {
+        toast({ title: 'Thumbnail too large', description: 'Cover image must be under 10MB.', variant: 'destructive' });
+        return;
+      }
+      const prev = getItem(uid)?.thumbnailPreview;
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      updateItem(uid, { thumbnailFile: f, thumbnailPreview: URL.createObjectURL(f), thumbnailFileId: undefined, thumbnailUrl: undefined });
+    },
+    [getItem, updateItem, toast]
+  );
+
+  const clearThumbnail = useCallback(
+    (uid: string) => {
+      const prev = getItem(uid)?.thumbnailPreview;
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      updateItem(uid, { thumbnailFile: undefined, thumbnailPreview: undefined, thumbnailFileId: undefined, thumbnailUrl: undefined });
+    },
+    [getItem, updateItem]
+  );
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in"
@@ -724,7 +974,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
               <TypeIcon className="w-4 h-4 text-[#ef233c]" />
             </div>
             <div>
-              <h2 className="font-manrope font-semibold text-lg text-white">Upload {type}</h2>
+              <h2 className="font-manrope font-semibold text-lg text-white">Upload {typeLabel}{type === 'xml' ? 's & share links' : 's'}</h2>
               <p className="text-[10px] font-manrope uppercase tracking-wider text-zinc-500">
                 {step === 'select'
                   ? 'Choose files'
@@ -742,7 +992,24 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
-          {step === 'select' && (
+          {step === 'select' && type === 'xml' && (
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => setSelectTab('file')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${selectTab === 'file' ? 'bg-[#ef233c]/15 text-white border border-[#ef233c]/30' : 'bg-black/40 text-zinc-500 border border-white/10 hover:text-white'}`}
+              >
+                <Upload className="w-4 h-4" /> Upload files
+              </button>
+              <button
+                onClick={() => setSelectTab('link')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${selectTab === 'link' ? 'bg-[#ef233c]/15 text-white border border-[#ef233c]/30' : 'bg-black/40 text-zinc-500 border border-white/10 hover:text-white'}`}
+              >
+                <Link2 className="w-4 h-4" /> Add link
+              </button>
+            </div>
+          )}
+
+          {step === 'select' && (selectTab === 'file' || type !== 'xml') && (
             <div
               onDragOver={(e) => e.preventDefault()}
               onDrop={handleDrop}
@@ -753,9 +1020,10 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                 <Upload className="w-6 h-6 text-[#ef233c]" />
               </div>
               <div className="text-center">
-                <p className="font-inter text-sm text-white">Drop your {type} files here</p>
+                <p className="font-inter text-sm text-white">Drop your {typeLabel} files here</p>
                 <p className="font-inter text-xs text-zinc-500 mt-1">
-                  or click to browse — multiple files allowed (max {fmtBytes(MAX_UPLOAD_BYTES)} each)
+                  or click to browse — multiple files allowed (max {fmtBytes(sizeLimit)} each)
+                  {type !== 'image' && ' · files over 50MB upload directly (up to 5GB)'}
                 </p>
               </div>
               <input
@@ -769,6 +1037,46 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                 }}
                 className="hidden"
               />
+            </div>
+          )}
+
+          {step === 'select' && type === 'xml' && selectTab === 'link' && (
+            <div className="rounded-2xl border border-white/10 bg-black/40 p-5 space-y-3">
+              <div>
+                <label className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-1.5">
+                  File link (Google Drive, getshared, Dropbox, direct URL…)
+                </label>
+                <input
+                  type="url"
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  placeholder="https://…"
+                  className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/10 font-inter text-sm text-white placeholder:text-zinc-700 focus:border-[#ef233c]/40 focus:outline-none transition-colors"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 block mb-1.5">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  value={linkTitle}
+                  onChange={(e) => setLinkTitle(e.target.value)}
+                  placeholder="My shared file"
+                  className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/10 font-inter text-sm text-white placeholder:text-zinc-700 focus:border-[#ef233c]/40 focus:outline-none transition-colors"
+                />
+              </div>
+              <button
+                onClick={saveLink}
+                disabled={linkSaving || !linkUrl.trim()}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium disabled:opacity-50 transition-all"
+              >
+                <Link2 className="w-4 h-4" />
+                {linkSaving ? 'Saving…' : 'Save link'}
+              </button>
+              <p className="text-[11px] font-inter text-zinc-600 text-center">
+                The link is saved as-is — no file is uploaded.
+              </p>
             </div>
           )}
 
@@ -841,6 +1149,16 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                   }}
                   className="hidden"
                 />
+                <input
+                  ref={thumbInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    onThumbnailChosen(e.target.files);
+                    e.target.value = '';
+                  }}
+                  className="hidden"
+                />
 
                 <div className="space-y-2.5">
                   {items.map((it) => {
@@ -857,8 +1175,12 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                         }`}
                       >
                         <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-lg bg-[#ef233c]/10 flex items-center justify-center shrink-0">
-                            <TypeIcon className="w-4 h-4 text-[#ef233c]" />
+                          <div className="w-9 h-9 rounded-lg bg-[#ef233c]/10 flex items-center justify-center shrink-0 overflow-hidden">
+                            {it.thumbnailPreview ? (
+                              <img src={it.thumbnailPreview} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              <TypeIcon className="w-4 h-4 text-[#ef233c]" />
+                            )}
                           </div>
                           <div className="min-w-0 flex-1">
                             <input
@@ -870,7 +1192,17 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                             />
                             <p className="text-[10px] font-manrope text-zinc-500 truncate">
                               {it.file.name} · {fmtBytes(it.file.size)}
+                              {type !== 'image' && it.file.size > MAX_UPLOAD_BYTES && ' · large file, direct upload'}
                             </p>
+                            {type !== 'image' && !running && (it.status === 'queued' || it.status === 'cancelled' || it.status === 'failed') && (
+                              <button
+                                onClick={() => (it.thumbnailFile ? clearThumbnail(it.uid) : pickThumbnail(it.uid))}
+                                className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-inter text-zinc-500 hover:text-white transition-colors"
+                              >
+                                <ImagePlus className="w-3 h-3" />
+                                {it.thumbnailFile ? `Cover: ${it.thumbnailFile.name} (remove)` : 'Add cover thumbnail'}
+                              </button>
+                            )}
                           </div>
                           <span
                             className={`shrink-0 text-[9px] font-manrope uppercase tracking-wider px-2 py-1 rounded-md border ${

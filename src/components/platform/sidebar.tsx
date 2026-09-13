@@ -43,7 +43,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'studio', label: 'Speed Ramp Studio', icon: Zap },
     { key: 'images', label: 'Images', icon: ImageIcon, section: 'Resources' },
     { key: 'clips', label: 'Clips', icon: Film },
-    { key: 'xmls', label: 'XMLs', icon: FileCode },
+    { key: 'xmls', label: 'XMLs & Files', icon: FileCode },
     { key: 'community', label: 'Community', icon: Users, section: 'Discover' },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
     ...(user.isAdmin
@@ -179,7 +179,7 @@ function UploadMenu({ onUpload }: { onUpload: (type: 'image' | 'clip' | 'xml') =
             onClick={() => { onUpload('xml'); setOpen(false); }}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-zinc-300 hover:text-white hover:bg-white/5 transition-all"
           >
-            <FileCode className="w-3.5 h-3.5 text-[#ef233c]" /> XML
+            <FileCode className="w-3.5 h-3.5 text-[#ef233c]" /> File / Link
           </button>
         </div>
       )}

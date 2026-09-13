@@ -37,7 +37,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   const [selected, setSelected] = useState<Resource | null>(null);
 
   const TypeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
-  const typeLabel = type === 'image' ? 'Images' : type === 'clip' ? 'Clips' : 'XMLs';
+  const typeLabel = type === 'image' ? 'Images' : type === 'clip' ? 'Clips' : 'XMLs & Files';
 
   // Merge public resources of this type with the user's own resources of this type,
   // deduplicating by id so unpublished drafts still show up.
@@ -131,7 +131,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
             onClick={handleUploadClick}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] shadow-[0_0_20px_-8px_rgba(239,35,60,0.6)]"
           >
-            <Upload className="w-4 h-4" /> Upload {type === 'image' ? 'Image' : type === 'clip' ? 'Clip' : 'XML'}
+            <Upload className="w-4 h-4" /> {type === 'xml' ? 'Add File or Link' : type === 'image' ? 'Upload Image' : 'Upload Clip'}
           </button>
         </div>
       </div>
@@ -170,7 +170,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
           <p className="font-inter text-sm text-zinc-500 mb-5 max-w-md mx-auto">
             {search
               ? `Try adjusting your search terms.`
-              : `Be the first to upload a${type === 'image' ? 'n' : ''} ${type === 'image' ? 'image' : type === 'clip' ? 'clip' : 'XML'} to the library.`}
+              : `Be the first to ${type === 'xml' ? 'add a file or link' : `upload a${type === 'image' ? 'n' : ''} ${type}`} to the library.`}
           </p>
           {!search && (
             <button

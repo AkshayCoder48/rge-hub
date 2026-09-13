@@ -514,11 +514,19 @@ export async function getFileMeta(fileId: string): Promise<OnyxFileMeta | null> 
  * Delete a file.
  */
 export async function deleteFile(fileId: string): Promise<boolean> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/files/${fileId}`, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-  });
-  return res.ok;
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/files/${fileId}`,
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      15000
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
