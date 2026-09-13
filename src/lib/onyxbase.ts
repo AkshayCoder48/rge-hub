@@ -75,14 +75,19 @@ async function fetchWithTimeout(
 
 /**
  * Set a key-value pair — DURABLE write with retries. Returns true ONLY when
- * the backend confirms `durable: true` (verified Telegram pin). On flood
- * (`durable: false`, 5xx, timeout) retries 3x with 4s spacing — floods
- * clear in seconds and the retry then succeeds. Retries are idempotent
- * (same key+value), so a landed-but-unconfirmed write is harmless.
+ * the backend confirms `durable: true` (verified Telegram pin).
+ *
+ * Flood discipline (learned the hard way): hammering through a throttle
+ * ESCALATES it into a long ban. So: max 2 attempts, and when the backend
+ * reports its own throttle (`throttle.retryAfterSecs`) we honor it
+ * (capped at 12s per wait so a request never exceeds serverless limits).
+ * Retries are idempotent (same key+value), so a landed-but-unconfirmed
+ * write is harmless.
  */
 export async function kvSet(key: string, value: any, collection: string = 'default'): Promise<boolean> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 4000));
+  let waitMs = 4000;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, waitMs));
     try {
       const res = await fetchWithTimeout(
         `${ONYXBASE_BASE_URL}/v1/set`,
@@ -103,7 +108,9 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
       }
       const data = await res.json().catch(() => null);
       if (data?.ok === true && data?.durable === true) return true;
-      console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} not durable, retrying`);
+      const retryAfterSecs = Number(data?.throttle?.retryAfterSecs);
+      waitMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0 ? Math.min(retryAfterSecs, 12) * 1000 : 4000;
+      console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} not durable, retrying in ${waitMs}ms`);
     } catch (err) {
       console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} error/timeout:`, err instanceof Error ? err.message : err);
     }
