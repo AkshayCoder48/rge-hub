@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread } from './onyxbase';
+import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 // ============ Types ============
@@ -156,15 +156,13 @@ export async function upsertProfile(profile: Profile): Promise<boolean> {
     } catch {}
   }
 
-  // Set the main profile record
-  const ok = await kvSet(`profile:${profile.userId}`, profile, ONYXBASE_COLLECTIONS.PROFILES);
-
-  // Maintain username index
-  if (ok) {
-    await kvSet(`username:${normalized}`, profile.userId, ONYXBASE_COLLECTIONS.PROFILES);
-  }
-
-  return ok;
+  // Set the main profile record + username index in ONE backend pin
+  // (two kvSets would serialize on the 35s global pin pacing + double the
+  // full-manifest uploads — the 110s-login self-flood).
+  return await kvSetMulti([
+    { key: `profile:${profile.userId}`, value: profile, collection: ONYXBASE_COLLECTIONS.PROFILES },
+    { key: `username:${normalized}`, value: profile.userId, collection: ONYXBASE_COLLECTIONS.PROFILES },
+  ]);
 }
 
 export async function getAllProfiles(): Promise<Profile[]> {

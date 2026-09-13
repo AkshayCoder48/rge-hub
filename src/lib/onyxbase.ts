@@ -118,6 +118,55 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
   console.error('[OnyxBase] kvSet exhausted retries for key:', key.slice(0, 80));
   return false;
 }
+/**
+ * Set multiple keys with a SINGLE backend manifest sync (one Telegram pin
+ * for the whole batch) via the bulk-import endpoint. Multi-key writes that
+ * go through kvSet one-by-one serialize on the backend's ~35s global pin
+ * pacing (2 keys = 2 pins = 40s+ and a self-flood of full-manifest
+ * uploads); this lands them together in ~6-12s.
+ *
+ * Retries: 2 attempts with a 40s wait (covers one pacing window). Same
+ * account/collections as kvSet (master key) — keys are identical.
+ */
+export async function kvSetMulti(
+  entries: Array<{ key: string; value: any; collection?: string }>
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 40000));
+    try {
+      const res = await fetchWithTimeout(
+        `${ONYXBASE_BASE_URL}/api/dashboard/records/import`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            records: entries.map((e) => ({
+              key: e.key,
+              value: e.value,
+              collection: e.collection || 'default',
+            })),
+          }),
+        },
+        90000
+      );
+      if (!res.ok) {
+        console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} failed:`, res.status);
+        continue;
+      }
+      const data = await res.json().catch(() => null);
+      if (data?.ok === true && data?.durable === true) return true;
+      console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} not durable, retrying in 40s`);
+    } catch (err) {
+      console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} error/timeout:`, err instanceof Error ? err.message : err);
+    }
+  }
+  console.error('[OnyxBase] kvSetMulti exhausted retries for keys:', entries.map((e) => e.key.slice(0, 40)).join(','));
+  return false;
+}
+
 
 export type KVReadStatus = 'found' | 'missing' | 'error';
 

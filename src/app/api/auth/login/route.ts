@@ -57,16 +57,18 @@ export async function POST(request: NextRequest) {
         updatedAt: now,
       } as Profile;
 
-      // Retry profile creation to handle OnyxBase inconsistency
+      // Retry profile creation to handle OnyxBase inconsistency.
+      // (upsertProfile already paces internally via kvSetMulti — these
+      // outer rounds are only a cheap safety net, not the pacing policy.)
       let profileCreated = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         profileCreated = await upsertProfile(profile);
         if (profileCreated) break;
         console.warn(`[login] upsertProfile failed (attempt ${attempt + 1})`);
-        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+        await new Promise(r => setTimeout(r, 5000));
       }
       if (!profileCreated) {
-        console.error('[login] Failed to create profile after 3 attempts for user:', loginResult.userId);
+        console.error('[login] Failed to create profile after 2 attempts for user:', loginResult.userId);
       }
     } else {
       // Update API key in case it changed
