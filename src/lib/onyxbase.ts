@@ -51,101 +51,259 @@ export interface OnyxUser {
   plan?: string;
 }
 
-// ============ Core KV ============
+// ============ Core KV (hardened) ============
+
+/**
+ * fetch with a hard timeout. OnyxBase latency is erratic (0.4s–8s+ per
+ * call, worse on cold shards), so one hung call must never stall a whole
+ * request for 15s+. All KV primitives fail FAST (false/null/[]) and let
+ * callers decide: retry (writes) or degrade (reads).
+ */
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 10000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Set a key-value pair in a collection.
  */
 export async function kvSet(key: string, value: any, collection: string = 'default'): Promise<boolean> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/set`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ key, value, collection }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    console.error('[OnyxBase] kvSet failed:', res.status, text);
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/set`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ key, value, collection }),
+      },
+      15000
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error('[OnyxBase] kvSet failed:', res.status, text.slice(0, 200));
+      return false;
+    }
+    const data = await res.json().catch(() => null);
+    return data?.ok === true;
+  } catch (err) {
+    console.error('[OnyxBase] kvSet error/timeout:', err instanceof Error ? err.message : err);
     return false;
   }
-  const data = await res.json();
-  return data.ok === true;
+}
+
+export type KVReadStatus = 'found' | 'missing' | 'error';
+
+export interface KVRead<T> {
+  status: KVReadStatus;
+  value: T | null;
 }
 
 /**
- * Get a value by key from a collection.
+ * Get a value by key, distinguishing NOT-FOUND (404) from ERRORS
+ * (timeout/network/500). Listings use this to tell rotted ghost keys
+ * (safe to prune from our index) from transient failures (keep, retry later).
+ */
+export async function kvGetStatus<T = any>(
+  key: string,
+  collection: string = 'default'
+): Promise<KVRead<T>> {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/get/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`,
+      {
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      10000
+    );
+    if (res.status === 404) return { status: 'missing', value: null };
+    if (!res.ok) return { status: 'error', value: null };
+    const data = await res.json().catch(() => null);
+    if (!data || data.ok === false || data.value === undefined || data.value === null) {
+      return { status: 'missing', value: null };
+    }
+    return { status: 'found', value: data.value as T };
+  } catch {
+    return { status: 'error', value: null };
+  }
+}
+
+/**
+ * Get a value by key from a collection. Never throws — null on missing/error.
  */
 export async function kvGet<T = any>(key: string, collection: string = 'default'): Promise<T | null> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/get/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`, {
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-    cache: 'no-store',
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  if (data.ok === false) return null;
-  return data.value as T;
+  const r = await kvGetStatus<T>(key, collection);
+  return r.status === 'found' ? r.value : null;
 }
 
 /**
  * Delete a key from a collection.
  */
 export async function kvDelete(key: string, collection: string = 'default'): Promise<boolean> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/delete/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-  });
-  if (!res.ok) return false;
-  const data = await res.json();
-  return data.ok === true;
-}
-
-/**
- * List all keys in a collection.
- */
-export async function kvList(collection: string = 'default'): Promise<string[]> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/list?collection=${encodeURIComponent(collection)}`, {
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-    cache: 'no-store',
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.keys || [];
-}
-
-/**
- * Export all key-value pairs in a collection.
- */
-/**
- * Export all key-value pairs in a collection.
- * Includes retry logic for OnyxBase eventual consistency.
- */
-export async function kvExport(collection: string = 'default'): Promise<Record<string, any>> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(`${ONYXBASE_BASE_URL}/v1/export?collection=${encodeURIComponent(collection)}`, {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/delete/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`,
+      {
+        method: 'DELETE',
         headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-        cache: 'no-store',
-      });
-      if (!res.ok) {
-        if (attempt < 2) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
-        return {};
-      }
-      const data = await res.json();
-      const result = data.data || {};
-      // OnyxBase sometimes returns empty due to eventual consistency
-      // If we got results, return them; if empty on first try, retry
-      if (Object.keys(result).length > 0 || attempt === 2) {
-        return result;
-      }
-      await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-    } catch {
-      if (attempt < 2) { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); continue; }
-      return {};
+      },
+      10000
+    );
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    return data?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Idempotent delete: 404 (already gone / rotted) counts as success.
+ * Deleting a ghost must never surface an error to the user.
+ */
+export async function kvDeleteIdempotent(key: string, collection: string = 'default'): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/delete/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`,
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      10000
+    );
+    if (res.status === 404) return true;
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    return data?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * QUORUM reads — the backend's replicas diverge (same key returns 200 on
+ * one replica and 404 on another, seconds apart). A single GET is a coin
+ * flip, so read N copies and accept ANY value found.
+ *
+ * Shape: sequential ROUNDS of 3 parallel reads (covers both random routing
+ * and sticky-parallel routing), FIRST-HIT-WINS per round so stragglers
+ * never stall a found value. Typical hit ≈ fastest replica (~0.5s).
+ */
+export async function kvGetQuorum<T = any>(
+  key: string,
+  collection: string = 'default',
+  reads = 6
+): Promise<T | null> {
+  const PER_ROUND = 3;
+  const rounds = Math.max(1, Math.ceil(reads / PER_ROUND));
+  for (let round = 0; round < rounds; round++) {
+    const n = round === rounds - 1 ? reads - round * PER_ROUND : PER_ROUND;
+    const jobs = Array.from({ length: n }, () => kvGetStatus<T>(key, collection));
+    // First-hit-wins: resolve on the first found value, or null once every
+    // copy in the round settled without a hit. (kvGetStatus never rejects.)
+    const hit = await new Promise<T | null>((resolve) => {
+      let settled = 0;
+      jobs.forEach((j) =>
+        j.then((r) => {
+          if (r.status === 'found' && r.value !== null && r.value !== undefined) {
+            resolve(r.value as T);
+          } else if (++settled === jobs.length) {
+            resolve(null);
+          }
+        })
+      );
+    });
+    if (hit !== null) return hit;
+    if (round < rounds - 1) {
+      await new Promise((r) => setTimeout(r, 300));
     }
   }
-  return {};
+  return null;
+}
+
+/**
+ * SPREAD writes — sequential SETs so copies land on different replicas
+ * (routing isn't key-stable, so sequential copies spread). True if ANY
+ * copy landed.
+ */
+export async function kvSetSpread(
+  key: string,
+  value: any,
+  collection: string = 'default',
+  copies = 3
+): Promise<boolean> {
+  let ok = false;
+  for (let i = 0; i < copies; i++) {
+    ok = (await kvSet(key, value, collection)) || ok;
+  }
+  return ok;
+}
+
+/**
+ * SPREAD delete — parallel idempotent deletes across replicas.
+ * True unless every copy hit a transport error (404s count as success).
+ */
+export async function kvDeleteSpread(
+  key: string,
+  collection: string = 'default',
+  copies = 5
+): Promise<boolean> {
+  const results = await Promise.all(
+    Array.from({ length: copies }, () => kvDeleteIdempotent(key, collection))
+  );
+  return results.some(Boolean);
+}
+
+/**
+ * List all keys in a collection. Never throws — [] on error.
+ */
+export async function kvList(collection: string = 'default'): Promise<string[]> {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/list?collection=${encodeURIComponent(collection)}`,
+      {
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      10000
+    );
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    return data?.keys || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Export all key-value pairs in a collection. SINGLE attempt, no sleeps —
+ * sleep-cascades turned one slow backend into 15s+ responses. Never throws.
+ */
+export async function kvExport(collection: string = 'default'): Promise<Record<string, any>> {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/export?collection=${encodeURIComponent(collection)}`,
+      {
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      12000
+    );
+    if (!res.ok) return {};
+    const data = await res.json().catch(() => null);
+    return data?.data || {};
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -629,25 +787,26 @@ export async function kvGetWithRetry<T = any>(
 
 /**
  * Two-phase persistent write (PRD §9, §14):
- * Phase 1 — kvSet; Phase 2 — read-back verification with retries.
+ * Phase 1 — spread write (copies across replicas); Phase 2 — quorum
+ * read-back (any replica). Sequential retries are useless against divergent
+ * replicas, so verification is ONE parallel wave, not a sleep cascade.
  * Only { ok: true, verified: true } means the record is durable and readable.
  */
 export async function kvSetVerified(
   key: string,
   value: any,
   collection: string = 'default',
-  opts: { retries?: number; baseDelayMs?: number } = {}
 ): Promise<{ ok: boolean; verified: boolean; attempts: number; ms: number }> {
   const t0 = Date.now();
-  const ok = await kvSet(key, value, collection);
+  const ok = await kvSetSpread(key, value, collection, 3);
   if (!ok) {
     return { ok: false, verified: false, attempts: 0, ms: Date.now() - t0 };
   }
-  const { value: readBack, attempts } = await kvGetWithRetry(key, collection, opts);
+  const readBack = await kvGetQuorum(key, collection, 5);
   return {
     ok: true,
     verified: readBack !== null && readBack !== undefined,
-    attempts,
+    attempts: 1,
     ms: Date.now() - t0,
   };
 }

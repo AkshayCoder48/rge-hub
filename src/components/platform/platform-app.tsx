@@ -22,16 +22,14 @@ export function PlatformApp() {
   const [uploadType, setUploadType] = useState<'image' | 'clip' | 'xml'>('image');
   const [uploadVersion, setUploadVersion] = useState(0);
 
-  // Prefetch all resources on app load for instant navigation
+  // Prefetch everything in ONE request (public + mine) for fast startup
   const fetchAll = useResourceStore((s) => s.fetchAll);
-  const fetchMine = useResourceStore((s) => s.fetchMine);
 
   useEffect(() => {
     if (user) {
-      fetchAll();
-      fetchMine(user.userId);
+      fetchAll(user.userId);
     }
-  }, [user, fetchAll, fetchMine]);
+  }, [user, fetchAll]);
 
   const navigate = useCallback(
     (v: ViewKey) => {
@@ -133,9 +131,8 @@ export function PlatformApp() {
           onSuccess={() => {
             setUploadOpen(false);
             setUploadVersion(v => v + 1);
-            // Invalidate and re-fetch the store
-            useResourceStore.getState().invalidate();
-            if (user) fetchMine(user.userId);
+            // Invalidate and re-fetch the store (single request covers mine too)
+            useResourceStore.getState().invalidate(user?.userId);
             setView(uploadType === 'image' ? 'images' : uploadType === 'clip' ? 'clips' : 'xmls');
           }}
         />

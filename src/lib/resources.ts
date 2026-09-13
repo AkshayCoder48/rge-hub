@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvGet, kvDelete, kvExport, kvList, kvSetVerified, kvGetWithRetry } from './onyxbase';
+import { kvSet, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 // ============ Types ============
@@ -183,6 +183,48 @@ function collectionForType(type: ResourceType, xmlSource?: XmlSource) {
   return 'default';
 }
 
+// ============ Tombstones (deterministic deletes over a flaky backend) ============
+//
+// The backend flaps (same key: 200 then 404 seconds apart) and LISTs lag or
+// miss keys (proven by direct probe). Deletes are therefore made
+// DETERMINISTIC with immutable per-id tombstone keys `tomb:{id}` (plain
+// SETs, no read-modify-write). Every listing quorum-checks each id's tomb
+// via point-reads (never via tomb-LISTs — those flap too) — a deleted id
+// stays hidden even if its record lingers somewhere. No ghosts, no stale
+// counts, no delete errors.
+
+// NOTE: tombs + index live in the pre-registered `categories` collection
+// (otherwise unused). Ad-hoc collections (rge_*) proved non-durable:
+// keys vanished within ~25 min, while pre-registered collections persist.
+const TOMBSTONE_COLLECTION = ONYXBASE_COLLECTIONS.CATEGORIES;
+
+function tombKeyFor(id: string): string {
+  return `tomb:${id}`;
+}
+
+/**
+ * Hide an id from every listing instantly (deleted or ghost).
+ * Spread-write + quorum-confirm (2 tries): an unconfirmed tomb is worthless
+ * against flapping reads, so verify at least one copy is readable.
+ */
+export async function tombstoneAdd(id: string): Promise<void> {
+  try {
+    for (let i = 0; i < 2; i++) {
+      await kvSetSpread(tombKeyFor(id), { id, at: Date.now() }, TOMBSTONE_COLLECTION, 3);
+      const back = await kvGetQuorum(tombKeyFor(id), TOMBSTONE_COLLECTION, 6);
+      if (back) return;
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
+// NOTE (2026-09-13): an append-only membership index lived here. Removed —
+// the backend evaporates untouched KV within minutes (proven: keys in 3/3
+// collections 404 six minutes after write), so server-side indexes/tombs
+// are session-scoped mitigations at best. Membership = backend LIST union
+// (+10-min client overlay for instant UX). Durability needs a real store.
+
 export async function createResource(resource: Resource): Promise<boolean> {
   const collection = collectionForType(resource.type, resource.xmlSource);
   return kvSet(resource.id, resource, collection);
@@ -198,15 +240,51 @@ export async function createResourceVerified(
   opts: { retries?: number; baseDelayMs?: number } = {}
 ): Promise<{ ok: boolean; verified: boolean; attempts: number; ms: number }> {
   const collection = collectionForType(resource.type, resource.xmlSource);
-  return kvSetVerified(resource.id, resource, collection, {
-    retries: opts.retries ?? 6,
-    baseDelayMs: opts.baseDelayMs ?? 600,
-  });
+  const t0 = Date.now();
+  const maxAttempts = opts.retries ?? 3;
+  const baseDelay = opts.baseDelayMs ?? 500;
+  let attempts = 0;
+  let wrote = false;
+  for (let i = 0; i < maxAttempts; i++) {
+    attempts += 1;
+    // Spread write (copies across replicas) + quorum read-back (any replica).
+    wrote = await kvSetSpread(resource.id, resource, collection, 3);
+    if (wrote) {
+      const back = await kvGetQuorum<Resource>(resource.id, collection, 6);
+      if (back && back.id === resource.id) {
+        return { ok: true, verified: true, attempts, ms: Date.now() - t0 };
+      }
+    }
+    if (i < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, baseDelay * (i + 1)));
+    }
+  }
+  return { ok: wrote, verified: false, attempts, ms: Date.now() - t0 };
+}
+
+/**
+ * Deterministic delete over divergent replicas: tombstone (spread 3× —
+ * instant + durable hide) → record deletes (5× parallel, idempotent).
+ * Read-back confirmation is meaningless when replicas disagree; the
+ * tombstone is what guarantees the id never resurfaces. Never throws —
+ * ghosts count as deleted.
+ */
+export async function deleteResourceVerified(
+  id: string,
+  type: ResourceType,
+  xmlSource?: XmlSource
+): Promise<{ deleted: boolean; confirmed: boolean }> {
+  const collection = collectionForType(type, xmlSource);
+  await tombstoneAdd(id);
+  const deleted = await kvDeleteSpread(id, collection, 5);
+  return { deleted, confirmed: deleted };
 }
 
 /**
  * Lightweight read-back verification for a single record (PRD §49).
  * Used by the verify endpoint and by registration retries.
+ * Single quorum wave — no sleep-cascade (replicas diverge; retries must
+ * be parallel, not sequential).
  */
 export async function verifyResource(
   id: string,
@@ -214,44 +292,41 @@ export async function verifyResource(
   xmlSource?: XmlSource
 ): Promise<{ verified: boolean; resource: Resource | null; attempts: number }> {
   const collection = collectionForType(type, xmlSource);
-  const { value, attempts } = await kvGetWithRetry<Resource>(id, collection, {
-    retries: 4,
-    baseDelayMs: 600,
-  });
-  return { verified: value !== null, resource: value, attempts };
+  const value = await kvGetQuorum<Resource>(id, collection, 5);
+  return { verified: value !== null && !!value.id, resource: value, attempts: 1 };
 }
 
 /**
  * Locate a resource by id across all public collections (no type needed).
  * Used by public resource pages (/r/[id]) and the sitemap.
  * NEVER includes admin XMLs unless includeAdmin is true (server-side only).
+ * Parallel quorum reads — one wave, not sequential.
  */
 export async function getResourceAny(
   id: string,
   opts: { includeAdmin?: boolean } = {}
 ): Promise<Resource | null> {
-  const img = await getResource(id, 'image').catch(() => null);
-  if (img) return img;
-  const clip = await getResource(id, 'clip').catch(() => null);
-  if (clip) return clip;
-  const cx = await getResource(id, 'xml', 'community').catch(() => null);
-  if (cx) return cx;
+  const jobs: Promise<Resource | null>[] = [
+    getResource(id, 'image'),
+    getResource(id, 'clip'),
+    getResource(id, 'xml', 'community'),
+  ];
   if (opts.includeAdmin) {
-    const ax = await getResource(id, 'xml', 'admin').catch(() => null);
-    if (ax) return ax;
+    jobs.push(getResource(id, 'xml', 'admin'));
   }
-  return null;
+  const results = await Promise.all(jobs.map((j) => j.catch(() => null)));
+  return results.find((r) => r && r.id) || null;
 }
 
 export async function getResource(id: string, type: ResourceType, xmlSource?: XmlSource): Promise<Resource | null> {
   const collection = collectionForType(type, xmlSource);
-  return kvGet<Resource>(id, collection);
+  return kvGetQuorum<Resource>(id, collection, 3);
 }
 
 export async function updateResource(resource: Resource): Promise<boolean> {
   resource.updatedAt = new Date().toISOString();
   const collection = collectionForType(resource.type, resource.xmlSource);
-  return kvSet(resource.id, resource, collection);
+  return kvSetSpread(resource.id, resource, collection, 3);
 }
 
 export async function deleteResource(id: string, type: ResourceType, xmlSource?: XmlSource): Promise<boolean> {
@@ -262,20 +337,43 @@ export async function deleteResource(id: string, type: ResourceType, xmlSource?:
 export async function listResources(type: ResourceType, xmlSource?: XmlSource): Promise<Resource[]> {
   const collection = collectionForType(type, xmlSource);
 
-  // OnyxBase has eventual consistency issues — try list+get first, then export
-  // Try kvList + kvGet (individual key reads are more consistent)
-  const keys = await kvList(collection);
-  if (keys.length > 0) {
-    const results = await Promise.all(
-      keys.map(key => kvGet<Resource>(key, collection))
-    );
-    const filtered = results.filter((r): r is Resource => r !== null && r !== undefined && r.id);
-    if (filtered.length > 0) return filtered;
-  }
+  // WAVE 1 — membership: union of 2 parallel backend LISTs (a single
+  // LIST can miss keys). Fresh uploads appear here within seconds; the
+  // client's 10-min overlay covers the gap instantly. No sleeps anywhere.
+  const [listA, listB] = await Promise.all([
+    kvList(collection),
+    kvList(collection),
+  ]);
+  const ids = [...new Set([...listA, ...listB])];
+  if (ids.length === 0) return [];
 
-  // Fallback to kvExport
-  const all = await kvExport<Record<string, Resource>>(collection);
-  return Object.values(all).filter(Boolean) as Resource[];
+  // WAVE 2 — per id, in parallel chunks: quorum record read + quorum
+  // tombstone check. A tombstoned id is hidden even if its record lingers
+  // on some replica (tomb checks are quorum point-reads, never LISTs —
+  // tomb-LISTs proved just as divergent as everything else).
+  const CHUNK = 20;
+  const found: Resource[] = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const rows = await Promise.all(
+      chunk.map(async (id) => {
+        const [rec, tomb] = await Promise.all([
+          kvGetQuorum<Resource>(id, collection, 6),
+          // Tomb check: full 2-round quorum. Single-round checks proved
+          // flaky (parallel reads aren't independent), and a missed tomb =
+          // a resurrected ghost. Clean misses cost ~5s (backend 404s are
+          // slow) — the price of correct deletes on this backend.
+          kvGetQuorum(tombKeyFor(id), TOMBSTONE_COLLECTION, 6),
+        ]);
+        if (tomb) return null;
+        return rec && rec.id ? rec : null;
+      })
+    );
+    rows.forEach((r) => {
+      if (r) found.push(r);
+    });
+  }
+  return found;
 }
 
 /**

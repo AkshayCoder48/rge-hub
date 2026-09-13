@@ -1,22 +1,20 @@
 /**
  * GET /api/resources/all
- * Batch fetch ALL resources (images, clips, community XMLs) in a single request.
+ * Batch fetch ALL resources in a SINGLE request — public feed, typed slices,
+ * and (optionally) the caller's own resources including drafts.
  *
- * This is the key performance optimization — instead of the client making
- * separate requests per type, this endpoint fetches everything in parallel
- * server-side (using cached OnyxBase reads) and returns it in one response.
- *
- * Reliability fixes (PRD §13, §33, §46):
- * - Empty results are NEVER cached: OnyxBase is eventually consistent and can
- *   briefly return empty lists right after a write. Caching that emptiness is
- *   what made uploads "disappear" (and "Recently added" render empty).
- * - When the backing store returns empty, we retry twice before accepting it,
- *   so transient consistency gaps don't surface as an empty library.
+ * Speed design (this endpoint must answer in ~1-4s, not 15s):
+ * - Listings are index reads (1 KV read per collection + point gets),
+ *   all parallel, all hard-timeouted. No sleep-cascade retries anywhere.
+ * - `?owner=<userId>&mine=1` returns the owner's slice in the SAME response,
+ *   so the client makes ONE request instead of two sequential 10s+ fetches.
+ * - Empty results are NEVER cached; non-empty responses cache for 15s.
  *
  * Query params:
- *   - owner: userId (optional — filter to a specific owner)
+ *   - owner: userId (optional)
+ *   - mine=1: include `mine` (owner's resources incl. drafts) — requires owner
  *
- * Returns: { ok: true, images, clips, xmls, all }
+ * Returns: { ok: true, images, clips, xmls, all, mine? }
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { listResources, type Resource } from '@/lib/resources';
@@ -24,60 +22,80 @@ import { getCached, setCachedNonEmpty } from '@/lib/cache';
 
 export const dynamic = 'force-dynamic';
 
-async function fetchFiltered(owner: string | null) {
-  const [images, clips, xmls] = await Promise.all([
-    listResources('image'),
-    listResources('clip'),
-    listResources('xml', 'community'),
-  ]);
-
-  // Filter by owner if specified, otherwise filter to published (public)
-  const filterFn = owner
-    ? (r: Resource) => r.ownerId === owner
-    : (r: Resource) => r.published;
-
-  return {
-    images: images.filter(filterFn),
-    clips: clips.filter(filterFn),
-    xmls: xmls.filter(filterFn),
-  };
-}
-
 function toAll(f: { images: Resource[]; clips: Resource[]; xmls: Resource[] }) {
   return [...f.images, ...f.clips, ...f.xmls].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
 }
 
+interface AllPayload {
+  images: Resource[];
+  clips: Resource[];
+  xmls: Resource[];
+  all: Resource[];
+  mine?: Resource[];
+}
+
 export async function GET(request: NextRequest) {
+  const t0 = Date.now();
   try {
     const { searchParams } = new URL(request.url);
     const owner = searchParams.get('owner');
+    const withMine = searchParams.get('mine') === '1' && !!owner;
 
-    // Check cache first (near-instant if cached; empties are never cached)
-    const cacheKey = owner ? `resources:all:${owner}` : 'resources:all:public';
-    const cached = getCached<{ images: Resource[]; clips: Resource[]; xmls: Resource[] }>(cacheKey);
+    const cacheKey = withMine
+      ? `resources:all:mine:${owner}`
+      : owner
+        ? `resources:all:${owner}`
+        : 'resources:all:public';
+    const cached = getCached<AllPayload>(cacheKey);
     if (cached) {
       return NextResponse.json(
-        { ok: true, ...cached, all: toAll(cached), cached: true },
+        { ok: true, ...cached, cached: true, ms: Date.now() - t0 },
         { headers: { 'Cache-Control': 'no-store' } }
       );
     }
 
-    // Batch fetch all resource types in parallel, retrying transient empties.
-    let filtered = await fetchFiltered(owner);
-    let total = filtered.images.length + filtered.clips.length + filtered.xmls.length;
-    for (let attempt = 0; attempt < 2 && total === 0; attempt++) {
-      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
-      filtered = await fetchFiltered(owner);
-      total = filtered.images.length + filtered.clips.length + filtered.xmls.length;
+    // Single parallel fetch across collections (index reads inside).
+    const [images, clips, xmls] = await Promise.all([
+      listResources('image'),
+      listResources('clip'),
+      listResources('xml', 'community'),
+    ]);
+
+    const isPublic = (r: Resource) => r.published;
+    const isOwner = (r: Resource) => r.ownerId === owner;
+
+    let payload: AllPayload;
+    if (owner && !withMine) {
+      // Legacy owner-only shape.
+      const own = {
+        images: images.filter(isOwner),
+        clips: clips.filter(isOwner),
+        xmls: xmls.filter(isOwner),
+      };
+      payload = { ...own, all: toAll(own) };
+    } else {
+      const pub = {
+        images: images.filter(isPublic),
+        clips: clips.filter(isPublic),
+        xmls: xmls.filter(isPublic),
+      };
+      payload = { ...pub, all: toAll(pub) };
+      if (withMine) {
+        payload.mine = toAll({
+          images: images.filter(isOwner),
+          clips: clips.filter(isOwner),
+          xmls: xmls.filter(isOwner),
+        });
+      }
     }
 
-    // Cache only non-empty payloads (see setCachedNonEmpty docs).
-    const wasCached = setCachedNonEmpty(cacheKey, filtered, total === 0);
+    const total = payload.all.length + (payload.mine?.length ?? 0);
+    setCachedNonEmpty(cacheKey, payload, total === 0);
 
     return NextResponse.json(
-      { ok: true, ...filtered, all: toAll(filtered), cached: false, retriedEmpty: !wasCached && total === 0 },
+      { ok: true, ...payload, cached: false, ms: Date.now() - t0 },
       { headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (err) {

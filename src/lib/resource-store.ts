@@ -6,19 +6,13 @@ import type { Resource } from '@/lib/resources';
 /**
  * Client-side resource store with write-through overlay + stale-while-revalidate.
  *
- * Why this exists (PRD §13, §30, §31, §32, §33, §46):
- * OnyxBase is eventually consistent — a listing fetched right after a write
- * can come back empty or stale. Without protection, a refresh in that window
- * makes fresh uploads "disappear" and renders "Recently added" empty.
- *
- * Protections:
- * 1. `upsertLocal` — newly created resources are merged into every slice
- *    immediately and kept in a local overlay until the server confirms them.
- * 2. `fetchAll`/`fetchMine` merge the server payload with the local overlay
- *    (server wins on conflict; locals drop once confirmed or after 10 min).
- * 3. Stale-while-revalidate — if the server returns an empty list while the
- *    store already holds items, the old items are KEPT and a background
- *    refetch is scheduled instead of flashing an empty library.
+ * - `fetchAll(userId)` makes ONE request for public + own resources
+ *   (server partitions both slices, halving perceived latency).
+ * - `upsertLocal` merges fresh writes instantly (no waiting for refetch).
+ * - `removeById` drops deleted items instantly (no ghost counts).
+ * - `softRefresh` re-syncs in the background without skeleton flashes.
+ * - Stale-while-revalidate: an empty/error response never wipes a
+ *   populated store — old data is kept and retried in the background.
  */
 
 interface LocalOverlay {
@@ -45,9 +39,10 @@ interface ResourceStore {
   error: string | null;
 
   // Actions
-  fetchAll: () => Promise<void>;
+  fetchAll: (userId?: string) => Promise<void>;
   fetchMine: (userId: string) => Promise<void>;
-  invalidate: () => void;
+  invalidate: (userId?: string) => void;
+  softRefresh: (userId?: string) => void;
   upsertLocal: (resource: Resource) => void;
   removeById: (id: string) => void;
 
@@ -84,6 +79,7 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
   let overlays: LocalOverlay[] = [];
   let bgRetries = 0;
   let bgTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastUserId: string | undefined;
 
   const pruneOverlays = (serverIds: Set<string>) => {
     const now = Date.now();
@@ -96,7 +92,7 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
     bgRetries += 1;
     bgTimer = setTimeout(() => {
       bgTimer = null;
-      get().fetchAll();
+      get().fetchAll(lastUserId);
     }, BG_RETRY_DELAY_MS);
   };
 
@@ -111,12 +107,17 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
     stale: false,
     error: null,
 
-    fetchAll: async () => {
+    fetchAll: async (userId?: string) => {
       if (get().loading) return; // Prevent duplicate concurrent fetches
+      if (userId !== undefined) lastUserId = userId;
+      const uid = userId ?? lastUserId;
       set({ loading: true, error: null });
 
       try {
-        const res = await fetch('/api/resources/all', { cache: 'no-store' });
+        const url = uid
+          ? `/api/resources/all?owner=${encodeURIComponent(uid)}&mine=1`
+          : '/api/resources/all';
+        const res = await fetch(url, { cache: 'no-store' });
         const data = await res.json();
 
         if (data.ok) {
@@ -124,8 +125,7 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
           const prevAll = get().allResources;
 
           // Stale-while-revalidate: never replace a populated store with an
-          // empty server payload (transient consistency gap). Keep old data,
-          // flag it stale, and retry in the background (PRD §13).
+          // empty server payload. Keep old data, flag stale, retry behind.
           if (serverAll.length === 0 && prevAll.length > 0) {
             set({ loading: false, stale: true });
             scheduleBgRefetch();
@@ -136,7 +136,7 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
           const merged = mergeOverlay(serverAll, overlays);
           pruneOverlays(new Set(serverAll.map((r) => r.id)));
 
-          set({
+          const next: Partial<ResourceStore> = {
             allResources: merged,
             images: data.images ? mergeOverlay(data.images, overlays) : sliceByType(merged, 'image'),
             clips: data.clips ? mergeOverlay(data.clips, overlays) : sliceByType(merged, 'clip'),
@@ -145,7 +145,12 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
             loaded: true,
             stale: false,
             error: null,
-          });
+          };
+          if (Array.isArray(data.mine)) {
+            const mineOverlay = uid ? overlays.filter((o) => o.resource.ownerId === uid) : [];
+            next.myResources = mergeOverlay(data.mine, mineOverlay);
+          }
+          set(next);
         } else {
           // Error but we may have data — keep it, flag stale, retry behind.
           if (get().allResources.length > 0) {
@@ -166,32 +171,18 @@ export const useResourceStore = create<ResourceStore>((set, get) => {
     },
 
     fetchMine: async (userId: string) => {
-      try {
-        const res = await fetch(`/api/resources/all?owner=${encodeURIComponent(userId)}`, {
-          cache: 'no-store',
-        });
-        const data = await res.json();
-
-        if (data.ok) {
-          const serverMine: Resource[] = data.all || [];
-          const prevMine = get().myResources;
-          // Same stale-while-revalidate guard for the profile slice.
-          if (serverMine.length === 0 && prevMine.length > 0) {
-            return;
-          }
-          const mineOverlay = overlays.filter((o) => o.resource.ownerId === userId);
-          const merged = mergeOverlay(serverMine, mineOverlay);
-          pruneOverlays(new Set(serverMine.map((r) => r.id)));
-          set({ myResources: merged });
-        }
-      } catch {
-        // silent fail — public resources are still available
-      }
+      // Single-request path covers mine too — just (re)fetch everything.
+      await get().fetchAll(userId);
     },
 
-    invalidate: () => {
+    invalidate: (userId?: string) => {
       set({ loaded: false });
-      get().fetchAll();
+      get().fetchAll(userId);
+    },
+
+    softRefresh: (userId?: string) => {
+      // Background re-sync WITHOUT skeleton flashes (loaded stays true).
+      get().fetchAll(userId);
     },
 
     upsertLocal: (resource: Resource) => {

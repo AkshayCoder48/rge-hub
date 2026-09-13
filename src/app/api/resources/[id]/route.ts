@@ -19,7 +19,8 @@ import { getSession } from '@/lib/session';
 import {
   getResource,
   updateResource,
-  deleteResource,
+  deleteResourceVerified,
+  tombstoneAdd,
   type Resource,
   type ResourceType,
   type XmlSource,
@@ -248,7 +249,14 @@ export async function DELETE(
 
     const resource = await locateResource(id, type, xmlSource, session.isAdmin);
     if (!resource) {
-      return NextResponse.json({ ok: false, error: 'Resource not found' }, { status: 404 });
+      // IDEMPOTENT delete: already gone (or backend-rotted ghost) still
+      // returns success — tombstone it so no listing can ever resurface it.
+      // This is what previously surfaced as a confusing "delete error"
+      // for records the backend had already lost.
+      await tombstoneAdd(id);
+      const { invalidateResources } = await import('@/lib/cache');
+      invalidateResources();
+      return NextResponse.json({ ok: true, alreadyDeleted: true });
     }
 
     const isOwner = resource.ownerId === session.userId;
@@ -275,19 +283,16 @@ export async function DELETE(
       }
     }
 
-    const ok = await deleteResource(id, resource.type, resource.xmlSource);
-    if (!ok) {
-      return NextResponse.json(
-        { ok: false, error: 'Failed to delete resource record' },
-        { status: 500 }
-      );
-    }
+    // Deterministic delete: tombstone (spread write = instant + durable
+    // hide) + backend record deletes (parallel, idempotent). Always
+    // succeeds from the user's perspective — ghosts can no longer error.
+    const result = await deleteResourceVerified(id, resource.type, resource.xmlSource);
 
     // Invalidate server-side cache
     const { invalidateResources } = await import('@/lib/cache');
     invalidateResources();
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, confirmed: result.confirmed });
   } catch (err) {
     console.error('[resources/delete] error:', err);
     return NextResponse.json(

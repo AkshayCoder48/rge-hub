@@ -25,8 +25,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   const { user } = useAuth();
   const { toast } = useToast();
   const loaded = useResourceStore((s) => s.loaded);
-  const invalidate = useResourceStore((s) => s.invalidate);
-  const fetchMine = useResourceStore((s) => s.fetchMine);
+
 
   // Read typed slices from the store
   const images = useResourceStore((s) => s.images);
@@ -94,9 +93,9 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
       if (data.ok) {
         toast({ title: 'Resource deleted', description: r.title });
         setSelected(null);
-        // Refresh the shared store so all views stay in sync
-        invalidate();
-        if (user?.userId) fetchMine(user.userId);
+        // Instant UI sync everywhere (no ghost counts) + quiet background re-sync.
+        useResourceStore.getState().removeById(r.id);
+        useResourceStore.getState().softRefresh(user?.userId);
       } else {
         toast({ title: 'Delete failed', description: data.error || 'Unknown error', variant: 'destructive' });
       }

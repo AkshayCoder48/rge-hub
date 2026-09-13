@@ -51,8 +51,7 @@ export function ProfileView() {
   // Read myResources from the shared store (set by PlatformApp on mount)
   const myResources = useResourceStore((s) => s.myResources);
   const loaded = useResourceStore((s) => s.loaded);
-  const invalidate = useResourceStore((s) => s.invalidate);
-  const fetchMine = useResourceStore((s) => s.fetchMine);
+
 
   const fetchProfile = useCallback(async (username: string) => {
     setFetchState('loading');
@@ -121,9 +120,9 @@ export function ProfileView() {
         const data = await res.json();
         if (data.ok) {
           toast({ title: 'Resource deleted', description: r.title });
-          // Refresh the shared store so all views stay in sync
-          invalidate();
-          if (user?.userId) fetchMine(user.userId);
+          // Instant UI sync everywhere (no ghost counts) + quiet background re-sync.
+          useResourceStore.getState().removeById(r.id);
+          useResourceStore.getState().softRefresh(user?.userId);
         } else {
           toast({ title: 'Delete failed', description: data.error || 'Unknown error' });
         }
@@ -133,7 +132,7 @@ export function ProfileView() {
         setDeletingId(null);
       }
     },
-    [toast, invalidate, fetchMine, user?.userId]
+    [toast, user?.userId]
   );
 
   const handleEditSaved = useCallback(() => {
