@@ -14,7 +14,7 @@
  *
  * Every admin API enforces via requirePerm() — frontend gating is UI only.
  */
-import { kvSet, kvGet, kvDeleteIdempotent, kvExport } from './onyxbase';
+import { kvSet, kvGet, kvDeleteIdempotent, kvExport, stripExportPrefix } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 import { getSession, isAdminUser } from './session';
 import type { Profile } from './resources';
@@ -141,9 +141,10 @@ export async function requirePerm(perm: string): Promise<PermCheckOk | PermCheck
 export async function loadStaffRoleMap(): Promise<Map<string, 'admin' | 'moderator'>> {
   const map = new Map<string, 'admin' | 'moderator'>();
   const all = await kvExport(adminsCollection()).catch(() => ({}) as Record<string, unknown>);
-  for (const key of Object.keys(all)) {
+  for (const rawKey of Object.keys(all)) {
+    const key = stripExportPrefix(rawKey, adminsCollection());
     if (!key.startsWith('role:')) continue;
-    const rec = all[key] as StaffRecord | null;
+    const rec = all[rawKey] as StaffRecord | null;
     if (rec && (rec.role === 'admin' || rec.role === 'moderator') && rec.userId) {
       map.set(rec.userId, rec.role);
     }
@@ -186,22 +187,29 @@ export async function logActivity(
   target?: string,
   detail?: string
 ): Promise<void> {
-  try {
-    const ts = Date.now();
-    const id = `act:${ts}:${Math.random().toString(36).slice(2, 8)}`;
-    const entry: ActivityEntry = { id, actorId, actorName, action, target, detail, ts };
-    await kvSet(id, entry, activityCollection());
-  } catch {
-    // Audit is advisory — the action already succeeded.
+  // Audit is advisory (never fails the action), but worth one retry —
+  // a lost audit entry is a hole in the record.
+  for (let i = 0; i < 2; i++) {
+    try {
+      const ts = Date.now();
+      const id = `act:${ts}:${Math.random().toString(36).slice(2, 8)}`;
+      const entry: ActivityEntry = { id, actorId, actorName, action, target, detail, ts };
+      const ok = await kvSet(id, entry, activityCollection());
+      if (ok) return;
+    } catch {
+      // fall through to retry, then give up quietly
+    }
+    if (i === 0) await new Promise((r) => setTimeout(r, 4000));
   }
 }
 
 export async function listActivity(limit = 60): Promise<ActivityEntry[]> {
   const all = await kvExport(activityCollection()).catch(() => ({}) as Record<string, unknown>);
   const entries: ActivityEntry[] = [];
-  for (const key of Object.keys(all)) {
+  for (const rawKey of Object.keys(all)) {
+    const key = stripExportPrefix(rawKey, activityCollection());
     if (!key.startsWith('act:')) continue;
-    const e = all[key] as ActivityEntry | null;
+    const e = all[rawKey] as ActivityEntry | null;
     if (e && typeof e.ts === 'number' && e.action) entries.push(e);
   }
   entries.sort((a, b) => b.ts - a.ts);

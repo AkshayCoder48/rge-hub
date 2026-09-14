@@ -376,6 +376,14 @@ export async function kvList(collection: string = 'default'): Promise<string[]> 
  * Export all key-value pairs in a collection. SINGLE attempt, no sleeps —
  * sleep-cascades turned one slow backend into 15s+ responses. Never throws.
  */
+/**
+ * Export keys come back namespaced as `{collection}.{key}` — strip the
+ * prefix to get the stored key. Unknown shapes pass through untouched.
+ */
+export function stripExportPrefix(key: string, collection: string): string {
+  const prefix = `${collection}.`;
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
 export async function kvExport(collection: string = 'default'): Promise<Record<string, any>> {
   try {
     const res = await fetchWithTimeout(

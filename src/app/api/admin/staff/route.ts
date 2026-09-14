@@ -10,7 +10,7 @@
  * nobody can remove their own access, roles limited to admin|moderator.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { kvSet, kvDeleteIdempotent, kvExport, ONYXBASE_COLLECTIONS } from '@/lib/onyxbase';
+import { kvSet, kvDeleteIdempotent, kvExport, stripExportPrefix, ONYXBASE_COLLECTIONS } from '@/lib/onyxbase';
 import { getProfile, getProfileByUsername } from '@/lib/resources';
 import { isAdminUser } from '@/lib/session';
 import {
@@ -45,9 +45,10 @@ export async function GET() {
     updatedBy: string;
     updatedAt: string;
   }> = [];
-  for (const key of Object.keys(all)) {
+  for (const rawKey of Object.keys(all)) {
+    const key = stripExportPrefix(rawKey, ONYXBASE_COLLECTIONS.ADMINS);
     if (!key.startsWith('role:')) continue;
-    const rec = all[key] as StaffRecord | null;
+    const rec = all[rawKey] as StaffRecord | null;
     if (!rec || (rec.role !== 'admin' && rec.role !== 'moderator') || !rec.userId) continue;
     const profile = await getProfile(rec.userId).catch(() => null);
     rows.push({
@@ -171,7 +172,13 @@ export async function DELETE(request: NextRequest) {
   if (isRootTarget(profile)) {
     return NextResponse.json({ ok: false, error: 'The Root Admin cannot be modified here' }, { status: 403 });
   }
-  await kvDeleteIdempotent(`role:${userId}`, ONYXBASE_COLLECTIONS.ADMINS).catch(() => false);
+  const deleted = await kvDeleteIdempotent(`role:${userId}`, ONYXBASE_COLLECTIONS.ADMINS).catch(() => false);
+  if (!deleted) {
+    return NextResponse.json(
+      { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true },
+      { status: 503 }
+    );
+  }
   await logActivity(
     gate.userId,
     gate.displayName,

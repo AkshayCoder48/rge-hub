@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent } from './onyxbase';
+import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent, stripExportPrefix } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 // ============ Types ============
@@ -578,13 +578,14 @@ async function loadFollowGraph(): Promise<Map<string, Set<string>>> {
     set.add(b);
   };
   const all = await kvExport(followsCollection()).catch(() => ({}) as Record<string, unknown>);
-  for (const key of Object.keys(all)) {
+  for (const rawKey of Object.keys(all)) {
+    const key = stripExportPrefix(rawKey, followsCollection());
     if (key.startsWith('rel:')) {
       const parts = key.split(':');
       if (parts.length === 3) add(parts[1], parts[2]);
     } else if (key.startsWith('following:')) {
       const a = key.slice('following:'.length);
-      for (const b of cleanIds(all[key])) add(a, b);
+      for (const b of cleanIds(all[rawKey])) add(a, b);
     }
   }
   return graph;
@@ -664,13 +665,17 @@ export async function followUser(userId: string, targetId: string): Promise<Foll
   // ONE canonical write — no dual-write, no post-response flush to lose.
   const ok = await kvSetFollowRecord(relKey(userId, targetId), { t: Date.now() });
   if (!ok) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
-  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-  return {
-    ok: true,
-    following,
-    followingCount: following.length,
-    followersCount: followers.length,
-  };
+  // Response counts apply the confirmed edge in-memory: the backend's
+  // export view can lag the write by seconds, but the response must be
+  // truthful the moment the write is confirmed.
+  const graph = await loadFollowGraph();
+  let set = graph.get(userId);
+  if (!set) {
+    set = new Set();
+    graph.set(userId, set);
+  }
+  set.add(targetId);
+  return countsFromGraph(graph, userId, targetId);
 }
 
 export async function unfollowUser(userId: string, targetId: string): Promise<FollowMutationResult> {
@@ -692,11 +697,22 @@ export async function unfollowUser(userId: string, targetId: string): Promise<Fo
       legacy.filter((id) => id !== targetId)
     ).catch(() => false);
   }
-  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-  return {
-    ok: true,
-    following,
-    followingCount: following.length,
-    followersCount: followers.length,
-  };
+  // Same read-your-write guarantee as follow (delete propagation lags).
+  const graph = await loadFollowGraph();
+  graph.get(userId)?.delete(targetId);
+  return countsFromGraph(graph, userId, targetId);
+}
+
+// Shared response builder: fresh counts for both sides from one graph.
+function countsFromGraph(
+  graph: Map<string, Set<string>>,
+  userId: string,
+  targetId: string
+): FollowMutationResult {
+  const following = [...(graph.get(userId) ?? [])];
+  let followersCount = 0;
+  for (const targets of graph.values()) {
+    if (targets.has(targetId)) followersCount += 1;
+  }
+  return { ok: true, following, followingCount: following.length, followersCount };
 }
