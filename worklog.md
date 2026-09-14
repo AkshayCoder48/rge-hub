@@ -1437,3 +1437,48 @@ Stage Summary:
 - Better error messages with actionable hints
 - maxDuration set to 300s for Vercel Pro
 - Deployed live at https://speedramp-pro.vercel.app
+
+---
+
+## Task 24: Performance & reliability overhaul — OTP off OnyxBase, no-false-failure architecture
+
+**What changed (full commit 78105d9):**
+
+1. **OTP system rewritten** — OnyxBase removed from the OTP path (PRD §3).
+   - Hashed 6-digit codes (SHA-256 + salt, 10-min expiry, 5 attempts) stored
+     as temporary records in AI SENSE storage (aisenseapi.com/services/v1/storage).
+   - Client receives an unguessable `otpRef` (storage UUID); verify reads by
+     ref; wrong codes rotate the record (new ref rides the error response).
+   - Email: direct MCPEmails (MCPEMAILS_API_KEY env, server-side only,
+     Idempotency-Key header) with the OnyxBase credential as fallback.
+   - Rate limits: 1/60s per email+purpose, 5/h per email, 12/h per IP.
+2. **Password reset FIXED** — verified reset OTPs issue signed 10-min reset
+   tokens (HMAC); the old consumed-record check could never pass (dead path).
+3. **No-false-failure architecture** — fast response contract
+   ({success,data,requestId,durationMs} / 202 processing+operationId /
+   {success,error:{code}}); GET /api/operations/[id] reconciliation;
+   resources/create 202 now ok:true + operationId + background verify
+   (was ok:false → client retried into duplicates).
+4. **Fast listings** — listResourcesFast: 1 export + cached tombstone export
+   per collection (20s cache) replaces 2 LISTs + 12N quorum point-reads.
+   Warm /api/resources/all measured 0.28s (was minutes at scale).
+5. **Follows** — graph cached 30s, mutated in place on confirmed writes
+   (read-your-write); follows/list resolves profiles in parallel (concurrency
+   8, 30s profile cache) with server-side pagination (?page=&limit=).
+6. **Admin stats cached 60s** (cached aggregates, parallel queries).
+7. **Frontend request manager** (src/lib/api-client.ts) — requestId +
+   Idempotency-Key + bounded timeouts (15–25s) + 202/operationId
+   reconciliation; auth screen otpRef flow with rate-limit countdown;
+   upload create-step operation polling; bounded auth/me backoff.
+8. **Observability** — x-request-id + durationMs on every new-contract
+   response; structured JSON logs with redaction; GET /api/health with
+   per-dependency status. Docs: .env.example, HANDOFF.md, README section.
+
+**Production verification (rge-hub.vercel.app):**
+- OTP send → 4.7s including real email delivery (MCPEmails chain).
+- Rate limit 429 in ms with retryAfterSecs countdown in the UI.
+- Wrong-code verify 425ms with rotated ref + attempts remaining in UI.
+- Browser E2E: Welcome → email → Send Code → Enter code screen in seconds,
+  resend countdown live, "Invalid code. 3 attempts remaining." toast, no
+  console errors.
+- resources/all: 6.3s cold → 0.28s warm; community feed 0.95s.
