@@ -14,6 +14,7 @@ import { notFound } from 'next/navigation';
 import { getResourceAny, getProfileByUsername, type Resource } from '@/lib/resources';
 import { CopyLinkButton } from './copy-link';
 import { SafeImage } from './safe-image';
+import { Logo } from '@/components/logo';
 
 export const dynamic = 'force-dynamic';
 
@@ -138,7 +139,7 @@ export default async function ResourcePage({ params }: { params: Promise<{ id: s
       <header className="relative z-10 border-b border-white/5 bg-black/60 backdrop-blur-xl">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
-            <div className="w-5 h-5 bg-[#ef233c] rounded-sm rotate-45" />
+            <Logo size={22} />
             <span className="font-manrope font-bold text-base text-white">RGE Hub</span>
           </Link>
           <Link

@@ -17,12 +17,11 @@ const manrope = Manrope({
 
 export const metadata: Metadata = {
   title: "RGE Hub — Editing Platform",
-  description: "The editing-focused community & resource platform for Indian railway editors. Images, clips, XMLs, speed ramp studio, and community — powered by OnyxBase.",
-  keywords: ["RGE Hub", "Indian railways", "editing", "speed ramp", "OnyxBase", "clips", "XMLs"],
+  description: "The editing-focused community & resource platform for Indian railway editors. Images, clips, files, speed ramp studio, and community — powered by OnyxBase.",
+  keywords: ["RGE Hub", "Indian railways", "editing", "speed ramp", "OnyxBase", "clips", "files"],
   authors: [{ name: "RGE Hub" }],
-  icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
-  },
+  // Favicon + app icons come from the file convention:
+  // src/app/favicon.ico, src/app/icon.png, src/app/apple-icon.png.
 };
 
 export default function RootLayout({

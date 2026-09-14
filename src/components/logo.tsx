@@ -8,34 +8,21 @@ interface LogoProps {
 }
 
 /**
- * RGE Hub Logo — a red diamond with play triangle, representing video editing + railways.
+ * RGE Hub Logo — symbol-only mark (zero text): a red ramp-play emblem on
+ * a black tile. One asset (public/logo.png) used at every size; the PNG
+ * already carries transparent rounded corners.
  */
 export function Logo({ size = 24, className = '' }: LogoProps) {
   return (
-    <svg
+    <img
+      src="/logo.png"
+      alt="RGE Hub"
       width={size}
       height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
+      draggable={false}
       className={className}
-    >
-      {/* Outer diamond */}
-      <rect
-        x="6"
-        y="6"
-        width="20"
-        height="20"
-        rx="4"
-        transform="rotate(45 16 16)"
-        fill="#ef233c"
-      />
-      {/* Inner play triangle */}
-      <path
-        d="M13 11.5L21 16L13 20.5V11.5Z"
-        fill="white"
-      />
-    </svg>
+      style={{ width: size, height: size }}
+    />
   );
 }
 

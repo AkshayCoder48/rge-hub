@@ -14,6 +14,7 @@ import { AdminView } from '@/components/platform/views/admin-view';
 import { SearchView } from '@/components/platform/views/search-view';
 import { UserView } from '@/components/platform/views/user-view';
 import { UploadModal } from '@/components/platform/upload-modal';
+import { Logo } from '@/components/logo';
 
 export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin' | 'search' | 'user';
 
@@ -111,7 +112,7 @@ export function PlatformApp() {
         {/* Top bar (mobile) */}
         <div className="lg:hidden sticky top-0 z-40 bg-black/60 backdrop-blur-xl border-b border-white/5 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-5 h-5 bg-[#ef233c] rounded-sm rotate-45" />
+            <Logo size={22} />
             <span className="font-manrope font-bold text-base text-white">RGE Hub</span>
           </div>
           <span className="text-xs font-manrope text-zinc-500 uppercase tracking-wider">
