@@ -833,7 +833,25 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
 
         // ---- Phase 2: registration ----
         updateItem(uid, { status: 'persisting' });
-        const reg = await registerResource(getItem(uid)!, transfer);
+        let reg: { resource: Resource; verified: boolean; pendingVerification: boolean };
+        try {
+          reg = await registerResource(getItem(uid)!, transfer);
+        } catch (e) {
+          // ONE automatic re-save: the file is already stored (phase 1
+          // done), and a failed save almost always means "backend pacing
+          // window was armed" — 14s later the window is clear and the
+          // same clientId dedupes, so this retry is free and safe. Any
+          // other error (auth/timeout/cancel) throws straight through.
+          const rerr = e as { code?: UploadErrorCode };
+          if (rerr.code === 'DATABASE_REGISTRATION_ERROR' && !stopRef.current) {
+            await new Promise((r) => setTimeout(r, 14000));
+            if (stopRef.current) return;
+            updateItem(uid, { status: 'persisting' });
+            reg = await registerResource(getItem(uid)!, transfer);
+          } else {
+            throw e;
+          }
+        }
         if (stopRef.current) return;
 
         // ---- Phase 3: verification ----

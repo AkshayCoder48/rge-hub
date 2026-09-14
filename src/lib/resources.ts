@@ -257,21 +257,40 @@ export async function createResourceVerified(
   const collection = collectionForType(resource.type, resource.xmlSource);
   const t0 = Date.now();
   const maxAttempts = opts.retries ?? 3;
-  const baseDelay = opts.baseDelayMs ?? 500;
+  // PACING-ESCAPE delays: the backend pins every write to Telegram and
+  // paces pins (~12-15s window). Phase-1 (last chunk / thumbnail) lands
+  // seconds before phase-2, so a failed write means "window armed" —
+  // retrying in 500ms/1s burns EVERY attempt inside the SAME window
+  // (proven live: chunked uploads always failed registration). Retries
+  // sleep PAST the window instead (backend honor-cap is 12s, so 13s
+  // always escapes even without reading the server's retryAfter).
+  const retryDelayMs = opts.baseDelayMs ?? 13000;
+  // DEADLINE GATE: the route dies at 60s (Vercel). Never START a retry
+  // past 20s elapsed — worst case stays ~45s + route overhead, and the
+  // client's registration retry (fresh 60s budget, same clientId) owns
+  // anything slower.
+  const RETRY_DEADLINE_MS = 20000;
   let attempts = 0;
   let wrote = false;
   for (let i = 0; i < maxAttempts; i++) {
+    if (i > 0 && Date.now() - t0 > RETRY_DEADLINE_MS) break;
     attempts += 1;
     // Spread write (copies across replicas) + quorum read-back (any replica).
     wrote = await kvSetSpread(resource.id, resource, collection, 3);
     if (wrote) {
-      const back = await kvGetQuorum<Resource>(resource.id, collection, 6);
+      // Single-round read-back: first-hit-wins usually answers <1s; the
+      // 6-read double round was for the backend's spray era (long gone).
+      const back = await kvGetQuorum<Resource>(resource.id, collection, 3);
       if (back && back.id === resource.id) {
         return { ok: true, verified: true, attempts, ms: Date.now() - t0 };
       }
+      // Written durably but not yet readable (replica lag) — do NOT
+      // rewrite (waste + re-arms pacing). The client's verify poll
+      // confirms it via the 202 path.
+      return { ok: true, verified: false, attempts, ms: Date.now() - t0 };
     }
     if (i < maxAttempts - 1) {
-      await new Promise((r) => setTimeout(r, baseDelay * (i + 1)));
+      await new Promise((r) => setTimeout(r, retryDelayMs));
     }
   }
   return { ok: wrote, verified: false, attempts, ms: Date.now() - t0 };

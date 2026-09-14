@@ -29,7 +29,18 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
     >
       {/* Preview — supports full-size images with any aspect ratio */}
       <div className="relative bg-black/40 overflow-hidden" style={{ minHeight: '120px', maxHeight: '280px' }}>
-        {resource.thumbnailUrl || resource.downloadUrl ? (
+        {resource.type === 'clip' && !resource.thumbnailUrl && resource.downloadUrl ? (
+          // Clips without a cover: a <video> tile shows the first frame.
+          // (An <img> pointed at mp4 bytes renders as a corrupted tile.)
+          <video
+            src={resource.downloadUrl.includes('#') ? resource.downloadUrl : `${resource.downloadUrl}#t=0.1`}
+            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-500 ease-[cubic-bezier(0.23,1,0.32,1)]"
+            style={{ maxHeight: '280px' }}
+            preload="metadata"
+            muted
+            playsInline
+          />
+        ) : resource.thumbnailUrl || (resource.type === 'image' && resource.downloadUrl) ? (
           <img
             src={resource.thumbnailUrl || resource.downloadUrl}
             alt={resource.title}
