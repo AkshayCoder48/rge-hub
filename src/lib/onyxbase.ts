@@ -238,10 +238,13 @@ export async function kvDelete(key: string, collection: string = 'default'): Pro
       },
       10000
     );
-    if (!res.ok) return false;
+    if (!res.ok) { recordWrite(res.status < 500 && res.status !== 429); return false; }
     const data = await res.json().catch(() => null);
-    return data?.ok === true;
+    const _delOk = data?.ok === true;
+    recordWrite(_delOk);
+    return _delOk;
   } catch {
+    recordWrite(false);
     return false;
   }
 }
@@ -260,11 +263,14 @@ export async function kvDeleteIdempotent(key: string, collection: string = 'defa
       },
       10000
     );
-    if (res.status === 404) return true;
-    if (!res.ok) return false;
+    if (res.status === 404) { recordWrite(true); return true; }
+    if (!res.ok) { recordWrite(res.status < 500 && res.status !== 429); return false; }
     const data = await res.json().catch(() => null);
-    return data?.ok === true;
+    const _delOk2 = data?.ok === true;
+    recordWrite(_delOk2);
+    return _delOk2;
   } catch {
+    recordWrite(false);
     return false;
   }
 }
@@ -544,8 +550,10 @@ export async function deleteFile(fileId: string): Promise<boolean> {
       },
       15000
     );
+    recordWrite(res.ok || res.status === 404);
     return res.ok;
   } catch {
+    recordWrite(false);
     return false;
   }
 }
@@ -632,8 +640,9 @@ export async function registerByEmailPassword(
       40000
     );
     const data = await res.json().catch(() => null);
-    if (!data) return { ok: false, error: 'Registration service gave an empty response — please retry.' };
+    if (!data) { recordWrite(false); return { ok: false, error: 'Registration service gave an empty response — please retry.' }; }
     if (data.ok) {
+      recordWrite(true);
       return {
         ok: true,
         userId: data.userId,
@@ -642,9 +651,12 @@ export async function registerByEmailPassword(
         email: data.email,
       };
     }
-    return { ok: false, error: data.error || 'Registration failed' };
+    const _regErr: string = data.error || 'Registration failed';
+    recordWrite(backendAliveAfter(false, _regErr));
+    return { ok: false, error: _regErr };
   } catch (err) {
     const msg = (err as Error).message || '';
+    recordWrite(false);
     if ((err as Error).name === 'AbortError' || /abort/i.test(msg)) {
       return { ok: false, error: 'Auth service timed out — please retry.' };
     }
@@ -675,8 +687,9 @@ export async function loginByEmailPassword(
       40000
     );
     const data = await res.json().catch(() => null);
-    if (!data) return { ok: false, error: 'Login service gave an empty response — please retry.' };
+    if (!data) { recordWrite(false); return { ok: false, error: 'Login service gave an empty response — please retry.' }; }
     if (data.ok) {
+      recordWrite(true);
       return {
         ok: true,
         userId: data.userId,
@@ -686,9 +699,12 @@ export async function loginByEmailPassword(
         plan: data.plan,
       };
     }
-    return { ok: false, error: data.error || 'Login failed' };
+    const _logErr: string = data.error || 'Login failed';
+    recordWrite(backendAliveAfter(false, _logErr));
+    return { ok: false, error: _logErr };
   } catch (err) {
     const msg = (err as Error).message || '';
+    recordWrite(false);
     if ((err as Error).name === 'AbortError' || /abort/i.test(msg)) {
       return { ok: false, error: 'Auth service timed out — please retry.' };
     }
@@ -772,6 +788,14 @@ const BREAKER_WINDOW_MS = 60000;
 const BREAKER_MIN_SAMPLES = 3;
 const BREAKER_FAIL_RATIO = 0.6;
 
+// Classify a backend mutation response for the write breaker. Transport
+// failures and saturation errors (Telegram backup/flood/sync/timeout) count
+// as failures; crisp client errors ("incorrect password", "already taken")
+// prove the backend is ALIVE and count as success.
+function backendAliveAfter(dataOk: boolean, errMsg: string): boolean {
+  if (dataOk) return true;
+  return !/backup|flood|sync[ .]|timed out|timeout|busy|empty response|failed|temporar|unavailable|network|retry/i.test(errMsg);
+}
 function recordWrite(ok: boolean): void {
   writeSamples.push({ at: Date.now(), ok });
   if (writeSamples.length > 20) writeSamples.splice(0, writeSamples.length - 20);
