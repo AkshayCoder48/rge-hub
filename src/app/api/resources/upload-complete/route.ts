@@ -70,10 +70,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const stored = await storeResourceFile(assembled.bytes, name, mime, {
-      kind: kindStr,
-      label: typeof label === 'string' ? label : undefined,
-    });
+    // ROUTE BUDGET: same 48s race as /api/resources/upload — a drowning
+    // backend yields a retryable 503, never a 60s 504.
+    const stored = await Promise.race([
+      storeResourceFile(assembled.bytes, name, mime, {
+        kind: kindStr,
+        label: typeof label === 'string' ? label : undefined,
+      }),
+      new Promise<null>((r) => setTimeout(() => r(null), 48000)),
+    ]);
+    if (!stored) {
+      return fail('UPLOAD_THROTTLED', 'Storage is busy — please retry shortly.', 503, {
+        retryAfter: 25,
+      });
+    }
 
     if (!stored.ok) {
       if (stored.code === 'UPLOAD_THROTTLED') {

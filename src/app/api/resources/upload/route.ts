@@ -131,10 +131,22 @@ export async function POST(request: NextRequest) {
     }
 
     const bytes = Buffer.from(await file.arrayBuffer());
-    const stored = await storeResourceFile(bytes, fileName, mimeType, {
-      kind: kindStr,
-      label: labelStr,
-    });
+    // ROUTE BUDGET: Vercel kills this route at 60s (504, zero information).
+    // Race the pipeline so a drowning backend yields a retryable 503
+    // instead — the client auto-retries and the user never stares at a
+    // progress bar stuck at 100%.
+    const stored = await Promise.race([
+      storeResourceFile(bytes, fileName, mimeType, {
+        kind: kindStr,
+        label: labelStr,
+      }),
+      new Promise<null>((r) => setTimeout(() => r(null), 48000)),
+    ]);
+    if (!stored) {
+      return fail('UPLOAD_THROTTLED', 'Storage is busy — please retry shortly.', 503, {
+        retryAfter: 25,
+      });
+    }
 
     if (!stored.ok) {
       if (stored.code === 'UPLOAD_THROTTLED') {
@@ -172,11 +184,14 @@ export async function POST(request: NextRequest) {
         const thumbMime =
           thumbnail instanceof File && thumbnail.type ? thumbnail.type : 'image/jpeg';
         const thumbBytes = Buffer.from(await thumbnail.arrayBuffer());
-        const thumbStored = await storeResourceFile(thumbBytes, thumbName, thumbMime, {
-          kind: 'image',
-          label: `${labelStr || fileName}-thumb`,
-        });
-        if (thumbStored.ok && thumbStored.fileId) {
+        const thumbStored = await Promise.race([
+          storeResourceFile(thumbBytes, thumbName, thumbMime, {
+            kind: 'image',
+            label: `${labelStr || fileName}-thumb`,
+          }),
+          new Promise<null>((r) => setTimeout(() => r(null), 10000)),
+        ]);
+        if (thumbStored && thumbStored.ok && thumbStored.fileId) {
           response.thumbnailFileId = thumbStored.fileId;
           response.thumbnailUrl = thumbStored.url;
         }

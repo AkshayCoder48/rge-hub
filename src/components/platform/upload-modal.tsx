@@ -617,6 +617,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                 code === 'UPLOAD_THROTTLED' && retryAfter
                   ? `Storage is busy. Retry in ~${retryAfter}s.`
                   : detail,
+              retryAfter: typeof retryAfter === 'number' ? retryAfter : undefined,
             });
           }
         };
@@ -635,6 +636,9 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         formData.append('kind', type);
         formData.append('label', `${type}_${item.clientId}`);
         xhr.open('POST', '/api/resources/upload');
+        // Hard client ceiling: the server answers <=55s (48s race +
+        // overhead) or never — never stare at 100% forever.
+        xhr.timeout = 58000;
         xhr.send(formData);
       });
     },
@@ -746,7 +750,11 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         formData.append('file', thumb);
         formData.append('kind', 'image');
         formData.append('label', `thumb_${item.clientId}`);
-        const res = await fetch('/api/resources/upload', { method: 'POST', body: formData });
+        const res = await fetch('/api/resources/upload', {
+          method: 'POST',
+          body: formData,
+          signal: AbortSignal.timeout(58000),
+        });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
           throw { code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR', error: (data.error as string) || 'Thumbnail upload failed.' };
@@ -768,6 +776,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
           label: `thumb_${item.clientId}`,
           kind: 'image',
         }),
+        signal: AbortSignal.timeout(58000),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
@@ -798,11 +807,18 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
 
       try {
         // ---- Phase 0: cover thumbnail (optional; skipped on registration-only retry) ----
+        // BEST-EFFORT: a cover must never kill the upload — continue
+        // without one if the thumbnail leg fails.
         const thumbCheck = getItem(uid)!;
         if (!opts.skipTransfer && thumbCheck.thumbnailFile && !thumbCheck.thumbnailFileId) {
-          const t = await uploadThumbnail(thumbCheck);
-          if (stopRef.current) return;
-          updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
+          try {
+            const t = await uploadThumbnail(thumbCheck);
+            if (stopRef.current) return;
+            updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
+          } catch (e) {
+            if (stopRef.current) return;
+            console.warn('[upload] cover thumbnail failed (non-fatal, continuing):', e);
+          }
         }
 
         // ---- Phase 1: transfer (skipped on registration-only retry) ----
@@ -824,7 +840,23 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
             error: null,
             progress: { loaded: 0, total: current.file.size, pct: 0, speedBps: null, etaSecs: null },
           });
-          const t = await uploadTransfer(current);
+          // ONE automatic re-upload on throttling: the server asked us
+          // to come back after N seconds — honor it once, then surface.
+          let t: TransferResult;
+          try {
+            t = await uploadTransfer(current);
+          } catch (e) {
+            const terr = e as { code?: UploadErrorCode; retryAfter?: number };
+            if (terr.code === 'UPLOAD_THROTTLED' && !stopRef.current) {
+              const waitSecs = Math.min(Math.max(terr.retryAfter ?? 25, 5), 35);
+              await new Promise((r) => setTimeout(r, waitSecs * 1000));
+              if (stopRef.current) return;
+              updateItem(uid, { status: 'uploading' });
+              t = await uploadTransfer(getItem(uid)!);
+            } else {
+              throw e;
+            }
+          }
           transfer = t;
           timings = t.timings;
           if (stopRef.current) return;

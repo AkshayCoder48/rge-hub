@@ -50,7 +50,10 @@ export function sha256Hex(bytes: Buffer): string {
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
-async function setWithRetry(key: string, value: string, attempts = 3): Promise<boolean> {
+// SINGLE attempt (was 3): every shard write pins the ONE shared index
+// message — parallel shards × retries raced it into Telegram 429s and a
+// minutes-long throttle storm (proven live). The route owns the retry now.
+async function setWithRetry(key: string, value: string, attempts = 1): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
     try {
       const ok = await kvSet(key, value, BYTES_COLLECTION);
@@ -80,19 +83,26 @@ export async function storeImageBytes(
     const b64 = bytes.toString('base64');
     const totalShards = Math.max(1, Math.ceil(b64.length / SHARD_CHARS));
     const sha256 = sha256Hex(bytes);
+    const t0 = Date.now();
 
-    // Shard writes are independent — run them in parallel for speed.
-    const CONCURRENCY = 4;
-    for (let start = 0; start < totalShards; start += CONCURRENCY) {
-      const batch: Promise<boolean>[] = [];
-      for (let i = start; i < Math.min(start + CONCURRENCY, totalShards); i++) {
-        const slice = b64.slice(i * SHARD_CHARS, (i + 1) * SHARD_CHARS);
-        batch.push(setWithRetry(shardKey(fileKey, i), slice));
+    // SERIAL shards, hard deadline: every shard pins the one shared index
+    // message, so parallel shards raced it into Telegram 429s (proven: a
+    // single image upload armed a minutes-long throttle storm). The byte
+    // store is best-effort — if shards can't land inside the budget the
+    // upload still succeeds via file URL + mirror.
+    const BYTE_STORE_DEADLINE_MS = 15000;
+    for (let i = 0; i < totalShards; i++) {
+      if (Date.now() - t0 > BYTE_STORE_DEADLINE_MS) {
+        return { ok: false, error: 'byte-store budget exceeded' };
       }
-      const results = await Promise.all(batch);
-      if (results.some((r) => !r)) {
+      const slice = b64.slice(i * SHARD_CHARS, (i + 1) * SHARD_CHARS);
+      const ok = await setWithRetry(shardKey(fileKey, i), slice);
+      if (!ok) {
         return { ok: false, error: 'shard write failed' };
       }
+    }
+    if (Date.now() - t0 > BYTE_STORE_DEADLINE_MS) {
+      return { ok: false, error: 'byte-store budget exceeded' };
     }
 
     const manifest: BytesManifest = {

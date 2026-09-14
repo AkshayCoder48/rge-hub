@@ -67,16 +67,21 @@ export async function storeResourceFile(
   const storageUrl = uploaded.file.url || getFileUrl(fileId);
 
   // Step 2 — durable lossless byte store for images (best-effort).
+  // TIME-BOXED: a drowning backend must never stall the upload — the file
+  // URL + mirror already carry the image.
   let bytesStored = false;
   let bytesShards = 0;
   if (kind === 'image' && bytes.length <= MAX_IMAGE_BYTES && bytes.length > 0) {
     try {
-      const stored = await storeImageBytes(fileId, bytes, mimeType);
-      if (stored.ok) {
+      const stored = await Promise.race([
+        storeImageBytes(fileId, bytes, mimeType),
+        new Promise<null>((r) => setTimeout(() => r(null), 20000)),
+      ]);
+      if (stored && stored.ok) {
         bytesStored = true;
         bytesShards = stored.shards;
       } else {
-        console.warn('[file-pipeline] byte store skipped:', stored.error);
+        console.warn('[file-pipeline] byte store skipped:', stored ? stored.error : 'timeout');
       }
     } catch (err) {
       console.warn('[file-pipeline] byte store failed (non-fatal):', err);
@@ -88,8 +93,12 @@ export async function storeResourceFile(
   let mirrorHost: string | undefined;
   if (kind === 'image' || kind === 'clip') {
     try {
-      const mirror = await mirrorAsset(bytes, fileName, mimeType, kind);
-      if (mirror.ok && mirror.url) {
+      // TIME-BOXED: three sequential external hosts must never stall us.
+      const mirror = await Promise.race([
+        mirrorAsset(bytes, fileName, mimeType, kind),
+        new Promise<null>((r) => setTimeout(() => r(null), 15000)),
+      ]);
+      if (mirror && mirror.ok && mirror.url) {
         mirrorUrl = mirror.url;
         mirrorHost = mirror.host;
       }
