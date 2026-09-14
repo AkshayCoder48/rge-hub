@@ -9,6 +9,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyOtp, type OtpPurpose } from '@/lib/otp';
 
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     const { email, code, purpose } = await request.json();

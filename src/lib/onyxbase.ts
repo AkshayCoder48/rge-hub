@@ -377,34 +377,42 @@ export async function kvExport(collection: string = 'default'): Promise<Record<s
  * Search keys in a collection (substring match).
  */
 export async function kvSearch(collection: string, query: string): Promise<OnyxRecord[]> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/api/v1/rpc/search`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
-      'Content-Type': 'application/json',
+  const res = await fetchWithTimeout(
+    `${ONYXBASE_BASE_URL}/api/v1/rpc/search`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ collection, query }),
     },
-    body: JSON.stringify({ collection, query }),
-  });
+    15000
+  );
   if (!res.ok) return [];
-  const data = await res.json();
-  return data.results || [];
+  const data = await res.json().catch(() => null);
+  return data?.results || [];
 }
 
 /**
  * Count records in a collection.
  */
 export async function kvCount(collection: string): Promise<number> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/api/v1/rpc/count_records`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
-      'Content-Type': 'application/json',
+  const res = await fetchWithTimeout(
+    `${ONYXBASE_BASE_URL}/api/v1/rpc/count_records`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ collection }),
     },
-    body: JSON.stringify({ collection }),
-  });
+    15000
+  );
   if (!res.ok) return 0;
-  const data = await res.json();
-  return data.count || 0;
+  const data = await res.json().catch(() => null);
+  return data?.count || 0;
 }
 
 // ============ Collections ============
@@ -556,21 +564,32 @@ export async function sendEmail(
     };
     if (htmlBody) payload.htmlBody = htmlBody;
 
-    const res = await fetch(`${ONYXBASE_BASE_URL}/api/email/send`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
-        'Content-Type': 'application/json',
+    // BOUNDED: the email backend grinds under flood — fail fast with a clear
+    // error instead of hanging the OTP request ("eternal OTP" into a 504).
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/api/email/send`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ONYXBASE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
+      25000
+    );
+    const data = await res.json().catch(() => null);
+    if (!data) return { ok: false, error: 'Email service gave an empty response — please retry.' };
     if (data.ok || data.success) {
       return { ok: true, requestId: data.request_id };
     }
     return { ok: false, error: data.error || 'Email send failed' };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const msg = (err as Error).message || '';
+    if ((err as Error).name === 'AbortError' || /abort/i.test(msg)) {
+      return { ok: false, error: 'Auth service timed out — please retry.' };
+    }
+    return { ok: false, error: msg || 'Request failed — please retry.' };
   }
 }
 
@@ -589,12 +608,18 @@ export async function registerByEmailPassword(
   password: string
 ): Promise<{ ok: boolean; userId?: string; apiKey?: string; name?: string; email?: string; error?: string }> {
   try {
-    const res = await fetch(`${ONYXBASE_BASE_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password }),
-    });
-    const data = await res.json();
+    // BOUNDED: fail fast under flood instead of hanging signup ("eternal").
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/api/auth/register`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password }),
+      },
+      40000
+    );
+    const data = await res.json().catch(() => null);
+    if (!data) return { ok: false, error: 'Registration service gave an empty response — please retry.' };
     if (data.ok) {
       return {
         ok: true,
@@ -606,7 +631,11 @@ export async function registerByEmailPassword(
     }
     return { ok: false, error: data.error || 'Registration failed' };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const msg = (err as Error).message || '';
+    if ((err as Error).name === 'AbortError' || /abort/i.test(msg)) {
+      return { ok: false, error: 'Auth service timed out — please retry.' };
+    }
+    return { ok: false, error: msg || 'Request failed — please retry.' };
   }
 }
 
@@ -622,12 +651,18 @@ export async function loginByEmailPassword(
   password: string
 ): Promise<{ ok: boolean; userId?: string; apiKey?: string; name?: string; email?: string; plan?: string; error?: string }> {
   try {
-    const res = await fetch(`${ONYXBASE_BASE_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = await res.json();
+    // BOUNDED: fail fast under flood instead of hanging login ("eternal").
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/api/auth/login`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      },
+      40000
+    );
+    const data = await res.json().catch(() => null);
+    if (!data) return { ok: false, error: 'Login service gave an empty response — please retry.' };
     if (data.ok) {
       return {
         ok: true,
@@ -640,7 +675,11 @@ export async function loginByEmailPassword(
     }
     return { ok: false, error: data.error || 'Login failed' };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    const msg = (err as Error).message || '';
+    if ((err as Error).name === 'AbortError' || /abort/i.test(msg)) {
+      return { ok: false, error: 'Auth service timed out — please retry.' };
+    }
+    return { ok: false, error: msg || 'Request failed — please retry.' };
   }
 }
 
@@ -650,13 +689,18 @@ export async function loginByEmailPassword(
  */
 export async function verifyApiKey(apiKey: string): Promise<OnyxUser | null> {
   try {
-    const res = await fetch(`${ONYXBASE_BASE_URL}/api/auth/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey }),
-    });
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/api/auth/verify`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      },
+      15000
+    );
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = await res.json().catch(() => null);
+    if (!data) return null;
     if (data.ok === false) return null;
     return {
       userId: data.userId || data.user?.userId,
@@ -673,12 +717,20 @@ export async function verifyApiKey(apiKey: string): Promise<OnyxUser | null> {
  * Get current user info from the master key.
  */
 export async function whoami(): Promise<OnyxUser | null> {
-  const res = await fetch(`${ONYXBASE_BASE_URL}/v1/whoami`, {
-    headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  return data.user || data;
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/whoami`,
+      {
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      15000
+    );
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data?.user || data || null;
+  } catch {
+    return null;
+  }
 }
 
 export const ONYXBASE_COLLECTIONS = {

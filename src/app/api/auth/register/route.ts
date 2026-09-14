@@ -33,6 +33,9 @@ import {
   reservedDisplayNameMessage,
 } from '@/lib/reserved';
 
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -72,17 +75,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: reservedDisplayNameMessage() }, { status: 400 });
     }
 
-    // CHECK 1: Is email already registered in our platform profiles?
-    const emailExists = await isEmailRegistered(normalizedEmail);
+    // CHECK 1+2 (parallel): email registered? username taken? Independent
+    // backend reads — run together to halve worst-case latency under flood.
+    const [emailExists, usernameExists] = await Promise.all([
+      isEmailRegistered(normalizedEmail),
+      getProfileByUsername(normalizedUsername),
+    ]);
     if (emailExists) {
       return NextResponse.json(
         { ok: false, error: 'This email is already registered. Please log in instead.' },
         { status: 400 }
       );
     }
-
-    // CHECK 2: Is username already taken?
-    const usernameExists = await getProfileByUsername(normalizedUsername);
     if (usernameExists) {
       return NextResponse.json(
         { ok: false, error: 'This username is already taken. Please choose another.' },
@@ -102,8 +106,10 @@ export async function POST(request: NextRequest) {
 
     // RACE CONDITION PROTECTION: Re-check uniqueness after OnyxBase registration
     // (another request might have created a profile with the same username/email)
-    const emailRecheck = await isEmailRegistered(normalizedEmail);
-    const usernameRecheck = await getProfileByUsername(normalizedUsername);
+    const [emailRecheck, usernameRecheck] = await Promise.all([
+      isEmailRegistered(normalizedEmail),
+      getProfileByUsername(normalizedUsername),
+    ]);
     if (emailRecheck || usernameRecheck) {
       // Another request won the race — but we already created the OnyxBase account.
       // The user can still log in, they just need to pick a different username.

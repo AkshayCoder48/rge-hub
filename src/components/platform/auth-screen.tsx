@@ -22,6 +22,26 @@ export function AuthScreen() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // All auth calls are bounded: fail fast with a retry message instead of an eternal spinner.
+  const AUTH_TIMEOUT_MS = 55000;
+  async function authFetch(path: string, body: unknown): Promise<any> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), AUTH_TIMEOUT_MS);
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      return await res.json().catch(() => ({}));
+    } catch {
+      throw new Error('Request timed out — the server is slow, please retry.');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   const handleSendOtp = useCallback(async (purpose: 'registration' | 'password_reset') => {
     if (!email || !email.includes('@')) {
       toast({ title: 'Invalid email', description: 'Please enter a valid email address', variant: 'destructive' });
@@ -29,20 +49,15 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/otp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, purpose }),
-      });
-      const data = await res.json();
+      const data = await authFetch('/api/auth/otp/send', { email, purpose });
       if (data.ok) {
         setStep(purpose === 'password_reset' ? 'forgot-otp' : 'otp');
         toast({ title: 'Code sent', description: 'Check your email for the 6-digit code' });
       } else {
         toast({ title: 'Failed', description: data.error, variant: 'destructive' });
       }
-    } catch {
-      toast({ title: 'Error', description: 'Failed to send OTP', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Failed to send OTP', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -55,12 +70,7 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/otp/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, code: otp, purpose }),
-      });
-      const data = await res.json();
+      const data = await authFetch('/api/auth/otp/verify', { email, code: otp, purpose });
       if (data.ok) {
         if (purpose === 'password_reset') {
           setStep('reset-password');
@@ -73,8 +83,8 @@ export function AuthScreen() {
       } else {
         toast({ title: 'Verification failed', description: data.error, variant: 'destructive' });
       }
-    } catch {
-      toast({ title: 'Error', description: 'Verification failed', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Verification failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -91,20 +101,15 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, username, displayName, password }),
-      });
-      const data = await res.json();
+      const data = await authFetch('/api/auth/register', { email, username, displayName, password });
       if (data.ok) {
         await refresh();
         toast({ title: 'Welcome!', description: 'Account created successfully' });
       } else {
         toast({ title: 'Registration failed', description: data.error, variant: 'destructive' });
       }
-    } catch {
-      toast({ title: 'Error', description: 'Registration failed', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Registration failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -117,20 +122,15 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password: loginPassword }),
-      });
-      const data = await res.json();
+      const data = await authFetch('/api/auth/login', { email, password: loginPassword });
       if (data.ok) {
         await refresh();
         toast({ title: 'Welcome back!', description: 'Logged in successfully' });
       } else {
         toast({ title: 'Login failed', description: data.error, variant: 'destructive' });
       }
-    } catch {
-      toast({ title: 'Error', description: 'Login failed', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Login failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -147,20 +147,15 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/reset-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password: newPassword }),
-      });
-      const data = await res.json();
+      const data = await authFetch('/api/auth/reset-password', { email, password: newPassword });
       if (data.ok) {
         await refresh();
         toast({ title: 'Password reset!', description: 'You are now logged in' });
       } else {
         toast({ title: 'Reset failed', description: data.error, variant: 'destructive' });
       }
-    } catch {
-      toast({ title: 'Error', description: 'Password reset failed', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Password reset failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }

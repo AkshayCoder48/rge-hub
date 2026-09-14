@@ -115,6 +115,12 @@ export async function isUsernameTaken(username: string): Promise<boolean> {
  */
 export async function isEmailRegistered(email: string): Promise<boolean> {
   const normalized = email.toLowerCase().trim();
+  // Fast path: email index (O(1)). Falls back to full export for profiles
+  // written before the index existed.
+  try {
+    const hit = await kvGet<string>(`email:${normalized}`, ONYXBASE_COLLECTIONS.PROFILES);
+    if (hit) return true;
+  } catch {}
   const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
   for (const key of Object.keys(all)) {
     const p = all[key];
@@ -147,7 +153,7 @@ export async function getProfileByEmail(email: string): Promise<Profile | null> 
 export async function upsertProfile(profile: Profile): Promise<boolean> {
   const normalized = profile.username.toLowerCase().trim();
 
-  // Check if there's an existing profile (for username change detection)
+  // Check if there's an existing profile (for username/email change detection)
   const existing = await getProfile(profile.userId);
   if (existing && existing.username.toLowerCase() !== normalized) {
     // Username changed — remove old index
@@ -155,14 +161,25 @@ export async function upsertProfile(profile: Profile): Promise<boolean> {
       await kvDelete(`username:${existing.username.toLowerCase()}`, ONYXBASE_COLLECTIONS.PROFILES);
     } catch {}
   }
+  const normalizedEmail = profile.email ? profile.email.toLowerCase().trim() : '';
+  if (existing && existing.email && existing.email.toLowerCase().trim() !== normalizedEmail) {
+    // Email changed — remove old index
+    try {
+      await kvDelete(`email:${existing.email.toLowerCase().trim()}`, ONYXBASE_COLLECTIONS.PROFILES);
+    } catch {}
+  }
 
-  // Set the main profile record + username index in ONE backend pin
+  // Set the main profile record + username/email indexes in ONE backend pin
   // (two kvSets would serialize on the 35s global pin pacing + double the
   // full-manifest uploads — the 110s-login self-flood).
-  return await kvSetMulti([
+  const entries: Array<{ key: string; value: any; collection?: string }> = [
     { key: `profile:${profile.userId}`, value: profile, collection: ONYXBASE_COLLECTIONS.PROFILES },
     { key: `username:${normalized}`, value: profile.userId, collection: ONYXBASE_COLLECTIONS.PROFILES },
-  ]);
+  ];
+  if (normalizedEmail.includes('@')) {
+    entries.push({ key: `email:${normalizedEmail}`, value: profile.userId, collection: ONYXBASE_COLLECTIONS.PROFILES });
+  }
+  return await kvSetMulti(entries);
 }
 
 export async function getAllProfiles(): Promise<Profile[]> {
