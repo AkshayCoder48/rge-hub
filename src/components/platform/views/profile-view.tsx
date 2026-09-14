@@ -518,7 +518,7 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
         const formData = new FormData();
         formData.append('file', avatarFile);
         const avatarCtrl = new AbortController();
-        const avatarTimer = setTimeout(() => avatarCtrl.abort(), 60000);
+        const avatarTimer = setTimeout(() => avatarCtrl.abort(), 30000);
         let avatarRes: Response;
         try {
           avatarRes = await fetch('/api/profile/avatar', {
@@ -528,7 +528,13 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
           });
         } catch {
           clearTimeout(avatarTimer);
-          throw new Error('Avatar upload timed out — please retry.');
+          if (avatarCtrl.signal.aborted) {
+            // Timeout ≠ failure — the upload may have landed. A refresh
+            // reconciles; never a hard error over an unknown outcome.
+            toast({ title: 'Still saving', description: 'Still saving — your change will appear shortly.' });
+            return;
+          }
+          throw new Error('Avatar upload failed — please check your connection and retry.');
         }
         clearTimeout(avatarTimer);
         const avatarData = await avatarRes.json().catch(() => ({}));
@@ -548,7 +554,7 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
       // 3. PATCH if any field changed
       if (Object.keys(patchBody).length > 0) {
         const updateCtrl = new AbortController();
-        const updateTimer = setTimeout(() => updateCtrl.abort(), 60000);
+        const updateTimer = setTimeout(() => updateCtrl.abort(), 30000);
         let updateRes: Response;
         try {
           updateRes = await fetch('/api/profile/update', {
@@ -559,7 +565,14 @@ function EditProfileModal({ profile, onClose, onSaved }: EditProfileModalProps) 
           });
         } catch {
           clearTimeout(updateTimer);
-          throw new Error('Profile save timed out — please retry.');
+          if (updateCtrl.signal.aborted) {
+            // Timeout ≠ failure — the write may have landed. Close and
+            // refetch so a refresh reconciles the truth.
+            toast({ title: 'Still saving', description: 'Still saving — your change will appear shortly.' });
+            onSaved();
+            return;
+          }
+          throw new Error('Profile save failed — please check your connection and retry.');
         }
         clearTimeout(updateTimer);
         const updateData = await updateRes.json().catch(() => ({}));

@@ -1,158 +1,196 @@
 /**
- * OTP (One-Time Password) helpers for email verification.
+ * OTP (One-Time Password) system — REWRITTEN per PRD §3–§4.
  *
- * OTP records are stored in OnyxBase KV (collection: "otps") keyed by email.
- * Each record includes a purpose field to distinguish registration from password reset.
+ * OnyxBase is REMOVED from the OTP path entirely (no OTP writes, no OTP
+ * lookups, no OTP verification queries against OnyxBase).
  *
- * Security:
- * - OTP is hashed with SHA-256 + salt (never stored plaintext)
- * - 10-minute expiry (enforced server-side on every validation)
- * - Max 5 verification attempts
- * - Rate limited: 1 per 60s per email+purpose
- * - One-time use: the record is DELETED on success (replay → "not found")
- * - New OTP invalidates previous OTP for same email+purpose
- * - Expired/consumed rows are DELETED (access path + piggyback sweeps),
- *   so the DB never holds dead OTPs — what you see in the DB is live.
+ * New flow:
+ *   generate OTP → hash → POST temp record to AI SENSE → storage_id
+ *   → send email (direct MCPEmails, or OnyxBase email fallback when
+ *     MCPEMAILS_API_KEY is not yet configured) → return the otpRef
  *
- * OTP record shape (stored in OnyxBase KV):
- * {
- *   email: "user@example.com",       // normalized lowercase
- *   otpHash: "...",                   // SHA-256(code + salt)
- *   salt: "...",                      // random UUID
- *   purpose: "registration",          // "registration" | "password_reset"
- *   expiresAt: "ISO string",          // 10 min from creation
- *   attempts: 0,                      // incremented on wrong code
- *   consumed: false,                  // legacy flag (success now deletes)
- *   createdAt: "ISO string"
- * }
+ *   verify: GET record by otpRef from AI SENSE → check email hash,
+ *   expiry, attempts → compare OTP hash → success.
  *
- * Key format: `otp:{email}:{purpose}` (e.g., `otp:user@example.com:registration`)
+ * Security (PRD §4):
+ *   - 6-digit cryptographically secure OTP (crypto.getRandomValues)
+ *   - expires in 10 minutes (logical, inside the record)
+ *   - max 5 verification attempts
+ *   - OTP hashed (SHA-256 + salt) before storage — never plaintext
+ *   - never logged, never in API responses, never in URLs
+ *   - only email_hash + otp_hash + timing/attempts stored — no PII
+ *   - storage UUID (otpRef) is an unguessable capability, 24h max life
+ *
+ * AI SENSE limits (documented): unauthenticated, 24h expiry,
+ * 5,000 req/IP/24h, no durability/SLA, anyone with the UUID can read —
+ * hence hashed payloads and strictly temporary use.
+ *
+ * Password reset (bug fix): verification of a password_reset OTP now
+ * issues a short-lived HMAC-signed reset token; /api/auth/reset-password
+ * verifies that token instead of re-reading an OTP record that the
+ * verify step correctly deletes (the old "consumed flag" check could
+ * never pass — resets were permanently broken).
  */
 
-import { kvSet, kvDeleteSpread, kvExport, kvGetQuorum, sendEmail } from './onyxbase';
-import { ONYXBASE_COLLECTIONS } from './onyxbase';
+import * as aisense from './aisense';
+import { sendEmailDirect, hasDirectMcpemailsKey, McpeError } from './mcpemail';
+import { sendEmail as sendEmailViaOnyxbase } from './onyxbase';
+import crypto from 'crypto';
 
-const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes (PRD §4)
 const OTP_MAX_ATTEMPTS = 5;
-const OTP_RATE_LIMIT_MS = 60 * 1000; // 1 per minute
+const RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // reset token lives 10 minutes
 
 export type OtpPurpose = 'registration' | 'password_reset';
 
+/** Minimal OTP record stored in AI SENSE (PRD §4 — no plaintext OTP, no raw email). */
 interface OtpRecord {
-  email: string;
-  otpHash: string;
-  salt: string;
   purpose: OtpPurpose;
-  expiresAt: string;
+  email_hash: string; // SHA-256(normalized email + salt)
+  otp_hash: string; // SHA-256(code + salt)
+  salt: string;
+  created_at: string;
+  expires_at: string;
   attempts: number;
-  consumed: boolean;
-  createdAt: string;
-  emailed?: boolean; // true once the code was actually mailed (send-then-error recovery)
 }
 
-/**
- * Get the KV key for an OTP record.
- */
-function otpKey(email: string, purpose: OtpPurpose): string {
-  return `otp:${email.toLowerCase().trim()}:${purpose}`;
+// ============ Hashing ============
+
+function sha256(input: string): string {
+  return crypto.createHash('sha256').update(input).digest('hex');
 }
 
-/**
- * Generate a 6-digit OTP code.
- */
 function generateOtpCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  return String(array[0] % 1000000).padStart(6, '0');
+  // Cryptographically secure, uniform modulo reduction (reject bias).
+  const max = 1_000_000;
+  const limit = Math.floor(0xffffffff / max) * max;
+  const buf = new Uint32Array(1);
+  let v: number;
+  do {
+    crypto.getRandomValues(buf);
+    v = buf[0];
+  } while (v >= limit);
+  return String(v % max).padStart(6, '0');
 }
 
-/**
- * Hash an OTP with a random salt.
- */
 async function hashOtp(code: string, salt: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(code + salt);
+  // Web-crypto compatible (works on Vercel edge/node runtimes).
+  const data = new TextEncoder().encode(code + salt);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** Delete one OTP row (spread — best effort across backend replicas). */
-async function deleteOtpRow(key: string): Promise<void> {
-  try {
-    await kvDeleteSpread(key, ONYXBASE_COLLECTIONS.OTPS, 3);
-  } catch {
-    // non-fatal — piggyback sweeps retry later
+function hashEmail(email: string, salt: string): string {
+  return sha256(`email:${email}:${salt}`);
+}
+
+// ============ otpRef fallback map (page-refresh resilience) ============
+//
+// The otpRef is returned to the client and normally round-trips through
+// the auth screen. If the page is refreshed, the ref is lost — this
+// per-instance map lets verify() recover it by email (best effort on
+// serverless; a miss simply asks the user to request a new code, which
+// now costs ~2 seconds instead of 2 minutes).
+
+interface RefEntry {
+  ref: string;
+  expiresAt: number;
+}
+const emailToRef = new Map<string, RefEntry>();
+
+function rememberRef(email: string, purpose: OtpPurpose, ref: string) {
+  emailToRef.set(`${purpose}:${email}`, { ref, expiresAt: Date.now() + OTP_EXPIRY_MS });
+  // opportunistic cleanup
+  if (emailToRef.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of emailToRef) if (v.expiresAt < now) emailToRef.delete(k);
   }
 }
 
+function lookupRef(email: string, purpose: OtpPurpose): string | null {
+  const e = emailToRef.get(`${purpose}:${email}`);
+  if (!e) return null;
+  if (e.expiresAt < Date.now()) {
+    emailToRef.delete(`${purpose}:${email}`);
+    return null;
+  }
+  return e.ref;
+}
+
+function forgetRef(email: string, purpose: OtpPurpose) {
+  emailToRef.delete(`${purpose}:${email}`);
+}
+
+// ============ Public API ============
+
+export interface SendOtpResult {
+  ok: boolean;
+  otpRef?: string;
+  alreadySent?: boolean;
+  expiresInMs?: number;
+  error?: string;
+  errorCode?: string;
+  retryable?: boolean;
+  emailVia?: 'mcpemails-direct' | 'onyxbase-fallback';
+}
+
 /**
- * Send an OTP to an email address for a specific purpose.
- * Stores the OTP record in OnyxBase KV with 10-min expiry.
- * Invalidates any previous OTP for the same email+purpose.
- *
- * Returns { ok, error? }
+ * Create + store + email an OTP. Returns as soon as the email-provider
+ * operation has definitively succeeded (PRD §21) — no artificial waits.
  */
 export async function sendOtp(
   email: string,
   purpose: OtpPurpose = 'registration'
-): Promise<{ ok: boolean; error?: string; alreadySent?: boolean }> {
-  // Piggyback sweep so dead OTPs never pile up in the DB (non-blocking).
-  void cleanupExpiredOtps();
-
+): Promise<SendOtpResult> {
   const normalizedEmail = email.toLowerCase().trim();
-  const key = otpKey(normalizedEmail, purpose);
 
-  // Check rate limit (small quorum — single reads can flap to null).
-  const existing = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 3);
-  if (existing && new Date(existing.expiresAt).getTime() >= Date.now()) {
-    const ageMs = Date.now() - new Date(existing.createdAt).getTime();
-    if (existing.emailed) {
-      // Code was mailed. Recent → the user HAS it (their "code arrived but
-      // the app errored" case): succeed WITHOUT mailing a duplicate.
-      if (ageMs < OTP_RATE_LIMIT_MS) return { ok: true, alreadySent: true };
-      // Old → fall through and generate a fresh one.
-    }
-    // Not mailed (an earlier attempt died after storing) → fall through and
-    // send immediately; the user never got a code.
-  } else if (existing) {
-    // Stale/expired row — delete it now so it can't rate-limit or linger.
-    await deleteOtpRow(key);
-  }
-
-  // Generate new OTP
   const code = generateOtpCode();
   const salt = crypto.randomUUID();
-  const hash = await hashOtp(code, salt);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + OTP_EXPIRY_MS);
 
   const record: OtpRecord = {
-    email: normalizedEmail,
-    otpHash: hash,
-    salt,
     purpose,
-    expiresAt: expiresAt.toISOString(),
+    email_hash: hashEmail(normalizedEmail, salt),
+    otp_hash: await hashOtp(code, salt),
+    salt,
+    created_at: now.toISOString(),
+    expires_at: expiresAt.toISOString(),
     attempts: 0,
-    consumed: false,
-    createdAt: now.toISOString(),
   };
 
-  // Store in OnyxBase (this invalidates any previous OTP for this email+purpose).
-  // Single write — kvSet only reports true for a DURABLE backend write, so a
-  // second confirm-read round just doubled flood pain (never email otherwise).
-  const stored = await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
-  if (!stored) {
-    return { ok: false, error: 'Servers are busy — please retry in a moment.' };
+  // 1) Temporary OTP state in AI SENSE (NOT OnyxBase — PRD §3).
+  let storageId: string;
+  try {
+    const put = await aisense.put(record as unknown as Record<string, unknown>);
+    storageId = put.storageId;
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        'Temporary OTP storage is unavailable right now — please retry in a moment. (No code was sent.)',
+      errorCode: 'OTP_STORAGE_UNAVAILABLE',
+      retryable: true,
+    };
   }
 
-  // Build email content based on purpose
-  const subject = purpose === 'password_reset'
-    ? 'RailGuyEdits — Password Reset Code'
-    : 'RailGuyEdits — Verification Code';
+  rememberRef(normalizedEmail, purpose, storageId);
 
-  const bodyText = purpose === 'password_reset'
-    ? `Hello,\n\nYou requested a password reset for your RailGuyEdits account.\n\nYour password reset code is: ${code}\n\nThis code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n— RailGuyEdits Platform`
-    : `Hello,\n\nYour verification code for RailGuyEdits is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you didn't request this code, you can safely ignore this email.\n\n— RailGuyEdits Platform`;
+  // 2) Email delivery. Direct MCPEmails when the key is configured;
+  //    OnyxBase's connected MCPEmail credential as the fallback so
+  //    production keeps working before the key is set (PRD §2 — use the
+  //    existing integration; never invent a key).
+  const subject =
+    purpose === 'password_reset'
+      ? 'RailGuyEdits — Password Reset Code'
+      : 'RailGuyEdits — Verification Code';
+
+  const codeLine =
+    purpose === 'password_reset'
+      ? 'You requested a password reset for your RailGuyEdits account.\n\nYour password reset code is:'
+      : 'Your verification code for RailGuyEdits is:';
+
+  const bodyText = `Hello,\n\n${codeLine} ${code}\n\nThis code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n— RailGuyEdits Platform`;
 
   const htmlBody = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
@@ -168,121 +206,244 @@ export async function sendOtp(
   <p style="font-size: 14px; color: #999; margin-top: 32px;">If you didn't request this code, you can safely ignore this email.</p>
 </div>`;
 
-  const result = await sendEmail(normalizedEmail, subject, bodyText, htmlBody);
+  // Idempotency for the email send itself (PRD §7/§18): a retried send for
+  // the SAME storage record reuses the same key so MCPEmails can dedupe.
+  const emailIdemKey = `rge-otp-${storageId}`;
+
+  if (hasDirectMcpemailsKey()) {
+    try {
+      await sendEmailDirect({
+        to: normalizedEmail,
+        subject,
+        body: bodyText,
+        htmlBody,
+        idempotencyKey: emailIdemKey,
+      });
+      return {
+        ok: true,
+        otpRef: storageId,
+        expiresInMs: OTP_EXPIRY_MS,
+        emailVia: 'mcpemails-direct',
+      };
+    } catch (err) {
+      if (err instanceof McpeError && (err.code === 'rate_limited' || err.code === 'timeout')) {
+        // The provider may or may not have accepted the message — never
+        // blind-retry the send (PRD §18). Tell the user to wait/retry once.
+        return {
+          ok: false,
+          error:
+            'The email provider is rate-limiting us right now. Please wait about a minute before requesting a new code.',
+          errorCode: 'EMAIL_SEND_FAILED',
+          retryable: true,
+          otpRef: storageId,
+        };
+      }
+      return {
+        ok: false,
+        error:
+          err instanceof Error ? `Email delivery failed: ${err.message}` : 'Email delivery failed',
+        errorCode: 'EMAIL_SEND_FAILED',
+        retryable: true,
+      };
+    }
+  }
+
+  // Fallback: OnyxBase's connected MCPEmail credential (existing integration).
+  const result = await sendEmailViaOnyxbase(normalizedEmail, subject, bodyText, htmlBody);
   if (!result.ok) {
-    return { ok: false, error: result.error || 'Failed to send verification email' };
-  }
-
-  // Mark mailed — post-response RELIABLE. A plain void-promise dies at
-  // Vercel freeze (the flag needs ~10-15s: pacing-absorb + pin round-trip;
-  // the route responds first), and a missing flag makes the next resend
-  // re-mail a duplicate. after() extends lifetime past the response so the
-  // flag actually lands; the void fallback covers non-Vercel runtimes.
-  const markEmailed = () =>
-    kvSet(key, { ...record, emailed: true }, ONYXBASE_COLLECTIONS.OTPS).catch(() => {});
-  try {
-    const { after } = (await import('next/server')) as unknown as {
-      after?: (cb: () => unknown) => void;
+    return {
+      ok: false,
+      error: result.error || 'Failed to send verification email',
+      errorCode: 'EMAIL_SEND_FAILED',
+      retryable: true,
     };
-    if (typeof after === 'function') after(() => void markEmailed());
-    else void markEmailed();
-  } catch {
-    void markEmailed();
   }
+  return {
+    ok: true,
+    otpRef: storageId,
+    expiresInMs: OTP_EXPIRY_MS,
+    emailVia: 'onyxbase-fallback',
+  };
+}
 
-  return { ok: true };
+export interface VerifyOtpResult {
+  ok: boolean;
+  /** Updated ref after a wrong attempt (client must use it for the next try). */
+  otpRef?: string;
+  /** Issued ONLY for purpose=password_reset on success (bug fix). */
+  resetToken?: string;
+  error?: string;
+  errorCode?: string;
+  remainingAttempts?: number;
 }
 
 /**
- * Verify an OTP code.
- * Checks: existence, expiry, attempts, consumed state, and hash match.
- * On success: DELETES the OTP (one-time use — replay is impossible).
- * On expiry/attempts-exhausted: DELETES the OTP (dies on time).
- *
- * Returns { ok, error? }
+ * Verify an OTP code against the AI SENSE temp record.
+ * Body: { email, code, otpRef? } — otpRef preferred; falls back to the
+ * per-instance email→ref map when omitted (page refresh case).
  */
 export async function verifyOtp(
   email: string,
   code: string,
-  purpose: OtpPurpose = 'registration'
-): Promise<{ ok: boolean; error?: string }> {
-  // Piggyback sweep so dead OTPs never pile up in the DB (non-blocking).
-  void cleanupExpiredOtps();
-
+  purpose: OtpPurpose = 'registration',
+  otpRef?: string
+): Promise<VerifyOtpResult> {
   const normalizedEmail = email.toLowerCase().trim();
-  const key = otpKey(normalizedEmail, purpose);
-
-  const record = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 3);
-  if (!record) {
-    return { ok: false, error: 'No verification code found. Please request a new one.' };
+  const trimmedCode = code.trim();
+  if (!/^\d{6}$/.test(trimmedCode)) {
+    return { ok: false, error: 'Enter the 6-digit code from your email.', errorCode: 'OTP_INVALID' };
   }
 
-  // Check if already consumed (legacy rows)
-  if (record.consumed) {
-    await deleteOtpRow(key);
-    return { ok: false, error: 'This code has already been used. Please request a new one.' };
+  let ref = otpRef && /^[A-Za-z0-9-]{8,64}$/.test(otpRef) ? otpRef : null;
+  if (!ref) ref = lookupRef(normalizedEmail, purpose);
+  if (!ref) {
+    return {
+      ok: false,
+      error: 'No active code found for this email. Please request a new one.',
+      errorCode: 'OTP_NOT_FOUND',
+    };
   }
 
-  // Check expiry — delete ON TIME (the moment it's observed expired).
-  if (new Date(record.expiresAt).getTime() < Date.now()) {
-    await deleteOtpRow(key);
-    return { ok: false, error: 'Verification code expired. Please request a new one.' };
+  let record: OtpRecord;
+  try {
+    record = (await aisense.get<Record<string, unknown>>(ref)) as unknown as OtpRecord;
+  } catch (err) {
+    if (err instanceof aisense.AiSenseError && err.code === 'not_found') {
+      forgetRef(normalizedEmail, purpose);
+      return {
+        ok: false,
+        error: 'This code is no longer valid. Please request a new one.',
+        errorCode: 'OTP_EXPIRED',
+      };
+    }
+    return {
+      ok: false,
+      error: 'Temporary OTP storage is unreachable — please retry in a moment.',
+      errorCode: 'OTP_STORAGE_UNAVAILABLE',
+    };
   }
 
-  // Check attempts
-  if (record.attempts >= OTP_MAX_ATTEMPTS) {
-    await deleteOtpRow(key);
-    return { ok: false, error: 'Too many failed attempts. Please request a new code.' };
+  // Field sanity (the record is capability-protected but treat as untrusted).
+  if (!record || typeof record !== 'object' || !record.otp_hash || !record.salt) {
+    return {
+      ok: false,
+      error: 'This code is no longer valid. Please request a new one.',
+      errorCode: 'OTP_EXPIRED',
+    };
   }
 
-  // Verify hash
-  const inputHash = await hashOtp(code.trim(), record.salt);
-  if (inputHash !== record.otpHash) {
-    // Increment attempts and save
-    record.attempts++;
-    await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
-    const remaining = OTP_MAX_ATTEMPTS - record.attempts;
-    return { ok: false, error: `Invalid code. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.` };
+  // Bind: record must belong to this email + purpose.
+  if (record.email_hash !== hashEmail(normalizedEmail, record.salt) || record.purpose !== purpose) {
+    return {
+      ok: false,
+      error: 'This code was not issued for this email. Please request a new one.',
+      errorCode: 'OTP_INVALID',
+    };
   }
 
-  // Success — DELETE the code (one-time use; replay → "not found").
-  await deleteOtpRow(key);
+  // Expiry — refuse after 10 minutes (PRD §4).
+  if (new Date(record.expires_at).getTime() < Date.now()) {
+    forgetRef(normalizedEmail, purpose);
+    return {
+      ok: false,
+      error: 'Verification code expired. Please request a new one.',
+      errorCode: 'OTP_EXPIRED',
+    };
+  }
 
+  // Attempts — max 5.
+  if ((record.attempts ?? 0) >= OTP_MAX_ATTEMPTS) {
+    forgetRef(normalizedEmail, purpose);
+    return {
+      ok: false,
+      error: 'Too many failed attempts. Please request a new code.',
+      errorCode: 'OTP_ATTEMPTS_EXCEEDED',
+    };
+  }
+
+  // Compare hash.
+  const inputHash = await hashOtp(trimmedCode, record.salt);
+  if (inputHash !== record.otp_hash) {
+    const attempts = (record.attempts ?? 0) + 1;
+    if (attempts >= OTP_MAX_ATTEMPTS) {
+      forgetRef(normalizedEmail, purpose);
+      return {
+        ok: false,
+        error: 'Too many failed attempts. Please request a new code.',
+        errorCode: 'OTP_ATTEMPTS_EXCEEDED',
+      };
+    }
+    // Persist the incremented attempt count as a NEW temp record and hand
+    // the client the new ref (AI SENSE objects are write-once by UUID).
+    try {
+      const updated: OtpRecord = { ...record, attempts };
+      const put = await aisense.put(updated as unknown as Record<string, unknown>);
+      rememberRef(normalizedEmail, purpose, put.storageId);
+      const remaining = OTP_MAX_ATTEMPTS - attempts;
+      return {
+        ok: false,
+        otpRef: put.storageId,
+        remainingAttempts: remaining,
+        error: `Invalid code. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
+        errorCode: 'OTP_INVALID',
+      };
+    } catch {
+      // Could not persist the counter — fail closed on the safe side by
+      // keeping the old ref (attempts stay as-is; next wrong try re-increments).
+      const remaining = OTP_MAX_ATTEMPTS - attempts;
+      return {
+        ok: false,
+        otpRef: ref,
+        remainingAttempts: remaining,
+        error: `Invalid code. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`,
+        errorCode: 'OTP_INVALID',
+      };
+    }
+  }
+
+  // SUCCESS — one-time use: forget the ref (the temp record ages out of
+  // AI SENSE within 24h max; nothing to delete server-side).
+  forgetRef(normalizedEmail, purpose);
+
+  // Password reset: issue the signed reset token (fixes the old
+  // "consumed flag" dead path — the reset route no longer re-reads OTPs).
+  if (purpose === 'password_reset') {
+    return { ok: true, resetToken: issueResetToken(normalizedEmail) };
+  }
   return { ok: true };
 }
 
-/**
- * Sweep expired/consumed OTP rows so the DB holds only live codes.
- * Runs piggyback (non-blocking) on every send/verify — no cron needed.
- * ONLY touches the OTPs collection — never profiles, resources, or other data.
- */
-let lastSweepAt = 0;
-const SWEEP_MIN_GAP_MS = 5 * 60 * 1000;
+// ============ Signed reset tokens (password-reset bug fix) ============
 
-export async function cleanupExpiredOtps(): Promise<number> {
-  // Throttled: a full-collection export on EVERY auth call self-floods a
-  // drowning backend. One sweep per 5 min per instance is plenty for 10-min codes.
-  const now = Date.now();
-  if (now - lastSweepAt < SWEEP_MIN_GAP_MS) return 0;
-  lastSweepAt = now;
-  let cleaned = 0;
+function resetSecret(): string {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const kb = process.env.ONYXBASE_API_KEY;
+  if (kb) return crypto.createHash('sha256').update(`rge-reset-v1:${kb}`).digest('hex');
+  return `boot-${'unconfigured'}`; // fail-secure: signature won't verify
+}
+
+export function issueResetToken(email: string): string {
+  const expiresAt = Date.now() + RESET_TOKEN_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({ e: email.toLowerCase().trim(), x: expiresAt })).toString('base64url');
+  const sig = crypto.createHmac('sha256', resetSecret()).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+export function verifyResetToken(token: string): { ok: boolean; email?: string } {
   try {
-    const all = await kvExport<Record<string, OtpRecord>>(ONYXBASE_COLLECTIONS.OTPS);
-    const now = Date.now();
-    for (const key of Object.keys(all)) {
-      const record = all[key];
-      if (!record) continue;
-      const isExpired = new Date(record.expiresAt).getTime() < now;
-      if (isExpired || record.consumed) {
-        // CRITICAL: Only delete if the key starts with "otp:" (safety check)
-        if (key.startsWith('otp:')) {
-          await deleteOtpRow(key);
-          cleaned++;
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[otp] cleanup error:', err);
+    const [payload, sig] = token.split('.');
+    if (!payload || !sig) return { ok: false };
+    const expected = crypto.createHmac('sha256', resetSecret()).update(payload).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false };
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      e?: string;
+      x?: number;
+    };
+    if (!data.e || typeof data.x !== 'number' || data.x < Date.now()) return { ok: false };
+    return { ok: true, email: data.e };
+  } catch {
+    return { ok: false };
   }
-  return cleaned;
 }

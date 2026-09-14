@@ -17,8 +17,9 @@
  * Returns: { ok: true, images, clips, xmls, all, mine? }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { listResources, type Resource } from '@/lib/resources';
+import { listResourcesFast, type Resource } from '@/lib/resources';
 import { getCached, setCachedNonEmpty } from '@/lib/cache';
+import { newRequestId } from '@/lib/api-contract';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,6 +39,7 @@ interface AllPayload {
 
 export async function GET(request: NextRequest) {
   const t0 = Date.now();
+  const requestId = newRequestId();
   try {
     const { searchParams } = new URL(request.url);
     const owner = searchParams.get('owner');
@@ -52,15 +54,16 @@ export async function GET(request: NextRequest) {
     if (cached) {
       return NextResponse.json(
         { ok: true, ...cached, cached: true, ms: Date.now() - t0 },
-        { headers: { 'Cache-Control': 'no-store' } }
+        { headers: { 'Cache-Control': 'no-store', 'x-request-id': requestId } }
       );
     }
 
-    // Single parallel fetch across collections (index reads inside).
+    // FAST listings: 1 export per collection (20s-cached inside) instead
+    // of the old 2 LISTs + 12N point-reads per collection (PRD §14).
     const [images, clips, xmls] = await Promise.all([
-      listResources('image'),
-      listResources('clip'),
-      listResources('xml', 'community'),
+      listResourcesFast('image'),
+      listResourcesFast('clip'),
+      listResourcesFast('xml', 'community'),
     ]);
 
     const isPublic = (r: Resource) => r.published;
@@ -96,7 +99,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(
       { ok: true, ...payload, cached: false, ms: Date.now() - t0 },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { headers: { 'Cache-Control': 'no-store', 'x-request-id': requestId } }
     );
   } catch (err) {
     console.error('[resources/all] error:', err);

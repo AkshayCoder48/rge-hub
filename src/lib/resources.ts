@@ -12,6 +12,7 @@
 
 import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent, stripExportPrefix } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
+import { getCached, setCached, setCachedNonEmpty, invalidate } from './cache';
 
 // ============ Types ============
 
@@ -83,6 +84,23 @@ export interface Resource {
 
 export async function getProfile(userId: string): Promise<Profile | null> {
   return kvGet<Profile>(`profile:${userId}`, ONYXBASE_COLLECTIONS.PROFILES);
+}
+
+/**
+ * Cached profile fetch (30s TTL, in-memory) for list resolution
+ * (followers/following rows, staff directories) — collapses N sequential
+ * 10s point-reads into at most a handful (PRD §14).
+ */
+const PROFILE_CACHE_TTL_MS = 30_000;
+const profileCache = new Map<string, { p: Profile | null; at: number }>();
+
+export async function getProfileCached(userId: string): Promise<Profile | null> {
+  const hit = profileCache.get(userId);
+  if (hit && Date.now() - hit.at < PROFILE_CACHE_TTL_MS) return hit.p;
+  const p = await getProfile(userId);
+  if (profileCache.size > 400) profileCache.clear();
+  profileCache.set(userId, { p, at: Date.now() });
+  return p;
 }
 
 /**
@@ -190,12 +208,21 @@ export async function upsertProfile(profile: Profile): Promise<boolean> {
   if (normalizedEmail.includes('@')) {
     entries.push({ key: `email:${normalizedEmail}`, value: profile.userId, collection: ONYXBASE_COLLECTIONS.PROFILES });
   }
-  return await kvSetMulti(entries);
+  const ok = await kvSetMulti(entries);
+  // Invalidate caches touched by this profile write (PRD §12 — only the
+  // affected entries, never a full reload).
+  invalidate('profiles:all');
+  profileCache.delete(profile.userId);
+  return ok;
 }
 
 export async function getAllProfiles(): Promise<Profile[]> {
+  const cached = getCached<Profile[]>('profiles:all');
+  if (cached) return cached;
   const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
-  return Object.values(all).filter(p => p && p.userId) as Profile[];
+  const profiles = Object.values(all).filter(p => p && p.userId) as Profile[];
+  setCached('profiles:all', profiles);
+  return profiles;
 }
 
 // ============ Resources ============
@@ -476,14 +503,67 @@ export async function listResources(type: ResourceType, xmlSource?: XmlSource): 
 }
 
 /**
+ * FAST listing (PRD §14, §20–24 of the perf spec): ONE collection export
+ * + ONE (cached) tombstone export, filtered locally — replaces the
+ * 2 LISTs + 12N point-reads fan-out that made listing pages take minutes.
+ *
+ * Server-cached for 20s (non-empty results only, same policy as /all).
+ * Writes invalidate via invalidateResources(). Falls back to the proven
+ * quorum path when the export call fails.
+ */
+export async function listResourcesFast(type: ResourceType, xmlSource?: XmlSource): Promise<Resource[]> {
+  const collection = collectionForType(type, xmlSource);
+  const cacheKey = `resources:listfast:${collection}`;
+  const cached = getCached<Resource[]>(cacheKey);
+  if (cached) return cached;
+
+  const [exported, tombs] = await Promise.all([
+    kvExport(collection).catch(() => null),
+    kvExport(TOMBSTONE_COLLECTION).catch(() => ({}) as Record<string, unknown>),
+  ]);
+  if (!exported) {
+    // Export failed (backend flap) — the old path still works.
+    return listResources(type, xmlSource);
+  }
+
+  const tombSet = new Set(
+    Object.keys(tombs)
+      .map((k) => stripExportPrefix(k, TOMBSTONE_COLLECTION))
+      .filter((k) => k.startsWith('tomb:'))
+  );
+
+  const out: Resource[] = [];
+  for (const rawKey of Object.keys(exported)) {
+    const key = stripExportPrefix(rawKey, collection);
+    if (tombSet.has(`tomb:${key}`)) continue; // deleted — stays hidden
+    const rec = exported[rawKey] as Resource | null;
+    if (rec && rec.id && rec.id === key) out.push(rec);
+  }
+  // Sort newest-first once here so every consumer gets a stable order.
+  out.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  setCachedNonEmpty(cacheKey, out, out.length === 0);
+  return out;
+}
+
+/** Invalidate fast-listing caches (call after any create/update/delete). */
+export function invalidateListings(): void {
+  invalidate('resources:listfast:' + ONYXBASE_COLLECTIONS.IMAGES);
+  invalidate('resources:listfast:' + ONYXBASE_COLLECTIONS.CLIPS);
+  invalidate('resources:listfast:' + ONYXBASE_COLLECTIONS.COMMUNITY_XMLS);
+  invalidate('resources:listfast:' + ONYXBASE_COLLECTIONS.ADMIN_XMLS);
+  invalidate('profiles:all');
+}
+
+/**
  * List all public resources across all types.
  * Optionally filter by published status.
  */
 export async function listAllPublicResources(): Promise<Resource[]> {
   const [images, clips, communityXmls] = await Promise.all([
-    listResources('image'),
-    listResources('clip'),
-    listResources('xml', 'community'),
+    listResourcesFast('image'),
+    listResourcesFast('clip'),
+    listResourcesFast('xml', 'community'),
   ]);
 
   return [
@@ -498,9 +578,9 @@ export async function listAllPublicResources(): Promise<Resource[]> {
  */
 export async function listResourcesByOwner(ownerId: string): Promise<Resource[]> {
   const [images, clips, communityXmls] = await Promise.all([
-    listResources('image'),
-    listResources('clip'),
-    listResources('xml', 'community'),
+    listResourcesFast('image'),
+    listResourcesFast('clip'),
+    listResourcesFast('xml', 'community'),
   ]);
 
   return [
@@ -566,7 +646,7 @@ function cleanIds(v: unknown): string[] {
 }
 
 // follower -> set of targets (canonical rels + legacy lists unioned, deduped)
-async function loadFollowGraph(): Promise<Map<string, Set<string>>> {
+async function loadFollowGraphRaw(): Promise<Map<string, Set<string>>> {
   const graph = new Map<string, Set<string>>();
   const add = (a: string, b: string) => {
     if (!a || !b || a === b) return;
@@ -589,6 +669,38 @@ async function loadFollowGraph(): Promise<Map<string, Set<string>>> {
     }
   }
   return graph;
+}
+
+// ── Follow-graph cache (PRD §13) ─────────────────────────────────────────
+// The graph is derived from ONE export — previously re-exported on EVERY
+// counts/list/isFollowing call (12s+ each). Cached for 30s; mutations
+// apply their confirmed edge IN PLACE so responses stay truthful the
+// moment a write lands (read-your-write) without re-exporting.
+const FOLLOW_GRAPH_TTL_MS = 30_000;
+let followGraphCache: { graph: Map<string, Set<string>>; at: number } | null = null;
+
+async function loadFollowGraph(): Promise<Map<string, Set<string>>> {
+  if (followGraphCache && Date.now() - followGraphCache.at < FOLLOW_GRAPH_TTL_MS) {
+    return followGraphCache.graph;
+  }
+  const graph = await loadFollowGraphRaw();
+  followGraphCache = { graph, at: Date.now() };
+  return graph;
+}
+
+/** Apply a confirmed follow edge to the cached graph (idempotent). */
+function graphApplyFollow(graph: Map<string, Set<string>>, followerId: string, targetId: string) {
+  let set = graph.get(followerId);
+  if (!set) {
+    set = new Set();
+    graph.set(followerId, set);
+  }
+  set.add(targetId);
+}
+
+/** Apply a confirmed unfollow to the cached graph (idempotent). */
+function graphApplyUnfollow(graph: Map<string, Set<string>>, followerId: string, targetId: string) {
+  graph.get(followerId)?.delete(targetId);
 }
 
 async function getLegacyFollowingIds(userId: string): Promise<string[]> {
@@ -625,6 +737,11 @@ export async function getFollowCounts(userId: string): Promise<{ followingCount:
 
 export async function isFollowing(followerId: string, targetId: string): Promise<boolean> {
   if (!followerId || !targetId || followerId === targetId) return false;
+  // Cached-graph fast path (no backend call): covers the common case and
+  // the post-mutation read-your-write check.
+  if (followGraphCache && Date.now() - followGraphCache.at < FOLLOW_GRAPH_TTL_MS) {
+    if (followGraphCache.graph.get(followerId)?.has(targetId)) return true;
+  }
   // O(1) fast path: canonical record.
   const rel = await kvGet(relKey(followerId, targetId), followsCollection()).catch(() => null);
   if (rel) return true;
@@ -658,61 +775,60 @@ export interface FollowMutationResult {
 export async function followUser(userId: string, targetId: string): Promise<FollowMutationResult> {
   if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
   if (userId === targetId) return { ok: false, error: 'You cannot follow yourself' };
-  if (await isFollowing(userId, targetId)) {
-    const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-    return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
+  const graph = await loadFollowGraph();
+  if (graph.get(userId)?.has(targetId)) {
+    // Already following — derive counts from the cached graph (no export).
+    return countsFromGraph(graph, userId, targetId, true);
   }
   // ONE canonical write — no dual-write, no post-response flush to lose.
   const ok = await kvSetFollowRecord(relKey(userId, targetId), { t: Date.now() });
-  if (!ok) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
-  // Response counts apply the confirmed edge in-memory: the backend's
-  // export view can lag the write by seconds, but the response must be
-  // truthful the moment the write is confirmed.
-  const graph = await loadFollowGraph();
-  let set = graph.get(userId);
-  if (!set) {
-    set = new Set();
-    graph.set(userId, set);
-  }
-  set.add(targetId);
-  return countsFromGraph(graph, userId, targetId);
+  if (!ok) return { ok: false, error: 'Follow could not be saved yet — please retry.', retryable: true };
+  // Read-your-write: apply the confirmed edge to the cached graph and
+  // derive counts from it (the backend export view can lag the write by
+  // seconds — the response must be truthful the moment the write lands).
+  graphApplyFollow(graph, userId, targetId);
+  return countsFromGraph(graph, userId, targetId, false);
 }
 
 export async function unfollowUser(userId: string, targetId: string): Promise<FollowMutationResult> {
   if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
-  const [rel, legacy] = await Promise.all([
-    kvGet(relKey(userId, targetId), followsCollection()).catch(() => null),
-    getLegacyFollowingIds(userId),
-  ]);
-  const legacyHas = legacy.includes(targetId);
-  if (!rel && !legacyHas) {
-    const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-    return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
+  const graph = await loadFollowGraph();
+  const has = graph.get(userId)?.has(targetId) === true;
+  if (!has) {
+    // Possibly a stale cache — check the canonical record before declaring
+    // "already unfollowed" (cache miss on another instance's write).
+    const rel = await kvGet(relKey(userId, targetId), followsCollection()).catch(() => null);
+    if (!rel) {
+      const legacy = await getLegacyFollowingIds(userId);
+      if (!legacy.includes(targetId)) {
+        return countsFromGraph(graph, userId, targetId, true);
+      }
+      // Legacy-only follow — scrub below.
+      await kvSetFollowRecord(
+        legacyFollowingKey(userId),
+        legacy.filter((id) => id !== targetId)
+      ).catch(() => false);
+      graphApplyUnfollow(graph, userId, targetId);
+      return countsFromGraph(graph, userId, targetId, false);
+    }
   }
   await kvDeleteIdempotent(relKey(userId, targetId), followsCollection()).catch(() => false);
-  if (legacyHas) {
-    // Scrub the legacy list or the read-union would resurrect the follow.
-    await kvSetFollowRecord(
-      legacyFollowingKey(userId),
-      legacy.filter((id) => id !== targetId)
-    ).catch(() => false);
-  }
-  // Same read-your-write guarantee as follow (delete propagation lags).
-  const graph = await loadFollowGraph();
-  graph.get(userId)?.delete(targetId);
-  return countsFromGraph(graph, userId, targetId);
+  // Same read-your-write guarantee (delete propagation lags).
+  graphApplyUnfollow(graph, userId, targetId);
+  return countsFromGraph(graph, userId, targetId, false);
 }
 
 // Shared response builder: fresh counts for both sides from one graph.
 function countsFromGraph(
   graph: Map<string, Set<string>>,
   userId: string,
-  targetId: string
+  targetId: string,
+  already: boolean
 ): FollowMutationResult {
   const following = [...(graph.get(userId) ?? [])];
   let followersCount = 0;
   for (const targets of graph.values()) {
     if (targets.has(targetId)) followersCount += 1;
   }
-  return { ok: true, following, followingCount: following.length, followersCount };
+  return { ok: true, already, following, followingCount: following.length, followersCount };
 }

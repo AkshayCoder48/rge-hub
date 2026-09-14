@@ -21,6 +21,7 @@ import {
   type UploadErrorCode,
   uploadErrorMessage,
 } from '@/lib/upload-errors';
+import { api, awaitOperation, TIMEOUTS, type ApiError } from '@/lib/api-client';
 import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 import { GETSHARED_MAX_BYTES } from '@/lib/getshared';
 import { uploadToGetshared } from '@/lib/getshared-client';
@@ -81,6 +82,8 @@ interface QueueItem {
   fileUrl?: string;
   resourceId?: string;
   timings?: Record<string, number>;
+  /** Neutral status line (e.g. still-processing notice) — not an error. */
+  notice?: string | null;
   /** Which backend stored this file (set during transfer). */
   via?: 'hub' | 'getshared' | 'quax';
   /** Optional cover thumbnail (all types). Uploaded as an image first. */
@@ -135,6 +138,35 @@ function makeUid(): string {
 function makeClientId(): string {
   // [a-z0-9] only, 8-64 chars — satisfies the server idempotency format.
   return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Map an api-client error from /api/resources/create back onto the upload
+ * error vocabulary, so the UI keeps precise, action-specific recovery
+ * messages (retry save vs retry upload) instead of a generic failure.
+ */
+function mapCreateError(err: ApiError): { code: UploadErrorCode; error: string } {
+  if (err.code === 'NETWORK_ERROR') {
+    return { code: 'UPLOAD_NETWORK_ERROR', error: 'Network error while saving — check your connection and retry.' };
+  }
+  if (err.code === 'UPSTREAM_UNAVAILABLE') {
+    // Retryable registration failure (backend pacing window armed) — the
+    // pipeline auto-retries once; the idempotent clientId makes it free.
+    return { code: 'DATABASE_REGISTRATION_ERROR', error: err.message || 'Storage is busy — retrying the save…' };
+  }
+  if (err.code === 'REQUEST_FAILED') {
+    if (err.status === 401 || err.status === 403) {
+      return { code: 'AUTH_ERROR', error: err.message || 'Authentication required. Please log in and try again.' };
+    }
+    if (err.status === 503) {
+      return { code: 'UPLOAD_THROTTLED', error: err.message || 'Servers are busy — please retry in a minute.' };
+    }
+    if (err.status === 400) {
+      return { code: 'UPLOAD_STORAGE_ERROR', error: err.message || 'Invalid resource details.' };
+    }
+    return { code: 'DATABASE_REGISTRATION_ERROR', error: err.message || 'Failed to save resource.' };
+  }
+  return { code: 'DATABASE_REGISTRATION_ERROR', error: err.message || 'Failed to save resource.' };
 }
 
 const STATUS_LABEL: Record<ItemStatus, string> = {
@@ -663,23 +695,17 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
     async (
       item: QueueItem,
       transfer: TransferResult
-    ): Promise<{ resource: Resource; verified: boolean; pendingVerification: boolean }> => {
+    ): Promise<{ resource?: Resource; verified: boolean; operationId?: string }> => {
       const tagsArray = tags
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
-      // Bounded wait: the server answers in seconds when healthy; if the
-      // backend is flooded the request is aborted here so "Saving…" can never
-      // spin forever. Retry is safe (same clientId → idempotent, deduped).
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 65000);
-      let res: Response;
-      try {
-        res = await fetch('/api/resources/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: ctrl.signal,
-          body: JSON.stringify({
+      // Request manager: bounded timeout (no more 65s hangs), x-request-id
+      // correlation, and the item's stable clientId as the Idempotency-Key
+      // so a retried save replays the original outcome instead of duping.
+      const res = await api<{ resource?: Resource; verified?: boolean }>('/api/resources/create', {
+        method: 'POST',
+        body: {
           type,
           title: item.title.trim(),
           description,
@@ -698,26 +724,28 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           tags: tagsArray,
           published,
           clientId: item.clientId,
-        }),
-        });
-      } catch (e) {
-        clearTimeout(timer);
-        throw {
-          code: 'UPLOAD_TIMEOUT' as UploadErrorCode,
-          error: 'Saving timed out — your file is kept, retry saving (no re-upload needed).',
-        };
+        },
+        timeoutMs: TIMEOUTS.uploadInit,
+        idempotencyKey: item.clientId,
+      });
+      if (res.success) {
+        if (res.processing && res.operationId) {
+          // HTTP 202 — the write was ACCEPTED; verification continues in the
+          // background. Success-in-progress, never a failure: the caller
+          // reconciles via GET /api/operations/{id}.
+          return { verified: false, operationId: res.operationId };
+        }
+        if (res.data?.resource) {
+          return { resource: res.data.resource, verified: true };
+        }
+        throw { code: 'DATABASE_REGISTRATION_ERROR' as UploadErrorCode, error: 'Unexpected response while saving.' };
       }
-      clearTimeout(timer);
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok) {
-        return { resource: data.resource as Resource, verified: true, pendingVerification: false };
+      if (res.error?.code === 'REQUEST_TIMEOUT') {
+        // Outcome UNKNOWN — the create may have landed. Signal the caller so
+        // it reconciles (idempotent re-send) instead of failing the item.
+        throw { code: 'REQUEST_TIMEOUT', error: 'Still working — checking status…' };
       }
-      if (res.status === 202 && data.code === 'DATABASE_VERIFICATION_ERROR' && data.resource) {
-        // Write accepted, read-back still pending — verify without re-uploading.
-        return { resource: data.resource as Resource, verified: false, pendingVerification: true };
-      }
-      const code = (data.code as UploadErrorCode) || 'DATABASE_REGISTRATION_ERROR';
-      throw { code, error: (data.error as string) || 'Failed to save resource.' };
+      throw mapCreateError(res.error ?? { code: 'REQUEST_FAILED', message: 'Failed to save resource.' });
     },
     [type, description, tags, published]
   );
@@ -876,18 +904,41 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         }
 
         // ---- Phase 2: registration ----
-        updateItem(uid, { status: 'persisting' });
-        let reg: { resource: Resource; verified: boolean; pendingVerification: boolean };
+        updateItem(uid, { status: 'persisting', notice: null });
+        let reg: { resource?: Resource; verified: boolean; operationId?: string };
         try {
           reg = await registerResource(getItem(uid)!, transfer);
         } catch (e) {
-          // ONE automatic re-save: the file is already stored (phase 1
-          // done), and a failed save almost always means "backend pacing
-          // window was armed" — 14s later the window is clear and the
-          // same clientId dedupes, so this retry is free and safe. Any
-          // other error (auth/timeout/cancel) throws straight through.
-          const rerr = e as { code?: UploadErrorCode };
-          if (rerr.code === 'DATABASE_REGISTRATION_ERROR' && !stopRef.current) {
+          const rerr = e as { code?: string };
+          if (rerr.code === 'REQUEST_TIMEOUT' && !stopRef.current) {
+            // Client timeout = outcome UNKNOWN. The create was sent with a
+            // stable clientId, so one idempotent re-send reconciles it: the
+            // server dedupes and returns the existing record if it landed.
+            updateItem(uid, { status: 'persisting', notice: 'Still working — checking status…' });
+            await new Promise((r) => setTimeout(r, 3000));
+            if (stopRef.current) return;
+            try {
+              reg = await registerResource(getItem(uid)!, transfer);
+            } catch (e2) {
+              if ((e2 as { code?: string }).code === 'REQUEST_TIMEOUT') {
+                // Still unknown — NEVER a false failure: the item stays in a
+                // neutral verifying state; the resource appears in the library.
+                updateItem(uid, {
+                  status: 'verifying',
+                  errorCode: null,
+                  error: null,
+                  notice: 'Upload is still processing — it will appear in your library.',
+                });
+                return;
+              }
+              throw e2;
+            }
+          } else if (rerr.code === 'DATABASE_REGISTRATION_ERROR' && !stopRef.current) {
+            // ONE automatic re-save: the file is already stored (phase 1
+            // done), and a failed save almost always means "backend pacing
+            // window was armed" — 14s later the window is clear and the
+            // same clientId dedupes, so this retry is free and safe. Any
+            // other error (auth/validation) throws straight through.
             await new Promise((r) => setTimeout(r, 14000));
             if (stopRef.current) return;
             updateItem(uid, { status: 'persisting' });
@@ -899,13 +950,61 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         if (stopRef.current) return;
 
         // ---- Phase 3: verification ----
-        updateItem(uid, { status: 'verifying', resourceId: reg.resource.id, timings });
-        const confirmed = reg.verified ? reg.resource : await verifyResourceRecord(reg.resource.id);
+        updateItem(uid, { status: 'verifying', resourceId: reg.resource?.id, timings });
+        let confirmed: Resource;
+        if (reg.verified && reg.resource) {
+          confirmed = reg.resource;
+        } else if (reg.operationId) {
+          // 202 path: reconcile the background verification through the
+          // operations endpoint — pending is NEVER a failure.
+          const op = await awaitOperation(reg.operationId, { maxAttempts: 8, intervalMs: 2500 });
+          if (stopRef.current) return;
+          if (op?.status === 'success') {
+            const fromOp = op.result as Resource | undefined;
+            if (fromOp?.id) {
+              confirmed = fromOp;
+            } else {
+              // Success without a payload — the record exists; the library
+              // view reconciles on the next fetch.
+              updateItem(uid, { status: 'ready', resourceId: reg.resource?.id, errorCode: null, error: null, notice: null });
+              return;
+            }
+          } else if (op?.status === 'failed') {
+            throw {
+              code: 'DATABASE_VERIFICATION_ERROR' as UploadErrorCode,
+              error: op.error?.message || 'Saved, but confirmation is still pending — check your library before re-uploading.',
+            };
+          } else {
+            // Polling exhausted without a terminal state — the write WAS
+            // accepted (202). Not a failure: keep the item pending and tell
+            // the user where it will show up.
+            updateItem(uid, {
+              status: 'verifying',
+              errorCode: null,
+              error: null,
+              notice: 'Upload is still processing — it will appear in your library.',
+            });
+            return;
+          }
+        } else if (reg.resource) {
+          // Legacy fallback (no operationId): poll /api/resources/verify.
+          confirmed = await verifyResourceRecord(reg.resource.id);
+        } else {
+          // No resource and no operation to reconcile — keep the item in a
+          // neutral pending state rather than guessing a failure.
+          updateItem(uid, {
+            status: 'verifying',
+            errorCode: null,
+            error: null,
+            notice: 'Upload is still processing — it will appear in your library.',
+          });
+          return;
+        }
         if (stopRef.current) return;
 
         // Write-through into the store so profile/community update instantly.
         upsertLocal(confirmed);
-        updateItem(uid, { status: 'ready', resourceId: confirmed.id, errorCode: null, error: null });
+        updateItem(uid, { status: 'ready', resourceId: confirmed.id, errorCode: null, error: null, notice: null });
       } catch (e) {
         const err = e as { code?: UploadErrorCode; error?: string; cancelled?: boolean };
         if (err.cancelled || getItem(uid)?.status === 'cancelled') {
@@ -939,7 +1038,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           if (stopRef.current) break;
           const it = getItem(uid);
           if (!it) continue;
-          if (!onlyUid && (it.status === 'ready' || it.status === 'cancelled')) continue;
+          if (!onlyUid && (it.status === 'ready' || it.status === 'cancelled' || it.status === 'verifying')) continue;
           if (!onlyUid && it.status === 'failed') continue; // failed items retry manually
           await processItem(uid);
         }
@@ -998,12 +1097,11 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
     (uid: string) => {
       const it = getItem(uid);
       if (!it) return;
-      // Registration/verification failures reuse the uploaded file (no re-upload).
-      const skipTransfer =
-        !!it.fileId &&
-        !!it.fileUrl &&
-        (it.errorCode === 'DATABASE_REGISTRATION_ERROR' || it.errorCode === 'DATABASE_VERIFICATION_ERROR');
-      updateItem(uid, { status: 'queued', errorCode: null, error: null });
+      // Registration/verification failures reuse the uploaded file (no
+      // re-upload). fileId/fileUrl are only set once Phase 1 completed, so
+      // their presence means the failure happened in the save phase.
+      const skipTransfer = !!it.fileId && !!it.fileUrl;
+      updateItem(uid, { status: 'queued', errorCode: null, error: null, notice: null });
       // Defer so the status paint happens before the pipeline re-runs.
       setTimeout(() => {
         if (skipTransfer) {
@@ -1033,8 +1131,11 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
   const readyCount = items.filter((it) => it.status === 'ready').length;
   const failedCount = items.filter((it) => it.status === 'failed').length;
   const pendingCount = items.filter((it) => it.status === 'queued' || it.status === 'cancelled').length;
-  const activeCount = items.filter((it) =>
-    ['uploading', 'uploaded', 'persisting', 'verifying'].includes(it.status)
+  // A 'verifying' item only counts as active while the queue is running —
+  // once the queue ends it is a resting state owned by the server (the
+  // write was accepted), not something the footer should block on.
+  const activeCount = items.filter(
+    (it) => ['uploading', 'uploaded', 'persisting'].includes(it.status) || (running && it.status === 'verifying')
   ).length;
   const allTerminal = items.length > 0 && pendingCount === 0 && activeCount === 0 && !running;
 
@@ -1054,9 +1155,9 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
       case 'uploaded':
         return 'File uploaded. Saving resource…';
       case 'persisting':
-        return 'File uploaded. Saving resource…';
+        return it.notice || 'File uploaded. Saving resource…';
       case 'verifying':
-        return 'Saved. Confirming persistence…';
+        return it.notice || 'Saved. Confirming persistence…';
       case 'ready':
         return 'Upload complete';
       case 'failed':
@@ -1086,30 +1187,58 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         const u = new URL(url);
         fileName = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || u.hostname);
       } catch {}
-      const res = await fetch('/api/resources/create', {
+      // One stable id per save action — the fileId AND the idempotency key
+      // derive from it, so a retry replays the same record instead of duping.
+      const linkClientId = makeClientId();
+      const res = await api<{ resource?: Resource }>('/api/resources/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: {
           type,
           title,
           description,
-          fileId: `ext:link:${makeClientId()}`,
+          fileId: `ext:link:${linkClientId}`,
           downloadUrl: url,
           fileName,
           mimeType: 'text/uri-list',
           tags: tagsArray,
           published,
-          clientId: makeClientId(),
-        }),
+          clientId: linkClientId,
+        },
+        timeoutMs: TIMEOUTS.uploadInit,
+        idempotencyKey: linkClientId,
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) {
-        throw new Error((data.error as string) || 'Failed to save link.');
+      if (res.success && res.processing && res.operationId) {
+        // 202 — write accepted, verification in flight: reconcile, never fail.
+        const op = await awaitOperation(res.operationId, { maxAttempts: 8, intervalMs: 2500 });
+        if (op?.status === 'success') {
+          const fromOp = op.result as Resource | undefined;
+          if (fromOp?.id) upsertLocal(fromOp);
+          toast({ title: 'Link added!', description: published ? 'Published to community.' : 'Saved as draft.' });
+        } else if (op?.status === 'failed') {
+          throw new Error(op.error?.message || 'The link was saved but could not be confirmed yet — check your library.');
+        } else {
+          toast({ title: 'Link saved', description: 'Still processing — it will appear in your library shortly.' });
+        }
+        onSuccess();
+        onClose();
+        return;
       }
-      upsertLocal(data.resource as Resource);
-      toast({ title: 'Link added!', description: published ? 'Published to community.' : 'Saved as draft.' });
-      onSuccess();
-      onClose();
+      if (res.success && res.data?.resource) {
+        upsertLocal(res.data.resource);
+        toast({ title: 'Link added!', description: published ? 'Published to community.' : 'Saved as draft.' });
+        onSuccess();
+        onClose();
+        return;
+      }
+      if (res.error?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — the record may exist; do not report failure.
+        toast({
+          title: 'Still saving…',
+          description: 'This is taking longer than expected. Check your library before adding the link again.',
+        });
+        return;
+      }
+      throw new Error(res.error?.message || 'Failed to save link.');
     } catch (err) {
       toast({
         title: 'Could not save link',
@@ -1470,7 +1599,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#ef233c]/10 border border-[#ef233c]/25 text-[11px] font-medium text-[#ef233c] hover:bg-[#ef233c]/20 transition-all"
                             >
                               <RotateCcw className="w-3 h-3" />
-                              {it.fileId && (it.errorCode === 'DATABASE_REGISTRATION_ERROR' || it.errorCode === 'DATABASE_VERIFICATION_ERROR')
+                              {it.fileId && it.fileUrl
                                 ? 'Retry save (no re-upload)'
                                 : 'Retry upload'}
                             </button>

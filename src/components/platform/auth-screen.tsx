@@ -1,12 +1,35 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { Logo } from '@/components/logo';
 import { Mail, ArrowRight, ArrowLeft, Loader2, ShieldCheck, CheckCircle2, Lock, User as UserIcon, KeyRound } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { api, TIMEOUTS, type ApiError } from '@/lib/api-client';
 
 type Step = 'intro' | 'email' | 'otp' | 'register' | 'login' | 'forgot' | 'forgot-otp' | 'reset-password';
+type OtpPurpose = 'registration' | 'password_reset';
+
+/** POST /api/auth/otp/send success payload (new contract). */
+interface OtpSendData {
+  message: string;
+  alreadySent: boolean;
+  /** Server-issued reference for the code in flight — required to verify. */
+  otpRef: string;
+  expiresInMs: number;
+  purpose: OtpPurpose;
+}
+
+/** POST /api/auth/otp/verify success payload (new contract). */
+interface OtpVerifyData {
+  verified: boolean;
+  purpose: OtpPurpose;
+  /** Signed token authorizing /api/auth/reset-password (password_reset only). */
+  resetToken?: string;
+}
+
+/** Extra fields the OTP endpoints attach to error bodies. */
+type OtpError = ApiError & { otpRef?: string; remainingAttempts?: number };
 
 export function AuthScreen() {
   const { refresh } = useAuth();
@@ -21,63 +44,88 @@ export function AuthScreen() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  // Granular pending states so the UI says exactly what is happening.
+  const [sending, setSending] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  // OTP flow state (new contract): the reference for the code in flight and
+  // the signed token that authorizes the password reset.
+  const [otpRef, setOtpRef] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  // Live resend countdown (mirrors the 60s duplicate-send rate limit).
+  const [resendInSecs, setResendInSecs] = useState(0);
 
-  // All auth calls are bounded: fail fast with a retry message instead of an eternal spinner.
-  const AUTH_TIMEOUT_MS = 55000;
-  async function authFetch(path: string, body: unknown): Promise<any> {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), AUTH_TIMEOUT_MS);
-    try {
-      const res = await fetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: ctrl.signal,
-      });
-      return await res.json().catch(() => ({}));
-    } catch {
-      throw new Error('Request timed out — the server is slow, please retry.');
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  useEffect(() => {
+    if (resendInSecs <= 0) return;
+    const t = setTimeout(() => setResendInSecs((s) => (s > 0 ? s - 1 : 0)), 1000);
+    return () => clearTimeout(t);
+  }, [resendInSecs]);
 
-  const handleSendOtp = useCallback(async (purpose: 'registration' | 'password_reset') => {
+  const handleSendOtp = useCallback(async (purpose: OtpPurpose) => {
     if (!email || !email.includes('@')) {
       toast({ title: 'Invalid email', description: 'Please enter a valid email address', variant: 'destructive' });
       return;
     }
-    setLoading(true);
+    if (sending || resendInSecs > 0) return;
+    setSending(true);
     try {
-      const data = await authFetch('/api/auth/otp/send', { email, purpose });
-      if (data.ok) {
+      const res = await api<OtpSendData>('/api/auth/otp/send', {
+        method: 'POST',
+        body: { email, purpose },
+        timeoutMs: TIMEOUTS.otpSend,
+      });
+      if (res.success && res.data) {
+        // otpRef is required for verification — keep it for the verify call.
+        if (res.data.otpRef) setOtpRef(res.data.otpRef);
+        setOtp('');
         setStep(purpose === 'password_reset' ? 'forgot-otp' : 'otp');
         toast({
-          title: data.alreadySent ? 'Already sent' : 'Code sent',
-          description: data.alreadySent
+          title: res.data.alreadySent ? 'Already sent' : 'Code sent',
+          description: res.data.alreadySent
             ? 'That code is already in your inbox — enter it below'
             : 'Check your email for the 6-digit code',
         });
-      } else {
-        toast({ title: 'Failed', description: data.error, variant: 'destructive' });
+        setResendInSecs(60);
+        return;
       }
-    } catch (e) {
-      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Failed to send OTP', variant: 'destructive' });
+      const err = res.error as OtpError | undefined;
+      if (err?.code === 'RATE_LIMITED') {
+        // Show the server message plus a live countdown; the button stays
+        // disabled until the window clears.
+        const secs = typeof err.retryAfterSecs === 'number' && err.retryAfterSecs > 0 ? err.retryAfterSecs : 60;
+        setResendInSecs(Math.min(Math.ceil(secs), 300));
+        toast({ title: 'Please wait', description: err.message });
+        return;
+      }
+      if (err?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — the email may still arrive. Never "failed".
+        toast({
+          title: 'Still sending…',
+          description: 'This is taking longer than expected. Your code may still arrive — give it a moment before resending.',
+        });
+        return;
+      }
+      toast({ title: 'Failed', description: err?.message ?? 'Failed to send code', variant: 'destructive' });
     } finally {
-      setLoading(false);
+      setSending(false);
     }
-  }, [email, toast]);
+  }, [email, sending, resendInSecs, toast]);
 
-  const handleVerifyOtp = useCallback(async (purpose: 'registration' | 'password_reset') => {
+  const handleVerifyOtp = useCallback(async (purpose: OtpPurpose) => {
     if (!otp || otp.length < 6) {
       toast({ title: 'Invalid code', description: 'Enter the 6-digit code', variant: 'destructive' });
       return;
     }
-    setLoading(true);
+    setVerifying(true);
     try {
-      const data = await authFetch('/api/auth/otp/verify', { email, code: otp, purpose });
-      if (data.ok) {
+      const res = await api<OtpVerifyData>('/api/auth/otp/verify', {
+        method: 'POST',
+        body: { email, code: otp, purpose, ...(otpRef ? { otpRef } : {}) },
+        timeoutMs: TIMEOUTS.auth,
+      });
+      if (res.success && res.data?.verified) {
+        setOtpRef(null);
         if (purpose === 'password_reset') {
+          setResetToken(res.data.resetToken ?? null);
           setStep('reset-password');
           toast({ title: 'Verified!', description: 'Enter your new password' });
         } else {
@@ -85,15 +133,33 @@ export function AuthScreen() {
           setStep('register');
           toast({ title: 'Email verified!', description: 'Complete your registration' });
         }
-      } else {
-        toast({ title: 'Verification failed', description: data.error, variant: 'destructive' });
+        return;
       }
-    } catch (e) {
-      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Verification failed', variant: 'destructive' });
+      const err = res.error as OtpError | undefined;
+      // CRITICAL: wrong-code errors rotate the temp record — carry the NEW
+      // otpRef into the next attempt (the attempt counter lives there).
+      if (err?.otpRef) setOtpRef(err.otpRef);
+      if (err?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — the code was not necessarily consumed.
+        toast({
+          title: 'Still verifying…',
+          description: 'The check is taking longer than expected. Your code is still valid — try again in a moment.',
+        });
+        return;
+      }
+      const left = err?.remainingAttempts;
+      toast({
+        title: 'Verification failed',
+        description:
+          left !== undefined
+            ? `${err?.message ?? 'Invalid code'} — ${left} attempt${left === 1 ? '' : 's'} left`
+            : (err?.message ?? 'Invalid code'),
+        variant: 'destructive',
+      });
     } finally {
-      setLoading(false);
+      setVerifying(false);
     }
-  }, [email, otp, displayName, toast]);
+  }, [email, otp, otpRef, displayName, toast]);
 
   const handleRegister = useCallback(async () => {
     if (!username || !displayName || !password) {
@@ -106,15 +172,23 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const data = await authFetch('/api/auth/register', { email, username, displayName, password });
-      if (data.ok) {
+      // Legacy { ok, ... } shape — api() normalizes it (res.data = payload).
+      const res = await api<{ user?: unknown }>('/api/auth/register', {
+        method: 'POST',
+        body: { email, username, displayName, password },
+        timeoutMs: TIMEOUTS.auth,
+      });
+      if (res.success) {
         await refresh();
         toast({ title: 'Welcome!', description: 'Account created successfully' });
+      } else if (res.error?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — if the account was created the session cookie
+        // landed too; re-check instead of reporting failure.
+        await refresh();
+        toast({ title: 'Still working…', description: 'Registration is taking longer than expected. If it completed, you will be signed in shortly.' });
       } else {
-        toast({ title: 'Registration failed', description: data.error, variant: 'destructive' });
+        toast({ title: 'Registration failed', description: res.error?.message ?? 'Registration failed', variant: 'destructive' });
       }
-    } catch (e) {
-      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Registration failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -127,15 +201,22 @@ export function AuthScreen() {
     }
     setLoading(true);
     try {
-      const data = await authFetch('/api/auth/login', { email, password: loginPassword });
-      if (data.ok) {
+      // Legacy { ok, ... } shape — api() normalizes it (res.data = payload).
+      const res = await api<{ user?: unknown }>('/api/auth/login', {
+        method: 'POST',
+        body: { email, password: loginPassword },
+        timeoutMs: TIMEOUTS.auth,
+      });
+      if (res.success) {
         await refresh();
         toast({ title: 'Welcome back!', description: 'Logged in successfully' });
+      } else if (res.error?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — the session may have landed; re-check it.
+        await refresh();
+        toast({ title: 'Still working…', description: 'Sign-in is taking longer than expected. If it completed, you will be signed in shortly.' });
       } else {
-        toast({ title: 'Login failed', description: data.error, variant: 'destructive' });
+        toast({ title: 'Login failed', description: res.error?.message ?? 'Login failed', variant: 'destructive' });
       }
-    } catch (e) {
-      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Login failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
@@ -150,21 +231,38 @@ export function AuthScreen() {
       toast({ title: 'Mismatch', description: 'Passwords do not match', variant: 'destructive' });
       return;
     }
+    if (!resetToken) {
+      // The signed token is required (10-min TTL) — re-verify a new code.
+      toast({ title: 'Session expired', description: 'Please verify a new code to reset your password', variant: 'destructive' });
+      setStep('forgot');
+      return;
+    }
     setLoading(true);
     try {
-      const data = await authFetch('/api/auth/reset-password', { email, password: newPassword });
-      if (data.ok) {
+      const res = await api<{ message: string; user?: unknown }>('/api/auth/reset-password', {
+        method: 'POST',
+        body: { email, password: newPassword, resetToken },
+        timeoutMs: TIMEOUTS.auth,
+      });
+      if (res.success) {
+        setResetToken(null);
         await refresh();
         toast({ title: 'Password reset!', description: 'You are now logged in' });
+      } else if (res.error?.code === 'REQUEST_TIMEOUT') {
+        // Outcome unknown — a landed reset also lands the session cookie.
+        await refresh();
+        toast({ title: 'Still working…', description: 'The reset is taking longer than expected. If it completed, you will be signed in shortly.' });
       } else {
-        toast({ title: 'Reset failed', description: data.error, variant: 'destructive' });
+        if (res.error?.code === 'RESET_TOKEN_INVALID') {
+          setResetToken(null);
+          setStep('forgot');
+        }
+        toast({ title: 'Reset failed', description: res.error?.message ?? 'Password reset failed', variant: 'destructive' });
       }
-    } catch (e) {
-      toast({ title: 'Error', description: e instanceof Error ? e.message : 'Password reset failed', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
-  }, [email, newPassword, confirmPassword, refresh, toast]);
+  }, [email, newPassword, confirmPassword, resetToken, refresh, toast]);
 
   const inputCls = "w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder:text-zinc-600 focus:border-[#ef233c] focus:outline-none transition-all";
   const inputWithIconCls = "w-full pl-9 pr-4 py-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder:text-zinc-600 focus:border-[#ef233c] focus:outline-none transition-all";
@@ -226,7 +324,7 @@ export function AuthScreen() {
               </button>
               <div className="flex items-center justify-center gap-1.5 pt-2 text-[10px] text-zinc-600">
                 <ShieldCheck className="w-3 h-3" />
-                <span>Secure email OTP verification via OnyxBase</span>
+                <span>Secure email OTP verification</span>
               </div>
             </div>
           )}
@@ -266,9 +364,12 @@ export function AuthScreen() {
                 <label className={labelCls}>Email Address</label>
                 <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" onKeyDown={(e) => { if (e.key === 'Enter') handleSendOtp('registration'); }} className={inputCls} />
               </div>
-              <button onClick={() => handleSendOtp('registration')} disabled={loading} className={btnCls}>
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Mail className="w-4 h-4" /> Send Code</>}
+              <button onClick={() => handleSendOtp('registration')} disabled={sending || resendInSecs > 0} className={btnCls}>
+                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Mail className="w-4 h-4" /> Send Code</>}
               </button>
+              {resendInSecs > 0 && !sending && (
+                <p className="text-[10px] text-zinc-600 text-center">You can request a new code in {resendInSecs}s</p>
+              )}
             </div>
           )}
 
@@ -283,10 +384,16 @@ export function AuthScreen() {
                 <label className={labelCls}>Verification Code</label>
                 <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('registration'); }} className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-2xl text-center text-white font-manrope tracking-[0.5em] placeholder:text-zinc-700 focus:border-[#ef233c] focus:outline-none transition-all" />
               </div>
-              <button onClick={() => handleVerifyOtp('registration')} disabled={loading} className={btnCls}>
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify</>}
+              <button onClick={() => handleVerifyOtp('registration')} disabled={verifying} className={btnCls}>
+                {verifying ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify</>}
               </button>
-              <button onClick={() => handleSendOtp('registration')} className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Didn't receive it? Resend code</button>
+              <button
+                onClick={() => handleSendOtp('registration')}
+                disabled={sending || verifying || resendInSecs > 0}
+                className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:text-zinc-600"
+              >
+                {resendInSecs > 0 ? `Didn't receive it? Resend available in ${resendInSecs}s` : "Didn't receive it? Resend code"}
+              </button>
             </div>
           )}
 
@@ -316,7 +423,7 @@ export function AuthScreen() {
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
                   <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" onKeyDown={(e) => { if (e.key === 'Enter') handleRegister(); }} className={inputWithIconCls} />
                 </div>
-                <p className="text-[10px] text-zinc-600 mt-1.5">Your password is stored securely by OnyxBase</p>
+                <p className="text-[10px] text-zinc-600 mt-1.5">Your password is stored securely</p>
               </div>
               <button onClick={handleRegister} disabled={loading} className={btnCls}>
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <>Create Account <ArrowRight className="w-4 h-4" /></>}
@@ -335,9 +442,12 @@ export function AuthScreen() {
                 <label className={labelCls}>Email Address</label>
                 <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" onKeyDown={(e) => { if (e.key === 'Enter') handleSendOtp('password_reset'); }} className={inputCls} />
               </div>
-              <button onClick={() => handleSendOtp('password_reset')} disabled={loading} className={btnCls}>
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><KeyRound className="w-4 h-4" /> Send Reset Code</>}
+              <button onClick={() => handleSendOtp('password_reset')} disabled={sending || resendInSecs > 0} className={btnCls}>
+                {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <><KeyRound className="w-4 h-4" /> Send Reset Code</>}
               </button>
+              {resendInSecs > 0 && !sending && (
+                <p className="text-[10px] text-zinc-600 text-center">You can request a new code in {resendInSecs}s</p>
+              )}
               <p className="text-[10px] text-zinc-600 text-center">If an account exists for this email, a reset code will be sent.</p>
             </div>
           )}
@@ -353,10 +463,16 @@ export function AuthScreen() {
                 <label className={labelCls}>Reset Code</label>
                 <input type="text" inputMode="numeric" maxLength={6} value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))} placeholder="000000" onKeyDown={(e) => { if (e.key === 'Enter') handleVerifyOtp('password_reset'); }} className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-2xl text-center text-white font-manrope tracking-[0.5em] placeholder:text-zinc-700 focus:border-[#ef233c] focus:outline-none transition-all" />
               </div>
-              <button onClick={() => handleVerifyOtp('password_reset')} disabled={loading} className={btnCls}>
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify Code</>}
+              <button onClick={() => handleVerifyOtp('password_reset')} disabled={verifying} className={btnCls}>
+                {verifying ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4" /> Verify Code</>}
               </button>
-              <button onClick={() => handleSendOtp('password_reset')} className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors">Didn't receive it? Resend code</button>
+              <button
+                onClick={() => handleSendOtp('password_reset')}
+                disabled={sending || verifying || resendInSecs > 0}
+                className="w-full text-center text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:text-zinc-600"
+              >
+                {resendInSecs > 0 ? `Didn't receive it? Resend available in ${resendInSecs}s` : "Didn't receive it? Resend code"}
+              </button>
             </div>
           )}
 

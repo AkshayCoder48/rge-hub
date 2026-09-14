@@ -6,6 +6,36 @@ A Next.js web application that transforms ordinary videos into dramatic **revers
 > **Reversed**: 0.6x → 4x (slow to fast — accelerate)
 > **Combined**: One seamless V-ramp clip
 
+---
+
+## Performance & Reliability Architecture (2026 overhaul)
+
+This app was re-architected to eliminate the systemic "every operation takes ~2 minutes / says *server busy* but actually succeeded" failures. Key design:
+
+- **Email OTP without OnyxBase** — OTP state (hashed, 10-min expiry, 5 attempts) lives in
+  [AI SENSE temporary storage](https://aisenseapi.com/services/v1/storage) (24h object TTL, unguessable UUID refs),
+  and email delivery goes **directly to MCPEmails** from the server (`MCPEMAILS_API_KEY`) with OnyxBase's
+  connected credential as fallback. The API key is server-side only; the backend IP is what MCPEmails sees —
+  no client-IP spoofing. Wrong-code retries rotate the temp record (the new ref rides the error response).
+- **No false failures** — mutations answer `{ success, data, requestId, durationMs }`, or `202
+  { status: "processing", operationId }` for background work. Clients reconcile via `GET /api/operations/{id}`
+  and show *Verifying…* instead of a failure. A client timeout is never treated as an operation failure.
+- **Idempotency** — mutations accept an `Idempotency-Key` header (replayed results, 409 while in-flight);
+  resource ids derive from the uploader's `clientId`; follow edges are one-record-per-relationship.
+- **Fast listings** — collection reads are single export calls + tombstone filtering + short server caches
+  (`listResourcesFast`), replacing the per-record quorum fan-outs. `/api/follows/list` resolves profiles in
+  parallel with server-side pagination (`?page=&limit=`); admin stats are cached aggregates.
+- **Follow consistency** — counts derive from the canonical rel-record graph (cached 30s, mutated in place on
+  confirmed writes — read-your-write, no `following=1/followers=0` splits).
+- **Password reset (fixed)** — a verified reset OTP issues a signed, 10-minute reset token; the reset route
+  verifies the token instead of re-reading a consumed OTP record (the old check could never pass).
+- **Observability** — every response carries `x-request-id` + `durationMs`; OTPs/passwords/keys are never
+  logged. `GET /api/health` reports per-dependency status.
+
+Secrets are documented in [`HANDOFF.md`](./HANDOFF.md) and `.env.example` — never committed.
+
+---
+
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue?logo=typescript)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-38B2AC?logo=tailwindcss)

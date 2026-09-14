@@ -42,6 +42,8 @@ import {
   type XmlSource,
 } from '@/lib/resources';
 import { getFileUrl } from '@/lib/onyxbase';
+import { createOperation, updateOperation } from '@/lib/operations';
+import { newRequestId } from '@/lib/api-contract';
 import type { UploadErrorCode } from '@/lib/upload-errors';
 
 export const maxDuration = 60;
@@ -214,23 +216,67 @@ export async function POST(request: NextRequest) {
 
     if (!result.verified) {
       // Write accepted but not yet readable (eventual consistency).
-      // NOT a permanent failure — client retries verification.
+      //
+      // FALSE-FAILURE FIX (PRD §22 / OnyxBase PRD §41): this used to answer
+      // `{ ok: false, code: DATABASE_VERIFICATION_ERROR }` — the client
+      // treated a DURABLE write as failed and retried into duplicates.
+      // Now: register an operation, answer 202 { ok: true, status:
+      // 'processing', operationId }, and verify in the background. The
+      // client reconciles via GET /api/operations/[id] — never a failure.
+      const op = createOperation(
+        'resource.create',
+        { resourceId: resource.id, type: resource.type, ownerId: resource.ownerId }
+      );
+      updateOperation(op.id, { status: 'processing', result: resource });
+
+      // Background read-your-write verification (bounded), survives the
+      // response via after() where available.
+      const verifyBg = async () => {
+        for (let i = 0; i < 6; i++) {
+          await new Promise((r) => setTimeout(r, 3000 + i * 2000));
+          const back = await getResource(resource.id, resourceType, resourceXmlSource).catch(() => null);
+          if (back && back.id === resource.id) {
+            updateOperation(op.id, { status: 'success', result: back });
+            return;
+          }
+        }
+        updateOperation(op.id, {
+          status: 'failed',
+          error: {
+            code: 'RESOURCE_NOT_VERIFIED',
+            message:
+              'The resource was saved but could not be confirmed readable yet. It may still appear — check your library before re-uploading.',
+          },
+        });
+      };
+      try {
+        const { after } = await import('next/server');
+        if (typeof after === 'function') after(() => void verifyBg());
+        else void verifyBg();
+      } catch {
+        void verifyBg();
+      }
+
       return NextResponse.json(
         {
-          ok: false,
+          ok: true,
+          success: true,
+          status: 'processing',
+          operationId: op.id,
+          // Legacy signal kept so existing clients keep polling /verify.
           code: 'DATABASE_VERIFICATION_ERROR',
-          error: 'Resource saved but not yet confirmed. Retrying…',
-          retryable: true,
+          verified: false,
           resource,
           database_write_ms,
           verifyAttempts: result.attempts,
         },
-        { status: 202 }
+        { status: 202, headers: { 'x-request-id': newRequestId() } }
       );
     }
 
     return NextResponse.json({
       ok: true,
+      success: true,
       resource,
       verified: true,
       database_write_ms,

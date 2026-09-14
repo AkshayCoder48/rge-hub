@@ -20,7 +20,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import {
-  listResources,
+  listResourcesFast,
   listAllPublicResources,
   listResourcesByOwner,
   searchResources,
@@ -120,9 +120,9 @@ export async function GET(request: NextRequest) {
     } else if (isResourceType(type)) {
       if (type === 'xml' && !isXmlSource(xmlSource)) {
         // No xmlSource provided — default to community for non-admins
-        resources = await listResources('xml', 'community');
+        resources = await listResourcesFast('xml', 'community');
       } else {
-        resources = await listResources(type, isXmlSource(xmlSource) ? xmlSource : undefined);
+        resources = await listResourcesFast(type, isXmlSource(xmlSource) ? xmlSource : undefined);
       }
 
       // Visibility filtering

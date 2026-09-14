@@ -1,96 +1,103 @@
 /**
- * POST /api/auth/reset-password
- * Reset password using a verified OTP.
+ * POST /api/auth/reset-password  — FIXED (PRD §10).
  *
- * Flow:
- * 1. User requests password reset OTP (via /api/auth/otp/send with purpose=password_reset)
- * 2. User verifies OTP (via /api/auth/otp/verify with purpose=password_reset)
- * 3. User submits new password with email + verified OTP reference
- * 4. This endpoint:
- *    a. Looks up the profile by email
- *    b. If found, registers a NEW OnyxBase account (OnyxBase doesn't have a password update endpoint,
- *       so we re-register which gives a new API key)
- *    c. Updates the profile with the new API key
- *    d. Creates a new session
+ * OLD (broken) flow: required `otp:{email}:password_reset` to still exist
+ * with `consumed === true` — but verification DELETES the record on
+ * success, so the check could never pass; password reset was dead.
  *
- * NOTE: OnyxBase's /api/auth/register endpoint creates a new account if the email doesn't exist
- * or returns the existing account. The password is updated by re-registering.
+ * NEW flow:
+ *   1. User requests reset OTP (/api/auth/otp/send, purpose=password_reset)
+ *   2. User verifies (/api/auth/otp/verify) → receives a signed resetToken
+ *      (HMAC-SHA256, 10-minute TTL, bound to the email)
+ *   3. User submits { email, password, resetToken } here.
  *
- * Body: { email, password }
- * Requires: password_reset OTP must have been verified for this email.
+ * The token is verified SERVER-SIDE against the session secret — no OTP
+ * record re-read, no OnyxBase OTP lookup (PRD §3).
  *
- * We verify the OTP was consumed by checking the OTP record.
+ * Password update itself still goes through OnyxBase's native re-register
+ * (it mints a fresh apiKey for the account) + profile upsert.
  */
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { registerByEmailPassword } from '@/lib/onyxbase';
-import { getProfileByEmail, upsertProfile, getProfileByUsername } from '@/lib/resources';
+import { getProfileByEmail, upsertProfile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
-import { kvGet, kvDelete, ONYXBASE_COLLECTIONS, backendAcceptsWrites } from '@/lib/onyxbase';
+import { verifyResetToken } from '@/lib/otp';
+import { ok, fail, ERROR_CODES, newRequestId, logRequest } from '@/lib/api-contract';
+import { allow, clientIpFrom } from '@/lib/rate-limit';
+
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
+  const requestId = newRequestId();
+  const t0 = Date.now();
+  const meta = { requestId, durationMs: 0 };
   try {
-    const { email, password } = await request.json();
-    if (!email || !password) {
-      return NextResponse.json(
-        { ok: false, error: 'Email and password are required' },
-        { status: 400 }
-      );
+    const body = await request.json().catch(() => null);
+    const email = typeof body?.email === 'string' ? body.email : '';
+    const password = typeof body?.password === 'string' ? body.password : '';
+    const resetToken = typeof body?.resetToken === 'string' ? body.resetToken : '';
+    if (!email || !password || !resetToken) {
+      meta.durationMs = Date.now() - t0;
+      return fail(ERROR_CODES.VALIDATION_ERROR, 'Email, new password, and reset token are required.', meta, {
+        status: 400,
+      });
     }
-
     if (password.length < 6) {
-      return NextResponse.json(
-        { ok: false, error: 'Password must be at least 6 characters' },
-        { status: 400 }
-      );
-    }
-
-    // Circuit breaker: fail fast in seconds when the backend is drowning.
-    if (!(await backendAcceptsWrites())) {
-      return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
-        { status: 503 }
-      );
+      meta.durationMs = Date.now() - t0;
+      return fail(ERROR_CODES.VALIDATION_ERROR, 'Password must be at least 6 characters.', meta, { status: 400 });
     }
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Verify that the password_reset OTP was consumed for this email
-    const otpRecord = await kvGet<{ consumed: boolean }>(
-      `otp:${normalizedEmail}:password_reset`,
-      ONYXBASE_COLLECTIONS.OTPS
-    );
-    if (!otpRecord || !otpRecord.consumed) {
-      return NextResponse.json(
-        { ok: false, error: 'Please verify your email with the reset code first.' },
+    // Rate limit the expensive path (per IP).
+    const rl = allow(`reset:ip:${clientIpFrom(request)}`, 6, 60 * 60_000);
+    if (!rl.allowed) {
+      meta.durationMs = Date.now() - t0;
+      return fail(ERROR_CODES.RATE_LIMITED, 'Too many reset attempts. Please wait a moment.', meta, {
+        status: 429,
+        retryable: true,
+        retryAfterSecs: rl.retryAfterSecs,
+      });
+    }
+
+    // Verify the signed reset token (fixes the dead "consumed flag" path).
+    const tokenCheck = verifyResetToken(resetToken);
+    if (!tokenCheck.ok || tokenCheck.email !== normalizedEmail) {
+      meta.durationMs = Date.now() - t0;
+      return fail(
+        ERROR_CODES.RESET_TOKEN_INVALID,
+        'Your reset link has expired. Please verify a new code and try again.',
+        meta,
         { status: 400 }
       );
     }
 
-    // Find the existing profile by email
+    // Find the existing profile by email.
     const existingProfile = await getProfileByEmail(normalizedEmail);
     if (!existingProfile) {
-      // Don't reveal whether the email exists — generic message
-      return NextResponse.json(
-        { ok: false, error: 'No account found with this email address.' },
-        { status: 400 }
-      );
+      // Don't reveal whether the email exists — generic message.
+      meta.durationMs = Date.now() - t0;
+      return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
+        status: 400,
+      });
     }
 
-    // Re-register with OnyxBase to update the password (OnyxBase will update the existing account)
+    // Re-register with OnyxBase to update the password (mints a new apiKey).
     const regResult = await registerByEmailPassword(
       existingProfile.displayName,
       normalizedEmail,
       password
     );
-
+    meta.durationMs = Date.now() - t0;
     if (!regResult.ok || !regResult.apiKey) {
-      return NextResponse.json(
-        { ok: false, error: regResult.error || 'Password reset failed. Please try again.' },
-        { status: 400 }
-      );
+      return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, regResult.error || 'Password reset failed. Please try again.', meta, {
+        status: 502,
+        retryable: true,
+      });
     }
 
-    // Update the profile with the new API key
+    // Update the profile with the new API key.
     const updatedProfile = {
       ...existingProfile,
       apiKey: regResult.apiKey,
@@ -98,18 +105,12 @@ export async function POST(request: NextRequest) {
     };
     await upsertProfile(updatedProfile);
 
-    // Clean up the OTP record (one-time use)
-    try {
-      await kvDelete(`otp:${normalizedEmail}:password_reset`, ONYXBASE_COLLECTIONS.OTPS);
-    } catch {}
-
-    // Create a new session
+    // Create a new session.
     const isAdmin = isAdminUser({
       username: updatedProfile.username,
       displayName: updatedProfile.displayName,
       email: updatedProfile.email,
     });
-
     await createSession({
       userId: updatedProfile.userId,
       username: updatedProfile.username,
@@ -121,20 +122,25 @@ export async function POST(request: NextRequest) {
       isAdmin,
     });
 
-    return NextResponse.json({
-      ok: true,
-      message: 'Password reset successfully',
-      user: {
-        userId: updatedProfile.userId,
-        username: updatedProfile.username,
-        displayName: updatedProfile.displayName,
-        avatar: updatedProfile.avatar,
-        bio: updatedProfile.bio,
-        isAdmin,
+    const res = ok(
+      {
+        message: 'Password reset successfully',
+        user: {
+          userId: updatedProfile.userId,
+          username: updatedProfile.username,
+          displayName: updatedProfile.displayName,
+          avatar: updatedProfile.avatar,
+          bio: updatedProfile.bio,
+          isAdmin,
+        },
       },
-    });
+      meta
+    );
+    logRequest(meta, '/api/auth/reset-password', 'POST', 200, 'auth.reset_password');
+    return res;
   } catch (err) {
-    console.error('[reset-password] error:', err);
-    return NextResponse.json({ ok: false, error: 'Password reset failed' }, { status: 500 });
+    meta.durationMs = Date.now() - t0;
+    console.error('[reset-password] error:', err instanceof Error ? err.message : err);
+    return fail(ERROR_CODES.INTERNAL_ERROR, 'Password reset failed.', meta, { status: 500 });
   }
 }

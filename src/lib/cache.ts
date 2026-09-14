@@ -80,6 +80,7 @@ export function invalidateResources(): void {
   invalidatePrefix('resources:');
   invalidatePrefix('community:');
   invalidate('all_public');
+  invalidate('admin:stats'); // aggregated dashboard totals (PRD §15)
 }
 
 /**

@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useEffect, useState, useCallback } from 'react';
-import { X, Users, UserCheck, Loader2 } from 'lucide-react';
+import { X, Users, UserCheck, Loader2, ChevronDown } from 'lucide-react';
 import { FollowButton } from './follow-button';
 import { RoleBadge } from './role-badge';
+import { api, TIMEOUTS } from '@/lib/api-client';
 
 interface FollowListModalProps {
   userId: string;
@@ -22,52 +23,103 @@ interface Row {
   isFollowing: boolean | 'self';
 }
 
-const PAGE = 30;
+/** GET /api/follows/list success payload (new contract, server-side pagination). */
+interface FollowListData {
+  kind: 'followers' | 'following';
+  userId: string;
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+  users: Row[];
+}
+
+const PAGE_LIMIT = 30;
 
 export function FollowListModal({ userId, displayName, initialTab, onClose, onOpenUser }: FollowListModalProps) {
   const [tab, setTab] = useState<'followers' | 'following'>(initialTab);
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [visible, setVisible] = useState(PAGE);
+  const [moreError, setMoreError] = useState<string | null>(null);
+
+  const fetchPage = useCallback(
+    async (kind: 'followers' | 'following', nextPage: number): Promise<FollowListData> => {
+      const res = await api<FollowListData>(
+        `/api/follows/list?userId=${encodeURIComponent(userId)}&kind=${kind}&page=${nextPage}&limit=${PAGE_LIMIT}`,
+        { timeoutMs: TIMEOUTS.normal }
+      );
+      if (res.success && res.data) return res.data;
+      throw new Error(res.error?.message || 'Failed to load list');
+    },
+    [userId]
+  );
 
   const load = useCallback(
     async (kind: 'followers' | 'following') => {
       setLoading(true);
       setError(null);
-      setVisible(PAGE);
+      setMoreError(null);
+      setRows([]);
+      setTotal(0);
+      setHasMore(false);
+      setPage(1);
       try {
-        const res = await fetch(
-          `/api/follows/list?userId=${encodeURIComponent(userId)}&kind=${kind}`,
-          { cache: 'no-store' }
-        );
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) {
-          setError((data.error as string) || 'Failed to load list');
-          setRows([]);
-          setTotal(0);
-        } else {
-          // Dedupe client-side too (belt + suspenders over the server dedupe).
-          const seen = new Set<string>();
-          const clean = ((data.users as Row[]) || []).filter((r) => {
-            if (!r || !r.userId || seen.has(r.userId)) return false;
-            seen.add(r.userId);
-            return true;
-          });
-          setRows(clean);
-          setTotal(typeof data.total === 'number' ? data.total : clean.length);
-        }
-      } catch {
-        setError('Network error — please retry.');
+        const d = await fetchPage(kind, 1);
+        // Dedupe client-side too (belt + suspenders over the server dedupe).
+        const seen = new Set<string>();
+        const clean = ((d.users as Row[]) || []).filter((r) => {
+          if (!r || !r.userId || seen.has(r.userId)) return false;
+          seen.add(r.userId);
+          return true;
+        });
+        setRows(clean);
+        setTotal(typeof d.total === 'number' ? d.total : clean.length);
+        setHasMore(d.hasMore === true);
+        setPage(typeof d.page === 'number' ? d.page : 1);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to load list');
         setRows([]);
         setTotal(0);
+        setHasMore(false);
       } finally {
         setLoading(false);
       }
     },
-    [userId]
+    [fetchPage]
   );
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const next = page + 1;
+      const d = await fetchPage(tab, next);
+      setRows((prev) => {
+        // Append the next server-side page, deduping across pages.
+        const seen = new Set(prev.map((r) => r.userId));
+        const fresh = ((d.users as Row[]) || []).filter((r) => {
+          if (!r || !r.userId || seen.has(r.userId)) return false;
+          seen.add(r.userId);
+          return true;
+        });
+        return [...prev, ...fresh];
+      });
+      setHasMore(d.hasMore === true);
+      setPage(next);
+      if (typeof d.total === 'number') setTotal(d.total);
+    } catch (e) {
+      // Keep the rows already on screen — only the pagination failed.
+      setMoreError(e instanceof Error ? e.message : 'Failed to load more');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [fetchPage, tab, page, hasMore, loadingMore]);
 
   useEffect(() => {
     load(tab);
@@ -76,6 +128,8 @@ export function FollowListModal({ userId, displayName, initialTab, onClose, onOp
   const switchTab = (kind: 'followers' | 'following') => {
     if (kind !== tab) setTab(kind);
   };
+
+  const remaining = Math.max(total - rows.length, 0);
 
   return (
     <div
@@ -97,6 +151,7 @@ export function FollowListModal({ userId, displayName, initialTab, onClose, onOp
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all"
+            aria-label="Close"
           >
             <X className="w-4 h-4" />
           </button>
@@ -158,7 +213,7 @@ export function FollowListModal({ userId, displayName, initialTab, onClose, onOp
             </div>
           ) : (
             <>
-              {rows.slice(0, visible).map((r) => (
+              {rows.map((r) => (
                 <div
                   key={r.userId}
                   className="flex items-center gap-3 p-2.5 rounded-xl border border-white/5 bg-white/[0.01] hover:border-white/10 transition-all"
@@ -169,6 +224,7 @@ export function FollowListModal({ userId, displayName, initialTab, onClose, onOp
                       onOpenUser(r.userId);
                     }}
                     className="shrink-0"
+                    aria-label={`Open ${r.displayName}`}
                   >
                     <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#ef233c]/30 to-zinc-800 border border-white/10 flex items-center justify-center text-sm font-manrope font-semibold text-white overflow-hidden">
                       {r.avatar ? (
@@ -200,13 +256,25 @@ export function FollowListModal({ userId, displayName, initialTab, onClose, onOp
                   )}
                 </div>
               ))}
-              {visible < rows.length && (
+              {hasMore && (
                 <button
-                  onClick={() => setVisible((v) => v + PAGE)}
-                  className="w-full py-2 rounded-xl text-xs font-manrope text-zinc-400 hover:text-white bg-white/[0.02] border border-white/5 hover:border-white/10 transition-all"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  className="w-full py-2 rounded-xl text-xs font-manrope text-zinc-400 hover:text-white bg-white/[0.02] border border-white/5 hover:border-white/10 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Show more ({rows.length - visible} remaining)
+                  {loadingMore ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Loading…
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5">
+                      <ChevronDown className="w-3 h-3" /> Load more{remaining > 0 ? ` (${remaining} remaining)` : ''}
+                    </span>
+                  )}
                 </button>
+              )}
+              {moreError && (
+                <p className="text-center text-[11px] font-inter text-[#ef233c]/80 pt-1">{moreError}</p>
               )}
             </>
           )}

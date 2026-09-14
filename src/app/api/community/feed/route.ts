@@ -24,12 +24,13 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // OnyxBase has eventual consistency issues — retry up to 3 times
+    // listAllPublicResources is export-based + cached now (fast); keep a
+    // single cheap retry for eventual-consistency flaps.
     let resources: any[] = [];
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       resources = await listAllPublicResources();
       if (resources.length > 0) break;
-      if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      if (attempt < 1) await new Promise(r => setTimeout(r, 1200));
     }
 
     const sliced = resources.slice(0, limit);

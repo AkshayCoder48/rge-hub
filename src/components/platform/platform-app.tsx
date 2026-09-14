@@ -19,7 +19,7 @@ import { Logo } from '@/components/logo';
 export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin' | 'search' | 'user';
 
 export function PlatformApp() {
-  const { user, status, loading } = useAuth();
+  const { user, status, loading, refresh } = useAuth();
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -75,6 +75,39 @@ export function PlatformApp() {
         <div className="relative z-10 text-center space-y-4">
           <div className="w-10 h-10 border-2 border-red-500/30 border-t-red-500 rounded-full animate-spin mx-auto" />
           <p className="text-xs font-manrope uppercase tracking-widest text-zinc-500">Loading session…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Bounded retries exhausted — terminal error with a manual retry (never a
+  // false "please log in" over an unknown outcome).
+  if (status === 'error') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-black relative overflow-hidden">
+        {/* Red Noir background */}
+        <div className="fixed inset-0 z-0 pointer-events-none">
+          <div className="absolute inset-0 bg-gradient-to-b from-[#1a0505] to-black" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-red-600/5 rounded-full blur-[120px]" />
+        </div>
+        <div className="relative z-10 text-center space-y-4 px-6">
+          <div className="w-10 h-10 rounded-full bg-[#ef233c]/10 border border-[#ef233c]/30 flex items-center justify-center mx-auto">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5 text-[#ef233c]" aria-hidden="true">
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+              <path d="M12 9v4" />
+              <path d="M12 17h.01" />
+            </svg>
+          </div>
+          <div className="space-y-1">
+            <p className="text-sm font-manrope font-semibold text-white">Couldn&apos;t load your session</p>
+            <p className="text-xs text-zinc-500 font-inter">The server didn&apos;t respond after several tries. Check your connection.</p>
+          </div>
+          <button
+            onClick={() => refresh()}
+            className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full bg-[#ef233c] hover:bg-red-700 text-white text-sm font-medium transition-all duration-300"
+          >
+            Try again
+          </button>
         </div>
       </div>
     );
