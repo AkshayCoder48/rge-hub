@@ -8,6 +8,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { sendOtp, type OtpPurpose } from '@/lib/otp';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -19,13 +20,29 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Valid email required' }, { status: 400 });
     }
 
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const otpPurpose: OtpPurpose = purpose === 'password_reset' ? 'password_reset' : 'registration';
     const result = await sendOtp(email, otpPurpose);
     if (!result.ok) {
-      return NextResponse.json({ ok: false, error: result.error }, { status: 400 });
+      const busy = /busy|timed out/i.test(result.error || '');
+      return NextResponse.json(
+        { ok: false, error: result.error, retryable: true },
+        { status: busy ? 503 : 400 }
+      );
     }
 
-    return NextResponse.json({ ok: true, message: 'Verification code sent' });
+    return NextResponse.json({
+      ok: true,
+      message: result.alreadySent ? 'Code already sent — check your inbox' : 'Verification code sent',
+      alreadySent: result.alreadySent === true,
+    });
   } catch {
     return NextResponse.json({ ok: false, error: 'Failed to send OTP' }, { status: 500 });
   }

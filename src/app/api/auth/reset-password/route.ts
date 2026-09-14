@@ -25,7 +25,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { registerByEmailPassword } from '@/lib/onyxbase';
 import { getProfileByEmail, upsertProfile, getProfileByUsername } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
-import { kvGet, kvDelete, ONYXBASE_COLLECTIONS } from '@/lib/onyxbase';
+import { kvGet, kvDelete, ONYXBASE_COLLECTIONS, backendAcceptsWrites } from '@/lib/onyxbase';
 
 export async function POST(request: NextRequest) {
   try {
@@ -41,6 +41,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { ok: false, error: 'Password must be at least 6 characters' },
         { status: 400 }
+      );
+    }
+
+    // Circuit breaker: fail fast in seconds when the backend is drowning.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
       );
     }
 

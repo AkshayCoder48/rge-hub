@@ -17,7 +17,7 @@
  * }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { registerByEmailPassword } from '@/lib/onyxbase';
+import { registerByEmailPassword, backendAcceptsWrites } from '@/lib/onyxbase';
 import {
   getProfileByUsername,
   isEmailRegistered,
@@ -76,6 +76,14 @@ export async function POST(request: NextRequest) {
     }
 
     // CHECK 1+2 (parallel): email registered? username taken? Independent
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     // backend reads — run together to halve worst-case latency under flood.
     const [emailExists, usernameExists] = await Promise.all([
       isEmailRegistered(normalizedEmail),

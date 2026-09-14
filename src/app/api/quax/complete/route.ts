@@ -11,6 +11,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 import { assembleChunks } from '@/lib/chunks';
 import { storeQuax, QUAX_MAX_BYTES } from '@/lib/quax';
 import type { UploadErrorCode } from '@/lib/upload-errors';
@@ -29,6 +30,14 @@ export async function POST(request: NextRequest) {
       return fail('AUTH_ERROR', 'Authentication required', 401);
     }
 
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const body = await request.json().catch(() => null);
     const { uploadId, fileName, mimeType } = body || {};
     if (!uploadId) {

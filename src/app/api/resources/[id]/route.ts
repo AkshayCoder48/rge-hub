@@ -26,7 +26,7 @@ import {
   type ResourceType,
   type XmlSource,
 } from '@/lib/resources';
-import { deleteFile } from '@/lib/onyxbase';
+import { deleteFile, backendAcceptsWrites } from '@/lib/onyxbase';
 import { isGetsharedUrl, pingGetsharedFile } from '@/lib/getshared';
 import { isQuaxUrl, pingQuaxFile } from '@/lib/quax';
 
@@ -85,6 +85,13 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
+    // Circuit breaker: fail fast in seconds when the backend is drowning.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const { searchParams } = new URL(request.url);
     const type = isResourceType(searchParams.get('type')) ? searchParams.get('type') : null;
     const xmlSource = isXmlSource(searchParams.get('xmlSource')) ? searchParams.get('xmlSource') : null;
@@ -157,6 +164,13 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+    // Circuit breaker: fail fast in seconds when the backend is drowning.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const { searchParams } = new URL(request.url);
     const type = isResourceType(searchParams.get('type')) ? searchParams.get('type') : null;
     const xmlSource = isXmlSource(searchParams.get('xmlSource')) ? searchParams.get('xmlSource') : null;

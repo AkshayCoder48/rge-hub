@@ -11,7 +11,7 @@
  * 4. Create session
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { loginByEmailPassword } from '@/lib/onyxbase';
+import { loginByEmailPassword, backendAcceptsWrites } from '@/lib/onyxbase';
 import { getProfile, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 import { isReservedUsername } from '@/lib/reserved';
@@ -30,6 +30,14 @@ export async function POST(request: NextRequest) {
     }
 
     // Login via OnyxBase (verifies credentials, returns API key)
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const loginResult = await loginByEmailPassword(email, password);
     if (!loginResult.ok || !loginResult.apiKey) {
       return NextResponse.json(
@@ -60,16 +68,9 @@ export async function POST(request: NextRequest) {
         updatedAt: now,
       } as Profile;
 
-      // Retry profile creation to handle OnyxBase inconsistency.
-      // (upsertProfile already paces internally via kvSetMulti — these
-      // outer rounds are only a cheap safety net, not the pacing policy.)
-      let profileCreated = false;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        profileCreated = await upsertProfile(profile);
-        if (profileCreated) break;
-        console.warn(`[login] upsertProfile failed (attempt ${attempt + 1})`);
-        await new Promise(r => setTimeout(r, 5000));
-      }
+      // Single attempt — upsertProfile already retries internally, and login
+      // succeeds regardless (a missing row is recreated lazily next login).
+      const profileCreated = await upsertProfile(profile);
       if (!profileCreated) {
         console.error('[login] Failed to create profile after 2 attempts for user:', loginResult.userId);
       }

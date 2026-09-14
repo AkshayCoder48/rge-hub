@@ -110,7 +110,10 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
         continue;
       }
       const data = await res.json().catch(() => null);
-      if (data?.ok === true && data?.durable === true) return true;
+      if (data?.ok === true && data?.durable === true) {
+        recordWrite(true);
+        return true;
+      }
       const retryAfterSecs = Number(data?.throttle?.retryAfterSecs);
       waitMs = Number.isFinite(retryAfterSecs) && retryAfterSecs > 0 ? Math.min(retryAfterSecs, 12) * 1000 : 4000;
       console.warn(`[OnyxBase] kvSet attempt ${attempt + 1} not durable, retrying in ${waitMs}ms`);
@@ -119,6 +122,7 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
     }
   }
   console.error('[OnyxBase] kvSet exhausted retries for key:', key.slice(0, 80));
+  recordWrite(false);
   return false;
 }
 /**
@@ -135,7 +139,9 @@ export async function kvSetMulti(
   entries: Array<{ key: string; value: any; collection?: string }>
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 40000));
+    // Short retry nap: the old 40s nap + 90s fetches budgeted 220s per call
+    // (the "2 minutes then errors"). Probe-gating already avoids dead backends.
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 8000));
     try {
       const res = await fetchWithTimeout(
         `${ONYXBASE_BASE_URL}/api/dashboard/records/import`,
@@ -153,20 +159,24 @@ export async function kvSetMulti(
             })),
           }),
         },
-        90000
+        22000
       );
       if (!res.ok) {
         console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} failed:`, res.status);
         continue;
       }
       const data = await res.json().catch(() => null);
-      if (data?.ok === true && data?.durable === true) return true;
-      console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} not durable, retrying in 40s`);
+      if (data?.ok === true && data?.durable === true) {
+        recordWrite(true);
+        return true;
+      }
+      console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} not durable, retrying shortly`);
     } catch (err) {
       console.warn(`[OnyxBase] kvSetMulti attempt ${attempt + 1} error/timeout:`, err instanceof Error ? err.message : err);
     }
   }
   console.error('[OnyxBase] kvSetMulti exhausted retries for keys:', entries.map((e) => e.key.slice(0, 40)).join(','));
+  recordWrite(false);
   return false;
 }
 
@@ -479,6 +489,7 @@ export async function uploadFile(
       if (res.ok) {
         const data = await res.json();
         if (data.file) {
+          recordWrite(true);
           return {
             ...data.file,
             url: `${ONYXBASE_BASE_URL}/f/${data.file.fileId}`,
@@ -496,6 +507,7 @@ export async function uploadFile(
         continue;
       }
       console.error('[OnyxBase] uploadFile failed:', res.status, errText);
+      recordWrite(false);
       return null;
     } catch (err) {
       lastError = err as Error;
@@ -503,6 +515,7 @@ export async function uploadFile(
     }
   }
   console.error('[OnyxBase] uploadFile exhausted retries:', lastError?.message);
+  recordWrite(false);
   return null;
 }
 
@@ -744,6 +757,66 @@ export const ONYXBASE_COLLECTIONS = {
   CATEGORIES: 'categories',
 } as const;
 
+// ============ Backend circuit breaker (Telegram 429-storm protection) ============
+//
+// The backend syncs every write to Telegram; when Telegram 429s, writes grind
+// 45-220s server-side. Chains of such calls turned every auth/upload action
+// into minutes of hanging ("eternal, then errors"). Instead:
+//  - every backend WRITE records its outcome here (no extra network calls),
+//  - routes check backendWriteReady() FIRST and fail in ~ms with a clear
+//    "busy, retry" when recent writes are mostly failing,
+//  - backendReadReady() adds a cheap cached probe for total wedges.
+interface BreakerSample { at: number; ok: boolean }
+const writeSamples: BreakerSample[] = [];
+const BREAKER_WINDOW_MS = 60000;
+const BREAKER_MIN_SAMPLES = 3;
+const BREAKER_FAIL_RATIO = 0.6;
+
+function recordWrite(ok: boolean): void {
+  writeSamples.push({ at: Date.now(), ok });
+  if (writeSamples.length > 20) writeSamples.splice(0, writeSamples.length - 20);
+}
+
+/** False when the backend is demonstrably drowning — callers should 503 fast. */
+export function backendWriteReady(): boolean {
+  const now = Date.now();
+  const recent = writeSamples.filter((s) => now - s.at < BREAKER_WINDOW_MS);
+  if (recent.length < BREAKER_MIN_SAMPLES) return true; // fail-open: not enough data
+  const fails = recent.filter((s) => !s.ok).length;
+  return fails < recent.length * BREAKER_FAIL_RATIO;
+}
+
+let readProbe = { at: 0, ok: false };
+const READ_PROBE_TTL_MS = 10000;
+
+/** Cheap cached read probe (whoami, 4s) — catches total backend wedges. */
+export async function backendReadReady(): Promise<boolean> {
+  const now = Date.now();
+  if (now - readProbe.at < READ_PROBE_TTL_MS) return readProbe.ok;
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/whoami`,
+      { headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` } },
+      4000
+    );
+    readProbe = { at: now, ok: res.ok };
+    return res.ok;
+  } catch {
+    readProbe = { at: now, ok: false };
+    return false;
+  }
+}
+
+/**
+ * Combined gate for write routes: instant-false when the backend is known
+ * bad (breaker) or currently unreachable (probe). Use at the top of every
+ * route that writes to the backend, right after auth.
+ */
+export async function backendAcceptsWrites(): Promise<boolean> {
+  if (!backendWriteReady()) return false;
+  return backendReadReady();
+}
+
 // ============ Upload reliability (PRD: persistence & performance fix) ============
 
 /** Max file size for a single-shot multipart upload (OnyxBase limit). */
@@ -831,6 +904,7 @@ export async function uploadFileResult(
         timings.storage_finalize_ms = Date.now() - tFinalize;
         timings.total_upload_ms = Date.now() - t0;
         if (data.file) {
+          recordWrite(true);
           return {
             ok: true,
             file: {
@@ -859,6 +933,7 @@ export async function uploadFileResult(
             continue;
           }
           timings.total_upload_ms = Date.now() - t0;
+          recordWrite(false);
           return {
             ok: false,
             code: 'UPLOAD_THROTTLED',
@@ -870,6 +945,7 @@ export async function uploadFileResult(
         }
         console.error('[OnyxBase] uploadFile failed:', res.status, errText.slice(0, 300));
         timings.total_upload_ms = Date.now() - t0;
+        recordWrite(false);
         return {
           ok: false,
           code: 'UPLOAD_STORAGE_ERROR',
@@ -891,6 +967,7 @@ export async function uploadFileResult(
 
   timings.total_upload_ms = Date.now() - t0;
   console.error('[OnyxBase] uploadFile exhausted retries:', lastError);
+  recordWrite(false);
   return {
     ok: false,
     code: 'UPLOAD_STORAGE_ERROR',

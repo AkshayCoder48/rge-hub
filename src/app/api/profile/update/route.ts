@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import { getProfile, upsertProfile, getProfileByUsername } from '@/lib/resources';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 import {
   isReservedUsername,
   isReservedDisplayName,
@@ -27,6 +28,14 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Not authenticated' }, { status: 401 });
     }
     const session = sessionResult.session;
+
+    // Circuit breaker: fail fast in seconds when the backend is drowning.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
 
     // Fetch the current profile from OnyxBase (source of truth)
     const profile = await getProfile(session.userId);

@@ -47,6 +47,7 @@ interface OtpRecord {
   attempts: number;
   consumed: boolean;
   createdAt: string;
+  emailed?: boolean; // true once the code was actually mailed (send-then-error recovery)
 }
 
 /**
@@ -94,27 +95,28 @@ async function deleteOtpRow(key: string): Promise<void> {
 export async function sendOtp(
   email: string,
   purpose: OtpPurpose = 'registration'
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; alreadySent?: boolean }> {
   // Piggyback sweep so dead OTPs never pile up in the DB (non-blocking).
   void cleanupExpiredOtps();
 
   const normalizedEmail = email.toLowerCase().trim();
   const key = otpKey(normalizedEmail, purpose);
 
-  // Check rate limit (quorum read — single reads can flap to null).
-  const existing = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 5);
-  if (existing) {
-    const createdMs = new Date(existing.createdAt).getTime();
-    // Stale/expired row? Delete it now so it can't rate-limit or linger.
-    if (new Date(existing.expiresAt).getTime() < Date.now()) {
-      await deleteOtpRow(key);
-    } else {
-      const elapsed = Date.now() - createdMs;
-      if (elapsed < OTP_RATE_LIMIT_MS) {
-        const waitSec = Math.ceil((OTP_RATE_LIMIT_MS - elapsed) / 1000);
-        return { ok: false, error: `Please wait ${waitSec}s before requesting another code.` };
-      }
+  // Check rate limit (small quorum — single reads can flap to null).
+  const existing = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 3);
+  if (existing && new Date(existing.expiresAt).getTime() >= Date.now()) {
+    const ageMs = Date.now() - new Date(existing.createdAt).getTime();
+    if (existing.emailed) {
+      // Code was mailed. Recent → the user HAS it (their "code arrived but
+      // the app errored" case): succeed WITHOUT mailing a duplicate.
+      if (ageMs < OTP_RATE_LIMIT_MS) return { ok: true, alreadySent: true };
+      // Old → fall through and generate a fresh one.
     }
+    // Not mailed (an earlier attempt died after storing) → fall through and
+    // send immediately; the user never got a code.
+  } else if (existing) {
+    // Stale/expired row — delete it now so it can't rate-limit or linger.
+    await deleteOtpRow(key);
   }
 
   // Generate new OTP
@@ -136,15 +138,11 @@ export async function sendOtp(
   };
 
   // Store in OnyxBase (this invalidates any previous OTP for this email+purpose).
-  // Write + quorum-confirm (2 tries) — never email a code we can't verify.
-  let stored = false;
-  for (let i = 0; i < 2 && !stored; i++) {
-    await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
-    const back = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 5);
-    if (back && back.otpHash === record.otpHash) stored = true;
-  }
+  // Single write — kvSet only reports true for a DURABLE backend write, so a
+  // second confirm-read round just doubled flood pain (never email otherwise).
+  const stored = await kvSet(key, record, ONYXBASE_COLLECTIONS.OTPS);
   if (!stored) {
-    return { ok: false, error: 'Failed to store verification code. Please retry.' };
+    return { ok: false, error: 'Servers are busy — please retry in a moment.' };
   }
 
   // Build email content based on purpose
@@ -175,6 +173,9 @@ export async function sendOtp(
     return { ok: false, error: result.error || 'Failed to send verification email' };
   }
 
+  // Mark mailed (fire-and-forget: if this dies, worst case is a fresh code next retry).
+  void kvSet(key, { ...record, emailed: true }, ONYXBASE_COLLECTIONS.OTPS).catch(() => {});
+
   return { ok: true };
 }
 
@@ -197,7 +198,7 @@ export async function verifyOtp(
   const normalizedEmail = email.toLowerCase().trim();
   const key = otpKey(normalizedEmail, purpose);
 
-  const record = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 6);
+  const record = await kvGetQuorum<OtpRecord>(key, ONYXBASE_COLLECTIONS.OTPS, 3);
   if (!record) {
     return { ok: false, error: 'No verification code found. Please request a new one.' };
   }
@@ -241,7 +242,15 @@ export async function verifyOtp(
  * Runs piggyback (non-blocking) on every send/verify — no cron needed.
  * ONLY touches the OTPs collection — never profiles, resources, or other data.
  */
+let lastSweepAt = 0;
+const SWEEP_MIN_GAP_MS = 5 * 60 * 1000;
+
 export async function cleanupExpiredOtps(): Promise<number> {
+  // Throttled: a full-collection export on EVERY auth call self-floods a
+  // drowning backend. One sweep per 5 min per instance is plenty for 10-min codes.
+  const now = Date.now();
+  if (now - lastSweepAt < SWEEP_MIN_GAP_MS) return 0;
+  lastSweepAt = now;
   let cleaned = 0;
   try {
     const all = await kvExport<Record<string, OtpRecord>>(ONYXBASE_COLLECTIONS.OTPS);

@@ -27,6 +27,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 import { storeResourceFile } from '@/lib/file-pipeline';
 import { MAX_SIMPLE_UPLOAD_BYTES } from '@/lib/onyxbase';
 import type { UploadErrorCode } from '@/lib/upload-errors';
@@ -83,6 +84,12 @@ export async function POST(request: NextRequest) {
     const sessionResult = await getSession();
     if (sessionResult.status !== 'ok') {
       return fail('AUTH_ERROR', 'Authentication required', 401);
+    }
+
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind a minute into a 504.
+    if (!(await backendAcceptsWrites())) {
+      return fail('UPLOAD_THROTTLED', 'Servers are busy — please retry in a minute.', 503);
     }
 
     const formData = await request.formData();

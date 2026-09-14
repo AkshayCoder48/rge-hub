@@ -52,7 +52,12 @@ export function AuthScreen() {
       const data = await authFetch('/api/auth/otp/send', { email, purpose });
       if (data.ok) {
         setStep(purpose === 'password_reset' ? 'forgot-otp' : 'otp');
-        toast({ title: 'Code sent', description: 'Check your email for the 6-digit code' });
+        toast({
+          title: data.alreadySent ? 'Already sent' : 'Code sent',
+          description: data.alreadySent
+            ? 'That code is already in your inbox — enter it below'
+            : 'Check your email for the 6-digit code',
+        });
       } else {
         toast({ title: 'Failed', description: data.error, variant: 'destructive' });
       }

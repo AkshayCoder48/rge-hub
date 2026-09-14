@@ -18,6 +18,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 import { saveChunk } from '@/lib/chunks';
 
 export const dynamic = 'force-dynamic';
@@ -27,6 +28,15 @@ export async function POST(request: NextRequest) {
     const sessionResult = await getSession();
     if (sessionResult.status !== 'ok') {
       return NextResponse.json({ ok: false, error: 'Authentication required' }, { status: 401 });
+    }
+
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
     }
 
     const body = await request.json().catch(() => null);

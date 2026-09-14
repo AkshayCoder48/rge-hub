@@ -1,14 +1,19 @@
 /**
  * POST /api/profile/avatar
- * Upload an avatar image to OnyxBase file storage and update the user's profile.
+ * Upload an avatar image and update the user's profile.
  *
- * Body: FormData with "file" field (image)
+ * Primary: imghosting edge (sub-second, flood-proof) — avatars are small
+ * images, never backend bytes. Fallback: backend file storage.
+ * The profile row still lives in the backend (circuit-breaker gated).
+ *
+ * Body: FormData with "file" field (image, ≤10MB)
  * Returns: { ok, avatarUrl }
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import { getProfile, upsertProfile } from '@/lib/resources';
-import { uploadFile, getFileUrl } from '@/lib/onyxbase';
+import { uploadFile, getFileUrl, backendAcceptsWrites } from '@/lib/onyxbase';
+import { mirrorAsset } from '@/lib/mirror';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -37,13 +42,32 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Image must be under 10MB' }, { status: 400 });
     }
 
-    // Upload to OnyxBase
-    const fileMeta = await uploadFile(file, file.name, file.type, `avatar_${session.userId}`);
-    if (!fileMeta) {
-      return NextResponse.json({ ok: false, error: 'Failed to upload image' }, { status: 500 });
+    // Circuit breaker: the profile row needs the backend — fail in seconds
+    // when it's drowning, before spending time on the image bytes.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
     }
 
-    const avatarUrl = getFileUrl(fileMeta.fileId);
+    // Image bytes: imghosting first (fast, flood-proof), backend fallback.
+    let avatarUrl: string | null = null;
+    try {
+      const bytes = Buffer.from(await file.arrayBuffer());
+      const mirror = await mirrorAsset(bytes, file.name, file.type, 'image');
+      if (mirror.ok && mirror.url) avatarUrl = mirror.url;
+    } catch {}
+    if (!avatarUrl) {
+      const fileMeta = await uploadFile(file, file.name, file.type, `avatar_${session.userId}`);
+      if (!fileMeta) {
+        return NextResponse.json(
+          { ok: false, error: 'Failed to upload image — please retry.', retryable: true },
+          { status: 500 }
+        );
+      }
+      avatarUrl = getFileUrl(fileMeta.fileId);
+    }
 
     // Update profile with avatar URL
     const profile = await getProfile(session.userId);

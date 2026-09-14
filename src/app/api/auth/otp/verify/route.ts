@@ -8,6 +8,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyOtp, type OtpPurpose } from '@/lib/otp';
+import { backendAcceptsWrites } from '@/lib/onyxbase';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -19,6 +20,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Email and code required' }, { status: 400 });
     }
 
+    // Circuit breaker: fail in seconds when the backend is drowning in
+    // Telegram 429s — never grind minutes into a timeout.
+    if (!(await backendAcceptsWrites())) {
+      return NextResponse.json(
+        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { status: 503 }
+      );
+    }
     const otpPurpose: OtpPurpose = purpose === 'password_reset' ? 'password_reset' : 'registration';
     const result = await verifyOtp(email, code, otpPurpose);
     if (!result.ok) {
