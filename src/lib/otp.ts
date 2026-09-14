@@ -173,8 +173,22 @@ export async function sendOtp(
     return { ok: false, error: result.error || 'Failed to send verification email' };
   }
 
-  // Mark mailed (fire-and-forget: if this dies, worst case is a fresh code next retry).
-  void kvSet(key, { ...record, emailed: true }, ONYXBASE_COLLECTIONS.OTPS).catch(() => {});
+  // Mark mailed — post-response RELIABLE. A plain void-promise dies at
+  // Vercel freeze (the flag needs ~10-15s: pacing-absorb + pin round-trip;
+  // the route responds first), and a missing flag makes the next resend
+  // re-mail a duplicate. after() extends lifetime past the response so the
+  // flag actually lands; the void fallback covers non-Vercel runtimes.
+  const markEmailed = () =>
+    kvSet(key, { ...record, emailed: true }, ONYXBASE_COLLECTIONS.OTPS).catch(() => {});
+  try {
+    const { after } = (await import('next/server')) as unknown as {
+      after?: (cb: () => unknown) => void;
+    };
+    if (typeof after === 'function') after(() => void markEmailed());
+    else void markEmailed();
+  } catch {
+    void markEmailed();
+  }
 
   return { ok: true };
 }
