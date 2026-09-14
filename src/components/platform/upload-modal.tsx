@@ -24,6 +24,7 @@ import {
 import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 import { GETSHARED_MAX_BYTES } from '@/lib/getshared';
 import { uploadToGetshared } from '@/lib/getshared-client';
+import { isQuaxEligible } from '@/lib/quax';
 import { Link2, ImagePlus } from 'lucide-react';
 
 /**
@@ -81,7 +82,7 @@ interface QueueItem {
   resourceId?: string;
   timings?: Record<string, number>;
   /** Which backend stored this file (set during transfer). */
-  via?: 'hub' | 'getshared';
+  via?: 'hub' | 'getshared' | 'quax';
   /** Optional cover thumbnail (clips + files). Uploaded as an image first. */
   thumbnailFile?: File;
   thumbnailPreview?: string;
@@ -355,6 +356,128 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     [type, updateItem]
   );
 
+  // Small qu.ax relay (single request, permanent storage): real XHR progress.
+  const uploadTransferQuaxSingle = useCallback(
+    (item: QueueItem): Promise<TransferResult> => {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhrRefs.current.set(item.uid, xhr);
+        updateItem(item.uid, { via: 'quax' });
+        xhr.upload.onprogress = (ev) => {
+          if (!ev.lengthComputable) return;
+          updateItem(item.uid, {
+            progress: {
+              loaded: ev.loaded,
+              total: ev.total,
+              pct: Math.min(99, Math.round((ev.loaded / ev.total) * 100)),
+              speedBps: null,
+              etaSecs: null,
+            },
+          });
+        };
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== XMLHttpRequest.DONE) return;
+          xhrRefs.current.delete(item.uid);
+          if (xhr.status === 0) {
+            reject({ code: 'UPLOAD_CANCELLED' as UploadErrorCode, cancelled: true });
+            return;
+          }
+          let data: Record<string, unknown> = {};
+          try {
+            data = JSON.parse(xhr.responseText || '{}');
+          } catch {}
+          if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
+            updateItem(item.uid, {
+              progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
+            });
+            resolve({
+              fileId: data.fileId as string,
+              fileUrl: data.url as string,
+              fileName: (data.fileName as string) || item.file.name,
+              mimeType: (data.mimeType as string) || item.file.type,
+              size: (data.size as number) ?? item.file.size,
+              storageUrl: data.storageUrl as string | undefined,
+              mirrorHost: ((data.mirrorHost as string) || 'quax') as string,
+            });
+          } else {
+            reject({
+              code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR',
+              error: (data.error as string) || `qu.ax relay failed (HTTP ${xhr.status}).`,
+            });
+          }
+        };
+        xhr.onerror = () => {
+          xhrRefs.current.delete(item.uid);
+          reject({ code: 'UPLOAD_NETWORK_ERROR' as UploadErrorCode, error: 'Network error during upload.' });
+        };
+        const formData = new FormData();
+        formData.append('file', item.file);
+        formData.append('kind', type);
+        xhr.open('POST', '/api/quax/upload');
+        xhr.send(formData);
+      });
+    },
+    [type, updateItem]
+  );
+
+  // Large qu.ax relay (chunked staging, then one permanent qu.ax POST).
+  const uploadTransferQuaxChunked = useCallback(
+    async (item: QueueItem): Promise<TransferResult> => {
+      updateItem(item.uid, {
+        via: 'quax',
+        progress: { loaded: 0, total: item.file.size, pct: 0, speedBps: null, etaSecs: null },
+      });
+      const t0 = Date.now();
+      const { uploadId } = await uploadInChunks(item.file, {
+        onProgress: (p) => {
+          const elapsed = Math.max((Date.now() - t0) / 1000, 0.001);
+          const speed = p.sentBytes / elapsed;
+          updateItem(item.uid, {
+            progress: {
+              loaded: p.sentBytes,
+              total: p.totalBytes,
+              pct: Math.min(95, p.pct),
+              speedBps: speed,
+              etaSecs: speed > 0 ? (p.totalBytes - p.sentBytes) / speed : null,
+            },
+          });
+        },
+      });
+      updateItem(item.uid, {
+        progress: { loaded: item.file.size, total: item.file.size, pct: 97, speedBps: null, etaSecs: null },
+      });
+      const res = await fetch('/api/quax/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uploadId,
+          fileName: item.file.name,
+          mimeType: item.file.type || 'application/octet-stream',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw {
+          code: (data.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR',
+          error: (data.error as string) || `qu.ax relay failed (HTTP ${res.status}).`,
+        };
+      }
+      updateItem(item.uid, {
+        progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
+      });
+      return {
+        fileId: data.fileId as string,
+        fileUrl: data.url as string,
+        fileName: (data.fileName as string) || item.file.name,
+        mimeType: (data.mimeType as string) || item.file.type,
+        size: (data.size as number) ?? item.file.size,
+        storageUrl: data.storageUrl as string | undefined,
+        mirrorHost: ((data.mirrorHost as string) || 'quax') as string,
+      };
+    },
+    [updateItem]
+  );
+
   // Large clips/files (>50MB, up to 5GB) upload straight from the browser to
   // getshared and are stored as URL-only records (no bytes/base64 in OnyxBase).
   const uploadTransferGetshared = useCallback(
@@ -412,11 +535,25 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
   );
 
   const uploadTransfer = useCallback(
-    (item: QueueItem): Promise<TransferResult> => {
-      // Large clips/files bypass our functions entirely (browser → getshared).
-      if (type !== 'image' && item.file.size > MAX_UPLOAD_BYTES) {
+    async (item: QueueItem): Promise<TransferResult> => {
+      // Clips/files: qu.ax permanent storage when eligible (hub relay — qu.ax
+      // has no CORS), else getshared direct from the browser (up to 5GB).
+      // qu.ax failures auto-fall-back to getshared so the item still uploads.
+      if (type !== 'image') {
+        if (isQuaxEligible(item.file.name, item.file.size)) {
+          try {
+            if (item.file.size > DIRECT_UPLOAD_LIMIT) {
+              return await uploadTransferQuaxChunked(item);
+            }
+            return await uploadTransferQuaxSingle(item);
+          } catch (e) {
+            if ((e as { cancelled?: boolean })?.cancelled) throw e;
+            // Fall through to getshared.
+          }
+        }
         return uploadTransferGetshared(item);
       }
+      // Images: our own pipeline (permanent backend bytes + imghosting mirror).
       // Chunked path for files over the single-request ceiling.
       if (item.file.size > DIRECT_UPLOAD_LIMIT) {
         return uploadTransferChunked(item);
@@ -501,7 +638,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
         xhr.send(formData);
       });
     },
-    [type, updateItem, uploadTransferChunked, uploadTransferGetshared]
+    [type, updateItem, uploadTransferChunked, uploadTransferGetshared, uploadTransferQuaxSingle, uploadTransferQuaxChunked]
   );
 
   // ---------- Phase 2: DB registration (idempotent) ----------
@@ -1023,7 +1160,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                 <p className="font-inter text-sm text-white">Drop your {typeLabel} files here</p>
                 <p className="font-inter text-xs text-zinc-500 mt-1">
                   or click to browse — multiple files allowed (max {fmtBytes(sizeLimit)} each)
-                  {type !== 'image' && ' · files over 50MB upload directly (up to 5GB)'}
+                  {type !== 'image' && ' · permanent storage up to 256MB, direct upload up to 5GB'}
                 </p>
               </div>
               <input
@@ -1192,7 +1329,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                             />
                             <p className="text-[10px] font-manrope text-zinc-500 truncate">
                               {it.file.name} · {fmtBytes(it.file.size)}
-                              {type !== 'image' && it.file.size > MAX_UPLOAD_BYTES && ' · large file, direct upload'}
+                              {type !== 'image' && (isQuaxEligible(it.file.name, it.file.size) ? ' · permanent storage' : it.file.size > MAX_UPLOAD_BYTES ? ' · large file, direct upload' : ' · direct upload')}
                             </p>
                             {type !== 'image' && !running && (it.status === 'queued' || it.status === 'cancelled' || it.status === 'failed') && (
                               <button

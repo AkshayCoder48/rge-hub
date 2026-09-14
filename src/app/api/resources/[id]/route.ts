@@ -28,6 +28,7 @@ import {
 } from '@/lib/resources';
 import { deleteFile } from '@/lib/onyxbase';
 import { isGetsharedUrl, pingGetsharedFile } from '@/lib/getshared';
+import { isQuaxUrl, pingQuaxFile } from '@/lib/quax';
 
 function isResourceType(v: string | null): v is ResourceType {
   return v === 'image' || v === 'clip' || v === 'xml';
@@ -131,11 +132,13 @@ export async function GET(
       }
     }
 
-    // Passive keep-alive: every real view of a getshared-backed file registers
-    // activity (resets its 30-day expiry). Fire-and-forget — the cron is the
-    // guarantee, this is a bonus.
+    // Passive keep-alive: every real view of an externally-hosted file
+    // registers activity (resets getshared's 30-day expiry, keeps qu.ax warm).
+    // Fire-and-forget — the cron is the guarantee, this is a bonus.
     if (isGetsharedUrl(resource.downloadUrl)) {
       void pingGetsharedFile(resource.downloadUrl as string, 8000).catch(() => {});
+    } else if (isQuaxUrl(resource.downloadUrl)) {
+      void pingQuaxFile(resource.downloadUrl as string, 8000).catch(() => {});
     }
 
     return NextResponse.json({ ok: true, resource });

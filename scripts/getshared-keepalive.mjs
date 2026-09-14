@@ -74,7 +74,7 @@ async function main() {
     process.exit(1);
   }
   console.log(
-    `OK: scanned ${data.scanned} resources, ${data.getsharedFiles} getshared file(s), ${data.alive} alive.`
+    `OK: scanned ${data.scanned} resources, ${data.getsharedFiles || 0} getshared + ${data.quaxFiles || 0} qu.ax file(s), ${data.alive} alive.`
   );
   for (const f of data.failed || []) {
     console.log(`FAILED [${f.status}] ${f.resourceId} ${f.url}`);

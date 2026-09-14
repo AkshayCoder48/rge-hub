@@ -26,8 +26,8 @@ import { kvSet, kvDelete, kvGetQuorum, kvSetSpread } from './onyxbase';
 
 const CHUNKS_COLLECTION = 'upload_chunks';
 
-/** Max chunks per upload (40 × 2.5MB ≈ 100MB ceiling). */
-export const MAX_CHUNKS = 40;
+/** Max chunks per upload (110 × 2.5MB ≈ 275MB ceiling — fits qu.ax's 256MB relay). */
+export const MAX_CHUNKS = 110;
 /** Max base64 payload per chunk (~2.5MB raw → ~3.4MB base64 + JSON < 4.5MB). */
 export const MAX_CHUNK_CHARS = 4 * 1024 * 1024;
 
