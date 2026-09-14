@@ -9,6 +9,8 @@ interface AuthUser {
   avatar?: string;
   bio?: string;
   isAdmin: boolean;
+  role?: string;
+  permissions?: string[];
 }
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';

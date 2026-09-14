@@ -774,6 +774,8 @@ export const ONYXBASE_COLLECTIONS = {
   SESSIONS: 'sessions',
   CATEGORIES: 'categories',
   FOLLOWS: 'follows',
+  ADMINS: 'admins',
+  ADMIN_ACTIVITY: 'admin_activity',
 } as const;
 
 // ============ Backend circuit breaker (Telegram 429-storm protection) ============

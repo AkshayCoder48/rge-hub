@@ -10,6 +10,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getProfileByUsername, listResourcesByOwner, type Profile } from '@/lib/resources';
+import { loadStaffRoleMap, publicRoleFor } from '@/lib/admin';
 
 export async function GET(
   _request: NextRequest,
@@ -34,13 +35,15 @@ export async function GET(
     }
 
     // Strip sensitive fields
-    const safeProfile: Omit<Profile, 'apiKey'> & { apiKey?: never } = {
+    const staffMap = await loadStaffRoleMap().catch(() => new Map<string, 'admin' | 'moderator'>());
+    const safeProfile: Omit<Profile, 'apiKey'> & { apiKey?: never; role?: string } = {
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,
       avatar: profile.avatar,
       bio: profile.bio,
       email: profile.email,
+      role: publicRoleFor(profile, staffMap),
       createdAt: profile.createdAt,
       updatedAt: profile.updatedAt,
     };

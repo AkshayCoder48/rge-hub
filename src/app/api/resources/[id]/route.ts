@@ -16,6 +16,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { resolveRole, hasPermission } from '@/lib/admin';
 import {
   getResource,
   updateResource,
@@ -77,6 +78,23 @@ async function locateResource(
     if (ax) return ax;
   }
   return null;
+}
+
+/**
+ * Staff content rights: email-root passes everything; role staff need the
+ * matching content.* permission for the resource type.
+ */
+async function contentPermFor(session: { userId?: string; email?: string; isAdmin?: boolean }, type: string): Promise<boolean> {
+  if (session.isAdmin) return true;
+  const perm = type === 'xml' ? 'content.files' : `content.${type}s`;
+  const resolved = await resolveRole({ userId: session.userId, email: session.email }).catch(() => null);
+  return !!resolved && hasPermission(resolved, perm);
+}
+
+async function isElevated(session: { userId?: string; email?: string; isAdmin?: boolean }): Promise<boolean> {
+  if (session.isAdmin) return true;
+  const resolved = await resolveRole({ userId: session.userId, email: session.email }).catch(() => null);
+  return !!resolved && resolved.role !== 'user';
 }
 
 export async function GET(
@@ -181,14 +199,15 @@ export async function PATCH(
     }
     const session = sessionResult.session;
 
-    const resource = await locateResource(id, type, xmlSource, session.isAdmin);
+    const elevated = await isElevated(session);
+    const resource = await locateResource(id, type, xmlSource, elevated);
     if (!resource) {
       return NextResponse.json({ ok: false, error: 'Resource not found' }, { status: 404 });
     }
 
-    // Owner or admin only
+    // Owner, root, or staff with the matching content.* permission
     const isOwner = resource.ownerId === session.userId;
-    if (!isOwner && !session.isAdmin) {
+    if (!isOwner && !(await contentPermFor(session, resource.type))) {
       return NextResponse.json(
         { ok: false, error: 'Not authorized to update this resource' },
         { status: 403 }
@@ -219,9 +238,14 @@ export async function PATCH(
     if (typeof duration === 'number' && !Number.isNaN(duration)) resource.duration = duration;
     if (typeof published === 'boolean') resource.published = published;
 
-    // featured is admin-only
+    // featured needs the content.feature permission (root bypasses)
     if (typeof featured === 'boolean') {
-      if (!session.isAdmin) {
+      const canFeature = session.isAdmin
+        ? true
+        : await resolveRole({ userId: session.userId, email: session.email })
+            .then((r) => hasPermission(r, 'content.feature'))
+            .catch(() => false);
+      if (!canFeature) {
         return NextResponse.json(
           { ok: false, error: 'Admin access required to set featured flag' },
           { status: 403 }
@@ -273,7 +297,8 @@ export async function DELETE(
     }
     const session = sessionResult.session;
 
-    const resource = await locateResource(id, type, xmlSource, session.isAdmin);
+    const elevatedDel = await isElevated(session);
+    const resource = await locateResource(id, type, xmlSource, elevatedDel);
     if (!resource) {
       // IDEMPOTENT delete: locate missed, but the row may still exist
       // (backend read flaps) — so issue REAL blind deletes in every
@@ -287,7 +312,7 @@ export async function DELETE(
     }
 
     const isOwner = resource.ownerId === session.userId;
-    if (!isOwner && !session.isAdmin) {
+    if (!isOwner && !(await contentPermFor(session, resource.type))) {
       return NextResponse.json(
         { ok: false, error: 'Not authorized to delete this resource' },
         { status: 403 }

@@ -39,10 +39,10 @@ export function PlatformApp() {
   const navigate = useCallback(
     (v: ViewKey) => {
       // Admin view is only reachable with a verified admin session.
-      if (v === 'admin' && !user?.isAdmin) return;
+      if (v === 'admin' && !user?.isAdmin && (!user?.role || user.role === 'user')) return;
       setView(v);
     },
-    [user?.isAdmin]
+    [user?.isAdmin, user?.role]
   );
 
   const openUpload = useCallback((type: 'image' | 'clip' | 'xml') => {
@@ -135,13 +135,13 @@ export function PlatformApp() {
           {view === 'clips' && <ResourcesView key={`clips-${uploadVersion}`} type="clip" onUpload={() => openUpload('clip')} onOpenUser={openUser} />}
           {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} onOpenUser={openUser} />}
           {view === 'community' && <CommunityView key={`community-${uploadVersion}`} onOpenUser={openUser} />}
-          {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} />}
+          {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'search' && <SearchView key={`search-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'user' && selectedUserId && (
             <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />
           )}
           {view === 'studio' && <SpeedRampStudio onPublishClip={(f) => openUploadWithFiles('clip', [f])} />}
-          {view === 'admin' && user.isAdmin && <AdminView key={`admin-${uploadVersion}`} />}
+          {view === 'admin' && (user.isAdmin || (user.role && user.role !== 'user')) && <AdminView key={`admin-${uploadVersion}`} />}
         </main>
       </div>
 

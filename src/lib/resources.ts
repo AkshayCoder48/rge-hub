@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread } from './onyxbase';
+import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent } from './onyxbase';
 import { ONYXBASE_COLLECTIONS } from './onyxbase';
 
 // ============ Types ============
@@ -65,6 +65,10 @@ export interface Resource {
   // Server-stamped ownership flag — the ONLY source for "Admin" badges.
   // Never derive admin display from ownerName (user-controlled).
   isOwnerAdmin?: boolean;
+  // Server-stamped author role at upload time ('root' | 'admin' |
+  // 'moderator' | 'user'). Legacy records omit it — display falls back to
+  // isOwnerAdmin (true renders the [Admin] badge).
+  authorRole?: string;
   tags: string[];
   category?: string;
   duration?: number; // for clips (seconds)
@@ -541,51 +545,95 @@ export function generateResourceId(type: ResourceType, clientId?: string): strin
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
 }
 
-// ============ Follows (social graph) ============
+// ============ Follows (social graph — canonical relationship records) ============
 //
-// Two lists per relationship, both plain string arrays:
-// - `following:{userId}` — ids this user follows (SOURCE OF TRUTH,
-//   written in-request; the response waits for it)
-// - `followers:{userId}`  — ids following this user (display/count data,
-//   flushed via after() post-response so serial pins never stack pacing
-//   windows into a 40s Follow button)
+// SINGLE SOURCE OF TRUTH: one record per relationship,
+//   rel:{followerId}:{targetId} -> { t: <followed-at ms> }
+// Following lists, follower lists, counts, and button state ALL derive from
+// these records — there are no separate counters to drift. (The old dual
+// `following:`/`followers:` lists desynced because the reverse write ran
+// post-response and could die there — the "followers stuck at 0" bug.)
+// Legacy `following:{uid}` lists (pre-rel era) are unioned on READ so old
+// follows survive; unfollow scrubs them. Legacy `followers:*` keys are
+// ignored (unreliable display data from the buggy era).
 
 const followsCollection = () => ONYXBASE_COLLECTIONS.FOLLOWS;
-const followingKey = (userId: string) => `following:${userId}`;
-const followersKey = (userId: string) => `followers:${userId}`;
-
-const MAX_FOLLOW_IDS = 5000;
+const relKey = (followerId: string, targetId: string) => `rel:${followerId}:${targetId}`;
+const legacyFollowingKey = (userId: string) => `following:${userId}`;
 
 function cleanIds(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
+// follower -> set of targets (canonical rels + legacy lists unioned, deduped)
+async function loadFollowGraph(): Promise<Map<string, Set<string>>> {
+  const graph = new Map<string, Set<string>>();
+  const add = (a: string, b: string) => {
+    if (!a || !b || a === b) return;
+    let set = graph.get(a);
+    if (!set) {
+      set = new Set();
+      graph.set(a, set);
+    }
+    set.add(b);
+  };
+  const all = await kvExport(followsCollection()).catch(() => ({}) as Record<string, unknown>);
+  for (const key of Object.keys(all)) {
+    if (key.startsWith('rel:')) {
+      const parts = key.split(':');
+      if (parts.length === 3) add(parts[1], parts[2]);
+    } else if (key.startsWith('following:')) {
+      const a = key.slice('following:'.length);
+      for (const b of cleanIds(all[key])) add(a, b);
+    }
+  }
+  return graph;
+}
+
+async function getLegacyFollowingIds(userId: string): Promise<string[]> {
+  if (!userId) return [];
+  const v = await kvGet(legacyFollowingKey(userId), followsCollection()).catch(() => null);
+  return cleanIds(v);
+}
+
 export async function getFollowingIds(userId: string): Promise<string[]> {
   if (!userId) return [];
-  const v = await kvGet<string[]>(followingKey(userId), followsCollection()).catch(() => null);
-  return cleanIds(v);
+  return [...((await loadFollowGraph()).get(userId) ?? [])];
 }
 
 export async function getFollowerIds(userId: string): Promise<string[]> {
   if (!userId) return [];
-  const v = await kvGet<string[]>(followersKey(userId), followsCollection()).catch(() => null);
-  return cleanIds(v);
+  const graph = await loadFollowGraph();
+  const out: string[] = [];
+  for (const [follower, targets] of graph) {
+    if (targets.has(userId)) out.push(follower);
+  }
+  return out;
 }
 
 export async function getFollowCounts(userId: string): Promise<{ followingCount: number; followersCount: number }> {
-  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(userId)]);
-  return { followingCount: following.length, followersCount: followers.length };
+  if (!userId) return { followingCount: 0, followersCount: 0 };
+  const graph = await loadFollowGraph();
+  const followingCount = graph.get(userId)?.size ?? 0;
+  let followersCount = 0;
+  for (const targets of graph.values()) {
+    if (targets.has(userId)) followersCount += 1;
+  }
+  return { followingCount, followersCount };
 }
 
-export async function isFollowing(userId: string, targetId: string): Promise<boolean> {
-  if (!userId || !targetId || userId === targetId) return false;
-  return (await getFollowingIds(userId)).includes(targetId);
+export async function isFollowing(followerId: string, targetId: string): Promise<boolean> {
+  if (!followerId || !targetId || followerId === targetId) return false;
+  // O(1) fast path: canonical record.
+  const rel = await kvGet(relKey(followerId, targetId), followsCollection()).catch(() => null);
+  if (rel) return true;
+  // Legacy fallback (pre-rel follows).
+  return (await getLegacyFollowingIds(followerId)).includes(targetId);
 }
 
-// Pacing-escape write: serial follow pins can straddle the backend's
-// ~12-15s pacing window — retry once past it (same shape as
-// createResourceVerified: 13s escape + 20s deadline gate).
-async function kvSetFollowList(key: string, value: string[]): Promise<boolean> {
+// Pacing-escape write: follow pins can straddle the backend's ~12-15s
+// pacing window — retry once past it (same shape as createResourceVerified).
+async function kvSetFollowRecord(key: string, value: unknown): Promise<boolean> {
   const t0 = Date.now();
   for (let i = 0; i < 2; i++) {
     if (i > 0 && Date.now() - t0 > 20000) break;
@@ -609,52 +657,46 @@ export interface FollowMutationResult {
 export async function followUser(userId: string, targetId: string): Promise<FollowMutationResult> {
   if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
   if (userId === targetId) return { ok: false, error: 'You cannot follow yourself' };
-  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-  if (following.includes(targetId)) {
+  if (await isFollowing(userId, targetId)) {
+    const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
     return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
   }
-  const nextFollowing = [...following, targetId].slice(-MAX_FOLLOW_IDS);
-  const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
-  if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
-  // followersCount is optimistic here — the route flushes the reverse
-  // list via after() so this response never waits on a second pin.
+  // ONE canonical write — no dual-write, no post-response flush to lose.
+  const ok = await kvSetFollowRecord(relKey(userId, targetId), { t: Date.now() });
+  if (!ok) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
+  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
   return {
     ok: true,
-    following: nextFollowing,
-    followingCount: nextFollowing.length,
-    followersCount: followers.includes(userId) ? followers.length : followers.length + 1,
+    following,
+    followingCount: following.length,
+    followersCount: followers.length,
   };
-}
-
-/**
- * Post-response flush of the reverse followers list (call via after()).
- * Re-reads fresh (another follow may have landed meanwhile), merges, writes.
- */
-export async function syncFollowersList(targetId: string, userId: string, present: boolean): Promise<void> {
-  try {
-    const followers = await getFollowerIds(targetId);
-    const next = present
-      ? [...followers.filter((id) => id !== userId), userId].slice(-MAX_FOLLOW_IDS)
-      : followers.filter((id) => id !== userId);
-    await kvSetFollowList(followersKey(targetId), next);
-  } catch {
-    // Display data only — heals on the next follow/unfollow of this user.
-  }
 }
 
 export async function unfollowUser(userId: string, targetId: string): Promise<FollowMutationResult> {
   if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
-  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
-  if (!following.includes(targetId)) {
+  const [rel, legacy] = await Promise.all([
+    kvGet(relKey(userId, targetId), followsCollection()).catch(() => null),
+    getLegacyFollowingIds(userId),
+  ]);
+  const legacyHas = legacy.includes(targetId);
+  if (!rel && !legacyHas) {
+    const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
     return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
   }
-  const nextFollowing = following.filter((id) => id !== targetId);
-  const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
-  if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
+  await kvDeleteIdempotent(relKey(userId, targetId), followsCollection()).catch(() => false);
+  if (legacyHas) {
+    // Scrub the legacy list or the read-union would resurrect the follow.
+    await kvSetFollowRecord(
+      legacyFollowingKey(userId),
+      legacy.filter((id) => id !== targetId)
+    ).catch(() => false);
+  }
+  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
   return {
     ok: true,
-    following: nextFollowing,
-    followingCount: nextFollowing.length,
-    followersCount: followers.includes(userId) ? followers.length - 1 : followers.length,
+    following,
+    followingCount: following.length,
+    followersCount: followers.length,
   };
 }

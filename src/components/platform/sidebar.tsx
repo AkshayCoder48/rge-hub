@@ -30,6 +30,8 @@ interface SidebarProps {
     displayName: string;
     avatar?: string;
     isAdmin: boolean;
+    role?: string;
+    permissions?: string[];
   };
   onUpload: (type: 'image' | 'clip' | 'xml') => void;
 }
@@ -48,7 +50,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'search', label: 'Search', icon: Search, section: 'Discover' },
     { key: 'community', label: 'Community', icon: Users },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
-    ...(user.isAdmin
+    ...((user.isAdmin || (user.role && user.role !== 'user'))
       ? [{ key: 'admin' as ViewKey, label: 'Admin', icon: Shield, section: 'Staff' }]
       : []),
   ];

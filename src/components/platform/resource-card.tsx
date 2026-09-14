@@ -3,7 +3,8 @@
 import React from 'react';
 import type { Resource } from '@/lib/resources';
 import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
-import { FileCode, Film, Image as ImageIcon, Download, Eye, Crown, Link2 } from 'lucide-react';
+import { FileCode, Film, Image as ImageIcon, Download, Eye, Link2 } from 'lucide-react';
+import { RoleBadge, authorDisplayRole } from './role-badge';
 
 interface ResourceCardProps {
   resource: Resource;
@@ -19,10 +20,14 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true, 
   // Red Noir: all type icons use the same red accent
   const typeColor = 'text-[#ef233c]';
 
-  // Admin badge comes ONLY from the server-stamped flag — never from the
-  // owner name (anyone can type "RailGuyEdits" as a display name).
-  const isAdminResource =
-    resource.isOwnerAdmin === true || (resource.type === 'xml' && resource.xmlSource === 'admin');
+  // Role badge comes ONLY from server-stamped data (authorRole, legacy
+  // isOwnerAdmin) — never from the owner name. Admin-file rows always show
+  // at least [Admin].
+  let displayRole = authorDisplayRole(resource);
+  if (displayRole === 'user' && resource.type === 'xml' && resource.xmlSource === 'admin') {
+    displayRole = 'admin';
+  }
+  const isAdminResource = displayRole === 'admin' || displayRole === 'root';
 
   return (
     <div
@@ -66,13 +71,10 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true, 
           <span className="text-[9px] font-manrope uppercase tracking-wider text-zinc-300">{RESOURCE_TYPE_LABEL[resource.type] ?? resource.type}</span>
         </div>
 
-        {/* Admin badge */}
-        {isAdminResource && (
-          <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#ef233c]/20 backdrop-blur-sm border border-[#ef233c]/30">
-            <Crown className="w-3 h-3 text-[#ef233c]" />
-            <span className="text-[9px] font-manrope uppercase tracking-wider text-[#ef233c]">Admin</span>
-          </div>
-        )}
+        {/* Role badge ([Admin] / [Moderator]) */}
+        <div className="absolute top-2 right-2">
+          <RoleBadge role={displayRole} size="sm" />
+        </div>
 
         {/* Duration for clips */}
         {resource.type === 'clip' && resource.duration && (
@@ -133,7 +135,8 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true, 
               </button>
             ) : (
               <span className={isAdminResource ? 'text-[#ef233c]' : 'text-zinc-400'}>{resource.ownerName}</span>
-            )}
+            )}{' '}
+            <RoleBadge role={displayRole} />
           </p>
         )}
         {resource.tags && resource.tags.length > 0 && (

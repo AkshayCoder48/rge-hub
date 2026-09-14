@@ -3,7 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import type { Resource, Profile } from '@/lib/resources';
 import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
-import { X, Download, Share2, ExternalLink, Calendar, Tag, Crown, Film, FileCode, Image as ImageIcon } from 'lucide-react';
+import { X, Download, Share2, ExternalLink, Calendar, Tag, Film, FileCode, Image as ImageIcon } from 'lucide-react';
+import { RoleBadge, authorDisplayRole } from './role-badge';
 import { useToast } from '@/hooks/use-toast';
 
 interface ResourceDetailModalProps {
@@ -70,10 +71,13 @@ export function ResourceDetailModal({
   const displayName = ownerProfile?.displayName || resource.ownerName;
   const avatar = ownerProfile?.avatar;
   const username = ownerProfile?.username || resource.ownerName;
-  // Admin badge comes ONLY from the server-stamped flag — never from the
-  // owner name (anyone can type "RailGuyEdits" as a display name).
-  const isAdminResource =
-    resource.isOwnerAdmin === true || (resource.type === 'xml' && resource.xmlSource === 'admin');
+  // Creator role: live profile role first, stamped authorRole as fallback
+  // (legacy records carry isOwnerAdmin). Server-resolved either way.
+  let ownerRole: string =
+    ((ownerProfile as unknown as { role?: string } | null)?.role) || authorDisplayRole(resource);
+  if (ownerRole === 'user' && resource.type === 'xml' && resource.xmlSource === 'admin') {
+    ownerRole = 'admin';
+  }
 
   // Every resource has its own canonical URL on our domain: /r/<id>
   const pageUrl = typeof window !== 'undefined' ? `${window.location.origin}/r/${resource.id}` : `/r/${resource.id}`;
@@ -182,11 +186,7 @@ export function ResourceDetailModal({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
                   <p className="font-inter text-sm font-medium text-white truncate">{displayName}</p>
-                  {isAdminResource && (
-                    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-[#ef233c]/15 border border-[#ef233c]/30 text-[8px] font-manrope uppercase tracking-wider text-[#ef233c]">
-                      <Crown className="w-2.5 h-2.5" /> Admin
-                    </span>
-                  )}
+                  <RoleBadge role={ownerRole} />
                 </div>
                 <p className="text-[11px] font-manrope text-zinc-500">@{username}</p>
               </div>

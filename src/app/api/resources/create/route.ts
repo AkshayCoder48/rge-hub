@@ -31,6 +31,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { resolveRole } from '@/lib/admin';
 import { backendAcceptsWrites } from '@/lib/onyxbase';
 import {
   createResourceVerified,
@@ -149,6 +150,11 @@ export async function POST(request: NextRequest) {
         : getFileUrl(fileId);
 
     // CRITICAL: ownerId comes from the authenticated session, never from client input
+    // Author role is resolved server-side too — badges can never be self-claimed.
+    const { role: authorRole } = await resolveRole({
+      userId: session.userId,
+      email: session.email,
+    }).catch(() => ({ role: 'user' as const }));
     const resource: Resource = {
       id,
       type: resourceType,
@@ -177,7 +183,8 @@ export async function POST(request: NextRequest) {
       mirrorUrl: typeof mirrorUrl === 'string' ? mirrorUrl : undefined,
       mirrorHost: typeof mirrorHost === 'string' ? mirrorHost : undefined,
       // Server-stamped from the verified session — the ONLY admin signal for badges.
-      isOwnerAdmin: session.isAdmin === true,
+      authorRole,
+      isOwnerAdmin: authorRole !== 'user',
       tags: Array.isArray(tags) ? tags.filter((t: unknown) => typeof t === 'string') : [],
       category: typeof category === 'string' && category.trim() ? category.trim() : undefined,
       duration: typeof duration === 'number' && !Number.isNaN(duration) ? duration : undefined,

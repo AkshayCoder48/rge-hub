@@ -11,12 +11,19 @@
  */
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { resolveRole } from '@/lib/admin';
 
 export async function GET() {
   const result = await getSession();
 
   if (result.status === 'ok') {
     const s = result.session;
+    // Role lookup is advisory here — KV trouble degrades to plain user
+    // rather than breaking login.
+    const resolved = await resolveRole({ userId: s.userId, email: s.email }).catch(() => ({
+      role: 'user' as const,
+      permissions: [] as string[],
+    }));
     return NextResponse.json({
       ok: true,
       status: 'authenticated',
@@ -27,6 +34,8 @@ export async function GET() {
         avatar: s.avatar,
         bio: s.bio,
         isAdmin: s.isAdmin,
+        role: resolved.role,
+        permissions: resolved.permissions,
       },
     });
   }

@@ -10,6 +10,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
+import { loadStaffRoleMap, publicRoleFor } from '@/lib/admin';
 import {
   getProfile,
   listResourcesByOwner,
@@ -44,6 +45,9 @@ export async function GET(
     ]);
     const resources = allResources.filter((r) => r.published);
 
+    const staffMap = await loadStaffRoleMap().catch(() => new Map<string, 'admin' | 'moderator'>());
+    const role = publicRoleFor(profile, staffMap);
+
     let isFollowingValue: boolean | 'self' | null = null;
     if (sessionResult && sessionResult.status === 'ok') {
       const viewerId = sessionResult.session.userId;
@@ -58,6 +62,7 @@ export async function GET(
         username: profile.username,
         displayName: profile.displayName,
         avatar: profile.avatar,
+        role,
         bio: profile.bio,
         createdAt: profile.createdAt,
       },

@@ -7,14 +7,13 @@
  *
  * Auth required for everything (reads are cheap single-key GETs).
  */
-import { NextRequest, NextResponse, after } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import {
   getFollowingIds,
   getFollowCounts,
   followUser,
   unfollowUser,
-  syncFollowersList,
 } from '@/lib/resources';
 
 export const dynamic = 'force-dynamic';
@@ -61,9 +60,7 @@ export async function POST(request: NextRequest) {
     if (!result.ok) {
       return NextResponse.json(result, { status: result.retryable ? 503 : 400 });
     }
-    // Reverse-list flush runs post-response (Vercel survives it via after()).
-    const viewer = session.userId;
-    after(() => syncFollowersList(targetId, viewer, true));
+
     return NextResponse.json({
       ok: true,
       already: result.already,
@@ -93,8 +90,7 @@ export async function DELETE(request: NextRequest) {
     if (!result.ok) {
       return NextResponse.json(result, { status: result.retryable ? 503 : 400 });
     }
-    const viewerId = session.userId;
-    after(() => syncFollowersList(targetId, viewerId, false));
+
     return NextResponse.json({
       ok: true,
       already: result.already,

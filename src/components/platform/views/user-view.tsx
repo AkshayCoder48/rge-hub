@@ -5,6 +5,8 @@ import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
 import { ResourceDetailModal } from '../resource-detail-modal';
 import { FollowButton } from '../follow-button';
+import { FollowListModal } from '../follow-list-modal';
+import { RoleBadge } from '../role-badge';
 import { useToast } from '@/hooks/use-toast';
 import {
   Image as ImageIcon,
@@ -29,6 +31,7 @@ interface PublicProfile {
   avatar?: string;
   bio: string;
   createdAt: string;
+  role?: string;
 }
 
 type FetchState = 'loading' | 'not-found' | 'error' | 'ready';
@@ -44,6 +47,7 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
   const [fetchState, setFetchState] = useState<FetchState>('loading');
   const [tab, setTab] = useState<TabKey>('all');
   const [selected, setSelected] = useState<Resource | null>(null);
+  const [followModal, setFollowModal] = useState<null | 'followers' | 'following'>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -166,9 +170,12 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="font-manrope font-semibold text-2xl lg:text-3xl text-white leading-tight truncate">
-                  {profile.displayName}
-                </h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="font-manrope font-semibold text-2xl lg:text-3xl text-white leading-tight truncate">
+                    {profile.displayName}
+                  </h1>
+                  <RoleBadge role={profile.role} size="sm" />
+                </div>
                 <div className="flex flex-wrap items-center gap-3 mt-1.5 text-[11px] font-manrope text-zinc-500">
                   <span className="flex items-center gap-1.5">
                     <UserIcon className="w-3 h-3" />@{profile.username}
@@ -223,14 +230,22 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
             <div className="font-manrope font-semibold text-xl text-white">{resources.length}</div>
             <div className="text-[10px] font-manrope uppercase tracking-[0.15em] text-zinc-500 mt-0.5">Uploads</div>
           </div>
-          <div className="rounded-xl bg-white/[0.02] border border-white/5 px-4 py-3 text-center">
+          <button
+            onClick={() => setFollowModal('followers')}
+            title="View followers"
+            className="rounded-xl bg-white/[0.02] border border-white/5 px-4 py-3 text-center hover:border-[#ef233c]/30 hover:bg-white/[0.04] transition-all cursor-pointer"
+          >
             <div className="font-manrope font-semibold text-xl text-white">{followersCount}</div>
             <div className="text-[10px] font-manrope uppercase tracking-[0.15em] text-zinc-500 mt-0.5">Followers</div>
-          </div>
-          <div className="rounded-xl bg-white/[0.02] border border-white/5 px-4 py-3 text-center">
+          </button>
+          <button
+            onClick={() => setFollowModal('following')}
+            title="View following"
+            className="rounded-xl bg-white/[0.02] border border-white/5 px-4 py-3 text-center hover:border-[#ef233c]/30 hover:bg-white/[0.04] transition-all cursor-pointer"
+          >
             <div className="font-manrope font-semibold text-xl text-white">{followingCount}</div>
             <div className="text-[10px] font-manrope uppercase tracking-[0.15em] text-zinc-500 mt-0.5">Following</div>
-          </div>
+          </button>
         </div>
       </section>
 
@@ -294,6 +309,16 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
           resource={selected}
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
+          onOpenUser={onOpenUser}
+        />
+      )}
+
+      {followModal && profile && (
+        <FollowListModal
+          userId={profile.userId}
+          displayName={profile.displayName}
+          initialTab={followModal}
+          onClose={() => setFollowModal(null)}
           onOpenUser={onOpenUser}
         />
       )}

@@ -10,16 +10,16 @@
  *     publishedCount, unpublishedCount }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/session';
+import { requirePerm } from '@/lib/admin';
 import { getAllProfiles, listResources } from '@/lib/resources';
 
 export async function GET(_request: NextRequest) {
   try {
-    const sessionResult = await getSession();
-    if (sessionResult.status !== 'ok' || !sessionResult.session.isAdmin) {
+    const gate = await requirePerm('admin.view');
+    if (!gate.ok) {
       return NextResponse.json(
-        { ok: false, error: 'Admin access required' },
-        { status: 403 }
+        { ok: false, error: gate.error },
+        { status: gate.status }
       );
     }
 

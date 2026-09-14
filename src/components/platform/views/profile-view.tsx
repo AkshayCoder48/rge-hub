@@ -26,6 +26,9 @@ import {
   RefreshCw,
 } from 'lucide-react';
 
+import { FollowListModal } from '../follow-list-modal';
+import { RoleBadge } from '../role-badge';
+
 type TabKey = ResourceType;
 
 interface ProfileData {
@@ -35,11 +38,12 @@ interface ProfileData {
   avatar?: string;
   bio?: string;
   createdAt: string;
+  role?: string;
 }
 
 type FetchState = 'loading' | 'not-found' | 'error' | 'ready';
 
-export function ProfileView() {
+export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => void }) {
   const { user, refresh } = useAuth();
   const { toast } = useToast();
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -48,6 +52,7 @@ export function ProfileView() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [profileVersion, setProfileVersion] = useState(0);
+  const [followModal, setFollowModal] = useState<null | 'followers' | 'following'>(null);
   const [selected, setSelected] = useState<Resource | null>(null);
   const [followCounts, setFollowCounts] = useState<{ followersCount: number; followingCount: number } | null>(null);
 
@@ -250,9 +255,12 @@ export function ProfileView() {
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0 flex-1">
-                <h1 className="font-manrope font-semibold text-2xl lg:text-3xl text-white leading-tight truncate">
-                  {profile.displayName}
-                </h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="font-manrope font-semibold text-2xl lg:text-3xl text-white leading-tight truncate">
+                    {profile.displayName}
+                  </h1>
+                  <RoleBadge role={profile.role || user?.role} size="sm" />
+                </div>
                 <div className="flex flex-wrap items-center gap-3 mt-1.5 text-[11px] font-manrope text-zinc-500">
                   <span className="flex items-center gap-1.5">
                     <UserIcon className="w-3 h-3" />@{profile.username}
@@ -303,8 +311,8 @@ export function ProfileView() {
         </div>
         {/* Social stats */}
         <div className="relative grid grid-cols-2 gap-3 mt-3">
-          <StatBlock label="Followers" value={followCounts?.followersCount ?? 0} icon={Users} />
-          <StatBlock label="Following" value={followCounts?.followingCount ?? 0} icon={UserIcon} />
+          <StatBlock label="Followers" value={followCounts?.followersCount ?? 0} icon={Users} onClick={() => setFollowModal('followers')} />
+          <StatBlock label="Following" value={followCounts?.followingCount ?? 0} icon={UserIcon} onClick={() => setFollowModal('following')} />
         </div>
       </section>
 
@@ -408,6 +416,16 @@ export function ProfileView() {
             setEditOpen(false);
             handleEditSaved();
           }}
+        />
+      )}
+
+      {followModal && profile && (
+        <FollowListModal
+          userId={profile.userId}
+          displayName={profile.displayName}
+          initialTab={followModal}
+          onClose={() => setFollowModal(null)}
+          onOpenUser={(id) => onOpenUser?.(id)}
         />
       )}
 
@@ -737,13 +755,15 @@ function StatBlock({
   label,
   value,
   icon: Icon,
+  onClick,
 }: {
   label: string;
   value: number;
   icon: typeof ImageIcon;
+  onClick?: () => void;
 }) {
-  return (
-    <div className="rounded-xl bg-[#ef233c]/5 border border-[#ef233c]/15 p-4">
+  const inner = (
+    <>
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500">
           {label}
@@ -751,6 +771,22 @@ function StatBlock({
         <Icon className="w-3.5 h-3.5 text-[#ef233c]" />
       </div>
       <div className="font-manrope font-semibold text-2xl text-white">{value}</div>
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        onClick={onClick}
+        title={`View ${label.toLowerCase()}`}
+        className="rounded-xl bg-[#ef233c]/5 border border-[#ef233c]/15 p-4 text-left hover:border-[#ef233c]/40 hover:bg-[#ef233c]/10 transition-all cursor-pointer"
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className="rounded-xl bg-[#ef233c]/5 border border-[#ef233c]/15 p-4">
+      {inner}
     </div>
   );
 }
