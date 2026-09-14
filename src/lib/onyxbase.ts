@@ -85,8 +85,12 @@ async function fetchWithTimeout(
  * write is harmless.
  */
 export async function kvSet(key: string, value: any, collection: string = 'default'): Promise<boolean> {
+  // SINGLE attempt: the backend answers <=21s (20s sync deadline +
+  // overhead) or not at all — a second 22s attempt + nap stacked past the
+  // 60s route budget into FUNCTION_INVOCATION_TIMEOUTs (proven live).
+  // The user/app retry (fresh 60s budget) owns the retry now.
   let waitMs = 4000;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 1; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, waitMs));
     try {
       const res = await fetchWithTimeout(
@@ -138,9 +142,9 @@ export async function kvSet(key: string, value: any, collection: string = 'defau
 export async function kvSetMulti(
   entries: Array<{ key: string; value: any; collection?: string }>
 ): Promise<boolean> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // Short retry nap: the old 40s nap + 90s fetches budgeted 220s per call
-    // (the "2 minutes then errors"). Probe-gating already avoids dead backends.
+  // SINGLE attempt (was 2x22s+8s=52s): must fit the 60s route budget
+  // alongside reads+gates — the user/app retry owns the retry.
+  for (let attempt = 0; attempt < 1; attempt++) {
     if (attempt > 0) await new Promise((r) => setTimeout(r, 8000));
     try {
       const res = await fetchWithTimeout(
@@ -236,7 +240,7 @@ export async function kvDelete(key: string, collection: string = 'default'): Pro
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
       },
-      10000
+      22000
     );
     if (!res.ok) { recordWrite(res.status < 500 && res.status !== 429); return false; }
     const data = await res.json().catch(() => null);
@@ -261,7 +265,7 @@ export async function kvDeleteIdempotent(key: string, collection: string = 'defa
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
       },
-      10000
+      22000
     );
     if (res.status === 404) { recordWrite(true); return true; }
     if (!res.ok) { recordWrite(res.status < 500 && res.status !== 429); return false; }
@@ -477,11 +481,9 @@ export async function uploadFile(
   if (label) formData.append('label', label);
 
   let lastError: Error | null = null;
-  // Retry with backoff for Telegram rate limits.
-  // BOUNDED: 55s per-attempt fetch timeout + 10s throttle-wait cap + 2 attempts,
-  // so a slow/flooded backend fails fast with a retryable error instead of
-  // hanging the serverless function into a 504 ("stuck at saving").
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // SINGLE attempt, 45s cap (was 2x55s=110s — guaranteed route death):
+  // fits the 60s route budget; the user/app retry owns the retry.
+  for (let attempt = 0; attempt < 1; attempt++) {
     try {
       const res = await fetchWithTimeout(
         `${ONYXBASE_BASE_URL}/v1/files`,
@@ -490,7 +492,7 @@ export async function uploadFile(
           headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
           body: formData,
         },
-        55000
+        45000
       );
       if (res.ok) {
         const data = await res.json();
@@ -597,7 +599,7 @@ export async function sendEmail(
         },
         body: JSON.stringify(payload),
       },
-      25000
+      20000
     );
     const data = await res.json().catch(() => null);
     if (!data) return { ok: false, error: 'Email service gave an empty response — please retry.' };
@@ -903,9 +905,9 @@ export async function uploadFileResult(
   timings.upload_init_ms = Date.now() - tInit;
 
   let lastError = 'Unknown upload error';
-  // BOUNDED: 2 attempts × 55s fetch timeout so a slow/flooded backend fails
-  // fast with a retryable error instead of hanging into a 504 ("stuck at saving").
-  const MAX_ATTEMPTS = 2;
+  // BOUNDED: SINGLE attempt x 45s fetch timeout (was 2x55s=110s — route
+  // death). Fits the 60s route budget; the user/app retry owns the retry.
+  const MAX_ATTEMPTS = 1;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     timings.attempts = attempt;
@@ -918,7 +920,7 @@ export async function uploadFileResult(
           headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
           body: formData,
         },
-        55000
+        45000
       );
       timings.transfer_ms += Date.now() - tTransfer;
 
