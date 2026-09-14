@@ -24,6 +24,7 @@ export function PlatformApp() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [uploadType, setUploadType] = useState<'image' | 'clip' | 'xml'>('image');
+  const [uploadInitialFiles, setUploadInitialFiles] = useState<File[] | undefined>(undefined);
   const [uploadVersion, setUploadVersion] = useState(0);
 
   // Prefetch everything in ONE request (public + mine) for fast startup
@@ -46,6 +47,13 @@ export function PlatformApp() {
 
   const openUpload = useCallback((type: 'image' | 'clip' | 'xml') => {
     setUploadType(type);
+    setUploadOpen(true);
+  }, []);
+
+  // Open the uploader with files already queued (studio publish).
+  const openUploadWithFiles = useCallback((type: 'image' | 'clip' | 'xml', files: File[]) => {
+    setUploadType(type);
+    setUploadInitialFiles(files);
     setUploadOpen(true);
   }, []);
 
@@ -132,7 +140,7 @@ export function PlatformApp() {
           {view === 'user' && selectedUserId && (
             <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />
           )}
-          {view === 'studio' && <SpeedRampStudio />}
+          {view === 'studio' && <SpeedRampStudio onPublishClip={(f) => openUploadWithFiles('clip', [f])} />}
           {view === 'admin' && user.isAdmin && <AdminView key={`admin-${uploadVersion}`} />}
         </main>
       </div>
@@ -141,9 +149,14 @@ export function PlatformApp() {
       {uploadOpen && (
         <UploadModal
           type={uploadType}
-          onClose={() => setUploadOpen(false)}
+          initialFiles={uploadInitialFiles}
+          onClose={() => {
+            setUploadOpen(false);
+            setUploadInitialFiles(undefined);
+          }}
           onSuccess={() => {
             setUploadOpen(false);
+            setUploadInitialFiles(undefined);
             setUploadVersion(v => v + 1);
             // Invalidate and re-fetch the store (single request covers mine too)
             useResourceStore.getState().invalidate(user?.userId);

@@ -94,6 +94,8 @@ interface UploadModalProps {
   type: 'image' | 'clip' | 'xml';
   onClose: () => void;
   onSuccess: () => void;
+  /** Prefilled files (e.g. SpeedRamp studio publish) — queued on open. */
+  initialFiles?: File[];
 }
 
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif', 'svg', 'bmp', 'ico', 'tiff', 'tif'];
@@ -146,7 +148,7 @@ const STATUS_LABEL: Record<ItemStatus, string> = {
   cancelled: 'Cancelled',
 };
 
-export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
+export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadModalProps) {
   const { user } = useAuth();
   const { toast } = useToast();
   const upsertLocal = useResourceStore((s) => s.upsertLocal);
@@ -238,6 +240,16 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     },
     [addFiles]
   );
+
+  // Prefilled files (e.g. SpeedRamp studio "Upload to Community").
+  // StrictMode-safe: the consumed flag survives mount/unmount/remount.
+  const prefillConsumed = useRef(false);
+  useEffect(() => {
+    if (initialFiles && initialFiles.length > 0 && !prefillConsumed.current) {
+      prefillConsumed.current = true;
+      addFiles(initialFiles);
+    }
+  }, [initialFiles, addFiles]);
 
   // ---------- validation (PRD §38, §39) ----------
 
@@ -1370,12 +1382,16 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                             )}
                           </div>
                           <div className="min-w-0 flex-1">
+                            <label className="block text-[9px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1">
+                              Title
+                            </label>
                             <input
                               value={it.title}
                               onChange={(e) => updateItem(it.uid, { title: e.target.value })}
                               disabled={running && isActive}
-                              placeholder="Title"
-                              className="w-full bg-transparent font-inter text-sm text-white placeholder:text-zinc-700 focus:outline-none border-b border-transparent focus:border-[#ef233c]/40 transition-colors disabled:opacity-70"
+                              placeholder="Write a title for this upload…"
+                              maxLength={120}
+                              className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 font-inter text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#ef233c]/50 transition-colors disabled:opacity-70"
                             />
                             <p className="text-[10px] font-manrope text-zinc-500 truncate">
                               {it.file.name} · {fmtBytes(it.file.size)}

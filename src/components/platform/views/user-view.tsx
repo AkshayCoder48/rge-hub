@@ -13,6 +13,7 @@ import {
   Calendar,
   User as UserIcon,
   PackageOpen,
+  Share2,
 } from 'lucide-react';
 
 interface UserViewProps {
@@ -94,6 +95,14 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
     }
   };
 
+  const handleShareProfile = () => {
+    const url = `${window.location.origin}/${profile?.username || userId}`;
+    navigator.clipboard
+      .writeText(url)
+      .then(() => toast({ title: 'Profile link copied!', description: url }))
+      .catch(() => toast({ title: 'Copy failed', description: 'Could not copy URL', variant: 'destructive' }));
+  };
+
   if (fetchState === 'loading') {
     return (
       <div className="space-y-6 animate-pulse">
@@ -172,6 +181,13 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
                   )}
                 </div>
               </div>
+              <button
+                onClick={handleShareProfile}
+                title="Copy profile link"
+                className="shrink-0 p-2 rounded-full bg-white/[0.04] border border-white/10 text-zinc-400 hover:text-white hover:border-[#ef233c]/30 transition-all"
+              >
+                <Share2 className="w-4 h-4" />
+              </button>
               {isFollowing === 'self' ? (
                 <button
                   onClick={onOpenSelf}

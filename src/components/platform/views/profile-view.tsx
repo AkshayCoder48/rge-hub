@@ -16,6 +16,7 @@ import {
   Calendar,
   User as UserIcon,
   Users,
+  Share2 as Share2Icon,
   Loader2,
   PackageOpen,
   Pencil,
@@ -256,6 +257,20 @@ export function ProfileView() {
                   <span className="flex items-center gap-1.5">
                     <UserIcon className="w-3 h-3" />@{profile.username}
                   </span>
+                  <button
+                    onClick={() => {
+                      const url = `${window.location.origin}/${profile.username}`;
+                      navigator.clipboard
+                        ?.writeText(url)
+                        .then(() => toast({ title: 'Profile link copied!', description: url }))
+                        .catch(() => toast({ title: 'Copy failed', variant: 'destructive' }));
+                    }}
+                    title="Copy your shareable profile link"
+                    className="flex items-center gap-1.5 hover:text-white transition-colors"
+                  >
+                    <Share2Icon className="w-3 h-3" />
+                    {typeof window !== 'undefined' ? window.location.host : 'rge-hub'}/{profile.username}
+                  </button>
                   <span className="flex items-center gap-1.5">
                     <Calendar className="w-3 h-3" />
                     Joined {joinDate}

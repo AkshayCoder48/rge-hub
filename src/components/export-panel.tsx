@@ -2,13 +2,13 @@
 
 import React, { useState } from 'react';
 import { useAppStore, formatDuration, DEFAULT_CONFIG } from '@/lib/store';
-import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine, Zap, ChevronDown, ChevronUp, Code2 } from 'lucide-react';
+import { Download, Loader2, Film, Settings2, Clock, Gauge, Scissors, Combine, Zap, ChevronDown, ChevronUp, Code2, Upload } from 'lucide-react';
 import type { SpeedRampConfig } from '@/lib/types';
 import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 
-interface ExportPanelProps { clipId: string; }
+interface ExportPanelProps { clipId: string; onPublish?: (file: File) => void; }
 
-export function ExportPanel({ clipId }: ExportPanelProps) {
+export function ExportPanel({ clipId, onPublish }: ExportPanelProps) {
   const clip = useAppStore((s) => s.clips.find((c) => c.id === clipId));
   const setClipStatus = useAppStore((s) => s.setClipStatus);
   const setClipProcessedBlob = useAppStore((s) => s.setClipProcessedBlob);
@@ -149,6 +149,12 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const handlePublish = () => {
+    if (!clip.processedBlob || !onPublish) return;
+    const name = `speedramp_${clip.originalName.replace(/\.[^/.]+$/, '')}.mp4`;
+    onPublish(new File([clip.processedBlob], name, { type: 'video/mp4' }));
   };
 
   const handleClearResult = () => {
@@ -409,6 +415,13 @@ export function ExportPanel({ clipId }: ExportPanelProps) {
               className="flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-all duration-300 ease-snap">
               <Download className="w-4 h-4" /> Download
             </button>
+            {onPublish && (
+              <button onClick={handlePublish}
+                title="Open the community uploader with this clip attached"
+                className="flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-medium bg-[#ef233c]/10 text-[#ef233c] border border-[#ef233c]/25 hover:bg-[#ef233c]/20 transition-all duration-300 ease-snap">
+                <Upload className="w-4 h-4" /> Upload to Community
+              </button>
+            )}
             <button onClick={handleClearResult} className="px-3 py-2.5 rounded-2xl text-xs text-neutral-700 hover:text-neutral-500 hover:bg-white/5 transition-all duration-300 ease-snap">Clear</button>
           </>
         )}

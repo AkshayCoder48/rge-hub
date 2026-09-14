@@ -11,7 +11,7 @@ import { TrimDurationControl } from '@/components/trim-duration-control';
 import { ProcessAll } from '@/components/process-all';
 import { Zap, Film, Sparkles, MousePointerClick, TrendingDown, TrendingUp, Combine } from 'lucide-react';
 
-export function SpeedRampApp() {
+export function SpeedRampApp({ onPublishClip }: { onPublishClip?: (file: File) => void }) {
   const clips = useAppStore((s) => s.clips);
   const selectedClipId = useAppStore((s) => s.selectedClipId);
   const selectedClip = useAppStore((s) => s.clips.find((c) => c.id === s.selectedClipId));
@@ -157,7 +157,7 @@ export function SpeedRampApp() {
                 <VideoPreview clipId={selectedClipId} />
                 <TrimDurationControl clipId={selectedClipId} />
                 <ProcessingStatus />
-                <ExportPanel clipId={selectedClipId} />
+                <ExportPanel clipId={selectedClipId} onPublish={onPublishClip} />
               </>
             ) : (
               <div className="flex flex-col items-center justify-center min-h-[400px] gap-4 rounded-3xl border border-white/5 bg-white/[0.02]">

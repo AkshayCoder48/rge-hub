@@ -4,7 +4,7 @@ import React from 'react';
 import { SpeedRampApp } from '@/components/speed-ramp-app';
 import { Zap, Cpu } from 'lucide-react';
 
-export function SpeedRampStudio() {
+export function SpeedRampStudio({ onPublishClip }: { onPublishClip: (file: File) => void }) {
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -36,7 +36,7 @@ export function SpeedRampStudio() {
 
       {/* Tool container */}
       <div className="rounded-3xl border border-white/5 bg-white/[0.02] p-4 lg:p-6">
-        <SpeedRampApp />
+        <SpeedRampApp onPublishClip={onPublishClip} />
       </div>
     </div>
   );
