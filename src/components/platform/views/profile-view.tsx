@@ -15,6 +15,7 @@ import {
   Trash2,
   Calendar,
   User as UserIcon,
+  Users,
   Loader2,
   PackageOpen,
   Pencil,
@@ -47,6 +48,7 @@ export function ProfileView() {
   const [editOpen, setEditOpen] = useState(false);
   const [profileVersion, setProfileVersion] = useState(0);
   const [selected, setSelected] = useState<Resource | null>(null);
+  const [followCounts, setFollowCounts] = useState<{ followersCount: number; followingCount: number } | null>(null);
 
   // Read myResources from the shared store (set by PlatformApp on mount)
   const myResources = useResourceStore((s) => s.myResources);
@@ -72,6 +74,22 @@ export function ProfileView() {
       setFetchState('error');
     }
   }, []);
+
+  // Follower / following counts for the social header.
+  useEffect(() => {
+    if (!profile?.userId) return;
+    fetch(`/api/follows?userId=${encodeURIComponent(profile.userId)}`, { cache: 'no-store' })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok) {
+          setFollowCounts({
+            followersCount: data.followersCount || 0,
+            followingCount: data.followingCount || 0,
+          });
+        }
+      })
+      .catch(() => {});
+  }, [profile?.userId]);
 
   useEffect(() => {
     if (!user?.username) return;
@@ -149,7 +167,7 @@ export function ProfileView() {
   }[] = [
     { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image },
     { key: 'clip', label: 'Clips', icon: Film, count: counts.clip },
-    { key: 'xml', label: 'XMLs & Files', icon: FileCode, count: counts.xml },
+    { key: 'xml', label: 'Files', icon: FileCode, count: counts.xml },
   ];
 
   // --- Loading state (profile or store still loading) ---
@@ -267,6 +285,11 @@ export function ProfileView() {
           <StatBlock label="Images" value={counts.image} icon={ImageIcon} />
           <StatBlock label="Clips" value={counts.clip} icon={Film} />
           <StatBlock label="Files" value={counts.xml} icon={FileCode} />
+        </div>
+        {/* Social stats */}
+        <div className="relative grid grid-cols-2 gap-3 mt-3">
+          <StatBlock label="Followers" value={followCounts?.followersCount ?? 0} icon={Users} />
+          <StatBlock label="Following" value={followCounts?.followingCount ?? 0} icon={UserIcon} />
         </div>
       </section>
 

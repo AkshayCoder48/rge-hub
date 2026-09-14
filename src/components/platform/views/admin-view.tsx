@@ -74,7 +74,7 @@ export function AdminView() {
         const data = await res.json();
         if (!cancelled) {
           if (data.ok) setAdminXmls(data.resources || []);
-          else setAdminXmlsError(data.error || 'Failed to load admin XMLs');
+          else setAdminXmlsError(data.error || 'Failed to load admin files');
         }
       } catch {
         if (!cancelled) setAdminXmlsError('Network error');
@@ -115,7 +115,7 @@ export function AdminView() {
   };
 
   const handleDelete = async (r: Resource) => {
-    if (!confirm(`Delete admin XML "${r.title}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete admin file "${r.title}"? This cannot be undone.`)) return;
     setDeletingId(r.id);
     try {
       const params = new URLSearchParams();
@@ -127,7 +127,7 @@ export function AdminView() {
       const data = await res.json();
       if (data.ok) {
         setAdminXmls((prev) => prev.filter((x) => x.id !== r.id));
-        toast({ title: 'Admin XML deleted', description: r.title });
+        toast({ title: 'Admin file deleted', description: r.title });
       } else {
         toast({ title: 'Delete failed', description: data.error || 'Unknown error' });
       }
@@ -173,8 +173,8 @@ export function AdminView() {
             <StatCard label="Total Users" value={stats.totalUsers} icon={Users} accent="emerald" />
             <StatCard label="Total Images" value={stats.totalImages} icon={ImageIcon} accent="violet" />
             <StatCard label="Total Clips" value={stats.totalClips} icon={Film} accent="cyan" />
-            <StatCard label="Community XMLs" value={stats.totalCommunityXmls} icon={FileCode} accent="emerald" />
-            <StatCard label="Admin XMLs" value={stats.totalAdminXmls} icon={Crown} accent="violet" />
+            <StatCard label="Community Files" value={stats.totalCommunityXmls} icon={FileCode} accent="emerald" />
+            <StatCard label="Admin Files" value={stats.totalAdminXmls} icon={Crown} accent="violet" />
           </div>
         ) : null}
       </section>
@@ -182,8 +182,8 @@ export function AdminView() {
       {/* Admin XML library */}
       <section>
         <SectionHeading
-          title="Admin XML library"
-          subtitle="Official XML presets managed by administrators"
+          title="Admin File library"
+          subtitle="Official presets managed by administrators"
           icon={Crown}
         />
         {adminXmlsLoading ? (
@@ -191,7 +191,7 @@ export function AdminView() {
         ) : adminXmlsError ? (
           <ErrorBlock message={adminXmlsError} />
         ) : adminXmls.length === 0 ? (
-          <EmptyBlock message="No admin XMLs yet" hint="Admins can upload XMLs from the sidebar." />
+          <EmptyBlock message="No admin files yet" hint="Admins can upload files from the Files tab." />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {adminXmls.map((r) => (
@@ -205,7 +205,7 @@ export function AdminView() {
                   onClick={() => handleDelete(r)}
                   disabled={deletingId === r.id}
                   className="absolute top-2 right-2 z-30 w-8 h-8 rounded-full bg-red-500/20 backdrop-blur-sm border border-red-500/30 flex items-center justify-center text-red-300 hover:bg-red-500/40 transition-all duration-300 ease-snap disabled:opacity-50"
-                  title="Delete admin XML"
+                  title="Delete admin file"
                 >
                   {deletingId === r.id ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

@@ -86,7 +86,7 @@ export function HomeView({ onNavigate, onUpload }: HomeViewProps) {
             Welcome back, <span className="text-[#ef233c]">{displayName}</span>
           </h1>
           <p className="mt-3 font-inter text-sm text-zinc-400 max-w-2xl">
-            Your creative workspace for speed ramp clips, editing assets, and timeline XMLs.
+            Your creative workspace for speed ramp clips, editing assets, and timeline presets.
             Jump into the studio or upload something new for the community.
           </p>
         </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
 import { ResourceDetailModal } from '../resource-detail-modal';
@@ -14,23 +14,40 @@ import {
   LayoutGrid,
   Search,
   PackageOpen,
+  UserCheck,
 } from 'lucide-react';
 
-type FilterKey = 'all' | ResourceType;
+type FilterKey = 'all' | 'following' | ResourceType;
 
-export function CommunityView() {
+interface CommunityViewProps {
+  onOpenUser: (userId: string) => void;
+}
+
+export function CommunityView({ onOpenUser }: CommunityViewProps) {
   const { toast } = useToast();
   const allResources = useResourceStore((s) => s.allResources);
   const loaded = useResourceStore((s) => s.loaded);
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Resource | null>(null);
+  const [followingIds, setFollowingIds] = useState<string[]>([]);
+
+  // Who I follow (for the Following tab) — one cheap read.
+  useEffect(() => {
+    fetch('/api/follows', { cache: 'no-store' })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.following)) setFollowingIds(data.following as string[]);
+      })
+      .catch(() => {});
+  }, []);
 
   const resources = allResources;
 
   const filtered = useMemo(() => {
     let list = resources;
-    if (filter !== 'all') list = list.filter((r) => r.type === filter);
+    if (filter === 'following') list = list.filter((r) => followingIds.includes(r.ownerId));
+    else if (filter !== 'all') list = list.filter((r) => r.type === filter);
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -47,11 +64,12 @@ export function CommunityView() {
   const counts = useMemo(() => {
     return {
       all: resources.length,
+      following: resources.filter((r) => followingIds.includes(r.ownerId)).length,
       image: resources.filter((r) => r.type === 'image').length,
       clip: resources.filter((r) => r.type === 'clip').length,
       xml: resources.filter((r) => r.type === 'xml').length,
     };
-  }, [resources]);
+  }, [resources, followingIds]);
 
   const handleDownload = (r: Resource) => {
     if (r.downloadUrl) {
@@ -63,9 +81,10 @@ export function CommunityView() {
 
   const tabs: { key: FilterKey; label: string; icon: typeof LayoutGrid; count: number }[] = [
     { key: 'all', label: 'All', icon: LayoutGrid, count: counts.all },
+    { key: 'following', label: 'Following', icon: UserCheck, count: counts.following },
     { key: 'image', label: 'Images', icon: ImageIcon, count: counts.image },
     { key: 'clip', label: 'Clips', icon: Film, count: counts.clip },
-    { key: 'xml', label: 'XMLs & Files', icon: FileCode, count: counts.xml },
+    { key: 'xml', label: 'Files', icon: FileCode, count: counts.xml },
   ];
 
   return (
@@ -157,6 +176,7 @@ export function CommunityView() {
                 onClick={() => setSelected(r)}
                 onDownload={() => handleDownload(r)}
                 showOwner
+                onOwnerClick={onOpenUser}
               />
             </div>
           ))}
@@ -169,6 +189,7 @@ export function CommunityView() {
           resource={selected}
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
+          onOpenUser={onOpenUser}
         />
       )}
     </div>

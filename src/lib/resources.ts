@@ -28,6 +28,13 @@ export interface Profile {
 }
 
 export type ResourceType = 'image' | 'clip' | 'xml';
+
+/** User-facing singular labels. Internal type ids (incl. 'xml') never change. */
+export const RESOURCE_TYPE_LABEL: Record<ResourceType, string> = {
+  image: 'Image',
+  clip: 'Clip',
+  xml: 'File',
+};
 export type XmlSource = 'community' | 'admin';
 
 export type ResourceStatus = 'ready' | 'processing' | 'pending';
@@ -532,4 +539,110 @@ export function generateResourceId(type: ResourceType, clientId?: string): strin
     return `${prefix}_${clean}`;
   }
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
+}
+
+// ============ Follows (social graph) ============
+//
+// Two lists per relationship, both plain string arrays:
+// - `following:{userId}` — ids this user follows (SOURCE OF TRUTH)
+// - `followers:{userId}`  — ids following this user (display/count data)
+// Follow/unfollow writes both serially; the `following` write must land,
+// the `followers` write is best-effort display data (a stale count heals
+// on the next follow/unfollow touching that user).
+
+const followsCollection = () => ONYXBASE_COLLECTIONS.FOLLOWS;
+const followingKey = (userId: string) => `following:${userId}`;
+const followersKey = (userId: string) => `followers:${userId}`;
+
+const MAX_FOLLOW_IDS = 5000;
+
+function cleanIds(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+export async function getFollowingIds(userId: string): Promise<string[]> {
+  if (!userId) return [];
+  const v = await kvGet<string[]>(followingKey(userId), followsCollection()).catch(() => null);
+  return cleanIds(v);
+}
+
+export async function getFollowerIds(userId: string): Promise<string[]> {
+  if (!userId) return [];
+  const v = await kvGet<string[]>(followersKey(userId), followsCollection()).catch(() => null);
+  return cleanIds(v);
+}
+
+export async function getFollowCounts(userId: string): Promise<{ followingCount: number; followersCount: number }> {
+  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(userId)]);
+  return { followingCount: following.length, followersCount: followers.length };
+}
+
+export async function isFollowing(userId: string, targetId: string): Promise<boolean> {
+  if (!userId || !targetId || userId === targetId) return false;
+  return (await getFollowingIds(userId)).includes(targetId);
+}
+
+// Pacing-escape write: serial follow pins can straddle the backend's
+// ~12-15s pacing window — retry once past it (same shape as
+// createResourceVerified: 13s escape + 20s deadline gate).
+async function kvSetFollowList(key: string, value: string[]): Promise<boolean> {
+  const t0 = Date.now();
+  for (let i = 0; i < 2; i++) {
+    if (i > 0 && Date.now() - t0 > 20000) break;
+    const ok = await kvSet(key, value, followsCollection()).catch(() => false);
+    if (ok) return true;
+    if (i === 0) await new Promise((r) => setTimeout(r, 13000));
+  }
+  return false;
+}
+
+export interface FollowMutationResult {
+  ok: boolean;
+  error?: string;
+  retryable?: boolean;
+  already?: boolean;
+  following?: string[];
+  followingCount?: number;
+  followersCount?: number;
+}
+
+export async function followUser(userId: string, targetId: string): Promise<FollowMutationResult> {
+  if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
+  if (userId === targetId) return { ok: false, error: 'You cannot follow yourself' };
+  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
+  if (following.includes(targetId)) {
+    return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
+  }
+  const nextFollowing = [...following, targetId].slice(-MAX_FOLLOW_IDS);
+  const nextFollowers = [...followers.filter((id) => id !== userId), userId].slice(-MAX_FOLLOW_IDS);
+  const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
+  if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
+  // Best-effort: the following-list is the source of truth; a missed
+  // followers write only stales a counter until the next touch.
+  await kvSetFollowList(followersKey(targetId), nextFollowers).catch(() => false);
+  return {
+    ok: true,
+    following: nextFollowing,
+    followingCount: nextFollowing.length,
+    followersCount: nextFollowers.length,
+  };
+}
+
+export async function unfollowUser(userId: string, targetId: string): Promise<FollowMutationResult> {
+  if (!userId || !targetId) return { ok: false, error: 'Missing user id' };
+  const [following, followers] = await Promise.all([getFollowingIds(userId), getFollowerIds(targetId)]);
+  if (!following.includes(targetId)) {
+    return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
+  }
+  const nextFollowing = following.filter((id) => id !== targetId);
+  const nextFollowers = followers.filter((id) => id !== userId);
+  const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
+  if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
+  await kvSetFollowList(followersKey(targetId), nextFollowers).catch(() => false);
+  return {
+    ok: true,
+    following: nextFollowing,
+    followingCount: nextFollowing.length,
+    followersCount: nextFollowers.length,
+  };
 }

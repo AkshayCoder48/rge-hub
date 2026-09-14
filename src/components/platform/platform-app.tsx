@@ -11,14 +11,17 @@ import { CommunityView } from '@/components/platform/views/community-view';
 import { ProfileView } from '@/components/platform/views/profile-view';
 import { SpeedRampStudio } from '@/components/platform/views/speed-ramp-studio';
 import { AdminView } from '@/components/platform/views/admin-view';
+import { SearchView } from '@/components/platform/views/search-view';
+import { UserView } from '@/components/platform/views/user-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 
-export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin';
+export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin' | 'search' | 'user';
 
 export function PlatformApp() {
   const { user, status, loading } = useAuth();
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [uploadType, setUploadType] = useState<'image' | 'clip' | 'xml'>('image');
   const [uploadVersion, setUploadVersion] = useState(0);
 
@@ -43,6 +46,12 @@ export function PlatformApp() {
   const openUpload = useCallback((type: 'image' | 'clip' | 'xml') => {
     setUploadType(type);
     setUploadOpen(true);
+  }, []);
+
+  // Open another creator's public profile (from cards, search, modals).
+  const openUser = useCallback((userId: string) => {
+    setSelectedUserId(userId);
+    setView('user');
   }, []);
 
   // Show spinner while auth is being checked
@@ -113,11 +122,15 @@ export function PlatformApp() {
         {/* Content area */}
         <main className="relative z-10 px-4 sm:px-6 lg:px-10 py-6 lg:py-10 max-w-7xl mx-auto">
           {view === 'home' && <HomeView key={`home-${uploadVersion}`} onNavigate={navigate} onUpload={openUpload} />}
-          {view === 'images' && <ResourcesView key={`images-${uploadVersion}`} type="image" onUpload={() => openUpload('image')} />}
-          {view === 'clips' && <ResourcesView key={`clips-${uploadVersion}`} type="clip" onUpload={() => openUpload('clip')} />}
-          {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} />}
-          {view === 'community' && <CommunityView key={`community-${uploadVersion}`} />}
+          {view === 'images' && <ResourcesView key={`images-${uploadVersion}`} type="image" onUpload={() => openUpload('image')} onOpenUser={openUser} />}
+          {view === 'clips' && <ResourcesView key={`clips-${uploadVersion}`} type="clip" onUpload={() => openUpload('clip')} onOpenUser={openUser} />}
+          {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} onOpenUser={openUser} />}
+          {view === 'community' && <CommunityView key={`community-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} />}
+          {view === 'search' && <SearchView key={`search-${uploadVersion}`} onOpenUser={openUser} />}
+          {view === 'user' && selectedUserId && (
+            <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />
+          )}
           {view === 'studio' && <SpeedRampStudio />}
           {view === 'admin' && user.isAdmin && <AdminView key={`admin-${uploadVersion}`} />}
         </main>

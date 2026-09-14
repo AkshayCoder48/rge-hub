@@ -2,6 +2,7 @@
 
 import React from 'react';
 import type { Resource } from '@/lib/resources';
+import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
 import { FileCode, Film, Image as ImageIcon, Download, Eye, Crown, Link2 } from 'lucide-react';
 
 interface ResourceCardProps {
@@ -9,9 +10,10 @@ interface ResourceCardProps {
   onClick?: () => void;
   onDownload?: () => void;
   showOwner?: boolean;
+  onOwnerClick?: (ownerId: string) => void;
 }
 
-export function ResourceCard({ resource, onClick, onDownload, showOwner = true }: ResourceCardProps) {
+export function ResourceCard({ resource, onClick, onDownload, showOwner = true, onOwnerClick }: ResourceCardProps) {
   const typeIcon = resource.type === 'image' ? ImageIcon : resource.type === 'clip' ? Film : FileCode;
   const TypeIcon = typeIcon;
   // Red Noir: all type icons use the same red accent
@@ -61,7 +63,7 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
         {/* Type badge */}
         <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
           <TypeIcon className={`w-3 h-3 ${typeColor}`} />
-          <span className="text-[9px] font-manrope uppercase tracking-wider text-zinc-300">{resource.type}</span>
+          <span className="text-[9px] font-manrope uppercase tracking-wider text-zinc-300">{RESOURCE_TYPE_LABEL[resource.type] ?? resource.type}</span>
         </div>
 
         {/* Admin badge */}
@@ -118,7 +120,20 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true }
         <h3 className="font-manrope text-sm font-medium text-white truncate mb-1">{resource.title}</h3>
         {showOwner && (
           <p className="text-[11px] font-inter text-zinc-500 mb-2">
-            by <span className={isAdminResource ? 'text-[#ef233c]' : 'text-zinc-400'}>{resource.ownerName}</span>
+            by{' '}
+            {onOwnerClick ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOwnerClick(resource.ownerId);
+                }}
+                className={`${isAdminResource ? 'text-[#ef233c]' : 'text-zinc-400'} hover:text-white hover:underline transition-colors`}
+              >
+                {resource.ownerName}
+              </button>
+            ) : (
+              <span className={isAdminResource ? 'text-[#ef233c]' : 'text-zinc-400'}>{resource.ownerName}</span>
+            )}
           </p>
         )}
         {resource.tags && resource.tags.length > 0 && (

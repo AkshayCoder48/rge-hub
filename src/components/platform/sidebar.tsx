@@ -6,6 +6,7 @@ import { Logo } from '@/components/logo';
 import type { ViewKey } from './platform-app';
 import {
   Home,
+  Search,
   Image as ImageIcon,
   Film,
   FileCode,
@@ -43,8 +44,9 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'studio', label: 'Speed Ramp Studio', icon: Zap },
     { key: 'images', label: 'Images', icon: ImageIcon, section: 'Resources' },
     { key: 'clips', label: 'Clips', icon: Film },
-    { key: 'xmls', label: 'XMLs & Files', icon: FileCode },
-    { key: 'community', label: 'Community', icon: Users, section: 'Discover' },
+    { key: 'xmls', label: 'Files', icon: FileCode },
+    { key: 'search', label: 'Search', icon: Search, section: 'Discover' },
+    { key: 'community', label: 'Community', icon: Users },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
     ...(user.isAdmin
       ? [{ key: 'admin' as ViewKey, label: 'Admin', icon: Shield, section: 'Staff' }]

@@ -83,7 +83,7 @@ interface QueueItem {
   timings?: Record<string, number>;
   /** Which backend stored this file (set during transfer). */
   via?: 'hub' | 'getshared' | 'quax';
-  /** Optional cover thumbnail (clips + files). Uploaded as an image first. */
+  /** Optional cover thumbnail (all types). Uploaded as an image first. */
   thumbnailFile?: File;
   thumbnailPreview?: string;
   thumbnailFileId?: string;
@@ -196,7 +196,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
   }, []);
 
   const TypeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
-  // "XMLs & Files" accepts anything (xml, zip, pdf, apk, ...); clips stay video-only.
+  // "Files" accepts anything (xml, zip, pdf, apk, ...); clips stay video-only.
   const accept = type === 'image' ? 'image/*' : type === 'clip' ? 'video/*' : undefined;
   const typeLabel = type === 'xml' ? 'file' : type;
   const sizeLimit = type === 'image' ? MAX_UPLOAD_BYTES : MAX_EXTERNAL_BYTES;
@@ -268,7 +268,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
       if (type === 'clip' && !(mime.startsWith('video/') || CLIP_EXTS.includes(ext))) {
         return { ok: false, code: 'FILE_TYPE_ERROR', error: `"${file.name}" is not a video file.` };
       }
-      // type 'xml' ("XMLs & Files") accepts any file — no extension check.
+      // type 'xml' ("Files") accepts any file — no extension check.
       return { ok: true };
     },
     [type]
@@ -740,7 +740,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
     [type]
   );
 
-  // ---------- optional cover thumbnail (clips + files) ----------
+  // ---------- optional cover thumbnail (all types) ----------
   // Small image uploaded through our own image pipeline (mirrored like images).
   const uploadThumbnail = useCallback(
     async (item: QueueItem): Promise<{ thumbnailFileId: string; thumbnailUrl: string }> => {
@@ -1381,7 +1381,7 @@ export function UploadModal({ type, onClose, onSuccess }: UploadModalProps) {
                               {it.file.name} · {fmtBytes(it.file.size)}
                               {type !== 'image' && (isQuaxEligible(it.file.name, it.file.size) ? ' · permanent storage' : it.file.size > MAX_UPLOAD_BYTES ? ' · large file, direct upload' : ' · direct upload')}
                             </p>
-                            {type !== 'image' && !running && (it.status === 'queued' || it.status === 'cancelled' || it.status === 'failed') && (
+                            {!running && (it.status === 'queued' || it.status === 'cancelled' || it.status === 'failed') && (
                               <button
                                 onClick={() => (it.thumbnailFile ? clearThumbnail(it.uid) : pickThumbnail(it.uid))}
                                 className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-inter text-zinc-500 hover:text-white transition-colors"

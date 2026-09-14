@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import type { Resource, Profile } from '@/lib/resources';
+import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
 import { X, Download, Share2, ExternalLink, Calendar, Tag, Crown, Film, FileCode, Image as ImageIcon } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
@@ -12,6 +13,7 @@ interface ResourceDetailModalProps {
   canEdit?: boolean;
   canDelete?: boolean;
   onDelete?: (r: Resource) => void;
+  onOpenUser?: (userId: string) => void;
 }
 
 export function ResourceDetailModal({
@@ -21,6 +23,7 @@ export function ResourceDetailModal({
   canEdit = false,
   canDelete = false,
   onDelete,
+  onOpenUser,
 }: ResourceDetailModalProps) {
   const { toast } = useToast();
   const [ownerProfile, setOwnerProfile] = useState<Profile | null>(null);
@@ -123,7 +126,7 @@ export function ResourceDetailModal({
             <div>
               <h2 className="font-manrope font-semibold text-lg text-white truncate max-w-[300px]">{resource.title}</h2>
               <p className="text-[10px] font-manrope uppercase tracking-wider text-zinc-500">
-                {resource.type} · {formatDate(resource.createdAt)}
+                {RESOURCE_TYPE_LABEL[resource.type] ?? resource.type} · {formatDate(resource.createdAt)}
               </p>
             </div>
           </div>
@@ -152,7 +155,7 @@ export function ResourceDetailModal({
             ) : resource.type === 'xml' ? (
               <div className="flex flex-col items-center gap-3 py-12">
                 <FileCode className="w-16 h-16 text-[#ef233c]/30" />
-                <p className="font-inter text-sm text-zinc-500">XML file — download to view</p>
+                <p className="font-inter text-sm text-zinc-500">File — download to view</p>
               </div>
             ) : (
               <div className="flex flex-col items-center gap-3 py-12">
@@ -165,7 +168,10 @@ export function ResourceDetailModal({
           {/* Info section */}
           <div className="p-6 space-y-4">
             {/* Creator — dynamically resolved from current profile */}
-            <div className="flex items-center gap-3 p-3 rounded-xl bg-black/40 border border-white/5">
+            <div
+              className={`flex items-center gap-3 p-3 rounded-xl bg-black/40 border border-white/5 ${onOpenUser ? 'cursor-pointer hover:border-[#ef233c]/30 transition-all' : ''}`}
+              onClick={onOpenUser ? () => onOpenUser(resource.ownerId) : undefined}
+            >
               <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#ef233c]/20 to-zinc-800 flex items-center justify-center text-sm font-medium text-white overflow-hidden shrink-0">
                 {avatar ? (
                   <img src={avatar} alt={displayName} className="w-full h-full object-cover" />

@@ -19,9 +19,10 @@ import {
 interface ResourcesViewProps {
   type: ResourceType;
   onUpload: () => void;
+  onOpenUser: (userId: string) => void;
 }
 
-export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
+export function ResourcesView({ type, onUpload, onOpenUser }: ResourcesViewProps) {
   const { user } = useAuth();
   const { toast } = useToast();
   const loaded = useResourceStore((s) => s.loaded);
@@ -37,7 +38,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
   const [selected, setSelected] = useState<Resource | null>(null);
 
   const TypeIcon = type === 'image' ? ImageIcon : type === 'clip' ? Film : FileCode;
-  const typeLabel = type === 'image' ? 'Images' : type === 'clip' ? 'Clips' : 'XMLs & Files';
+  const typeLabel = type === 'image' ? 'Images' : type === 'clip' ? 'Clips' : 'Files';
 
   // Merge public resources of this type with the user's own resources of this type,
   // deduplicating by id so unpublished drafts still show up.
@@ -190,6 +191,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
               onClick={() => setSelected(r)}
               onDownload={() => handleDownload(r)}
               showOwner
+              onOwnerClick={onOpenUser}
             />
           ))}
         </div>
@@ -203,6 +205,7 @@ export function ResourcesView({ type, onUpload }: ResourcesViewProps) {
           onDownload={handleDownload}
           canDelete={isOwn(selected)}
           onDelete={handleDelete}
+          onOpenUser={onOpenUser}
         />
       )}
     </div>
