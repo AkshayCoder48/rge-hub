@@ -544,11 +544,11 @@ export function generateResourceId(type: ResourceType, clientId?: string): strin
 // ============ Follows (social graph) ============
 //
 // Two lists per relationship, both plain string arrays:
-// - `following:{userId}` — ids this user follows (SOURCE OF TRUTH)
-// - `followers:{userId}`  — ids following this user (display/count data)
-// Follow/unfollow writes both serially; the `following` write must land,
-// the `followers` write is best-effort display data (a stale count heals
-// on the next follow/unfollow touching that user).
+// - `following:{userId}` — ids this user follows (SOURCE OF TRUTH,
+//   written in-request; the response waits for it)
+// - `followers:{userId}`  — ids following this user (display/count data,
+//   flushed via after() post-response so serial pins never stack pacing
+//   windows into a 40s Follow button)
 
 const followsCollection = () => ONYXBASE_COLLECTIONS.FOLLOWS;
 const followingKey = (userId: string) => `following:${userId}`;
@@ -614,18 +614,32 @@ export async function followUser(userId: string, targetId: string): Promise<Foll
     return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
   }
   const nextFollowing = [...following, targetId].slice(-MAX_FOLLOW_IDS);
-  const nextFollowers = [...followers.filter((id) => id !== userId), userId].slice(-MAX_FOLLOW_IDS);
   const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
   if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
-  // Best-effort: the following-list is the source of truth; a missed
-  // followers write only stales a counter until the next touch.
-  await kvSetFollowList(followersKey(targetId), nextFollowers).catch(() => false);
+  // followersCount is optimistic here — the route flushes the reverse
+  // list via after() so this response never waits on a second pin.
   return {
     ok: true,
     following: nextFollowing,
     followingCount: nextFollowing.length,
-    followersCount: nextFollowers.length,
+    followersCount: followers.includes(userId) ? followers.length : followers.length + 1,
   };
+}
+
+/**
+ * Post-response flush of the reverse followers list (call via after()).
+ * Re-reads fresh (another follow may have landed meanwhile), merges, writes.
+ */
+export async function syncFollowersList(targetId: string, userId: string, present: boolean): Promise<void> {
+  try {
+    const followers = await getFollowerIds(targetId);
+    const next = present
+      ? [...followers.filter((id) => id !== userId), userId].slice(-MAX_FOLLOW_IDS)
+      : followers.filter((id) => id !== userId);
+    await kvSetFollowList(followersKey(targetId), next);
+  } catch {
+    // Display data only — heals on the next follow/unfollow of this user.
+  }
 }
 
 export async function unfollowUser(userId: string, targetId: string): Promise<FollowMutationResult> {
@@ -635,14 +649,12 @@ export async function unfollowUser(userId: string, targetId: string): Promise<Fo
     return { ok: true, already: true, following, followingCount: following.length, followersCount: followers.length };
   }
   const nextFollowing = following.filter((id) => id !== targetId);
-  const nextFollowers = followers.filter((id) => id !== userId);
   const okA = await kvSetFollowList(followingKey(userId), nextFollowing);
   if (!okA) return { ok: false, error: 'Storage is busy — please retry shortly.', retryable: true };
-  await kvSetFollowList(followersKey(targetId), nextFollowers).catch(() => false);
   return {
     ok: true,
     following: nextFollowing,
     followingCount: nextFollowing.length,
-    followersCount: nextFollowers.length,
+    followersCount: followers.includes(userId) ? followers.length - 1 : followers.length,
   };
 }
