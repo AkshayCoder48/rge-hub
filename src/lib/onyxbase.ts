@@ -27,7 +27,10 @@ const EMAIL_CREDENTIAL = process.env.ONYXBASE_EMAIL_CREDENTIAL || 'Email_Verific
 const ONYXBASE_V5_URL = (process.env.ONYXBASE_V5_URL || '').trim().replace(/\/+$/, '');
 const V5_ENABLED = ONYXBASE_V5_URL !== '';
 
-if (!ONYXBASE_API_KEY) {
+// Server-only warning: this module also gets bundled when client components
+// import resources.ts (relative chain) — in the browser the env var is
+// intentionally absent, so only warn when actually running on the server.
+if (!ONYXBASE_API_KEY && typeof window === 'undefined') {
   console.warn('[OnyxBase] ONYXBASE_API_KEY is not set. Server-side operations will fail.');
 }
 
