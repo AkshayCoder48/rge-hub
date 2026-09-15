@@ -159,7 +159,7 @@ function mapCreateError(err: ApiError): { code: UploadErrorCode; error: string }
       return { code: 'AUTH_ERROR', error: err.message || 'Authentication required. Please log in and try again.' };
     }
     if (err.status === 503) {
-      return { code: 'UPLOAD_THROTTLED', error: err.message || 'Servers are busy — please retry in a minute.' };
+      return { code: 'UPLOAD_THROTTLED', error: err.message || 'The storage service is briefly throttled — your data is safe; please retry in a moment.' };
     }
     if (err.status === 400) {
       return { code: 'UPLOAD_STORAGE_ERROR', error: err.message || 'Invalid resource details.' };

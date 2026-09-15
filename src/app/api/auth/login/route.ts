@@ -1,118 +1,222 @@
 /**
  * POST /api/auth/login
- * Login with email + password via OnyxBase's native auth.
  *
- * Body: { email, password }
+ * PRD V5 §19 — login follows the same operation model as registration:
+ * requestId idempotency, recovery after a lost response, honest errors.
  *
- * Flow:
- * 1. Call OnyxBase /api/auth/login with {email, password}
- * 2. OnyxBase returns apiKey + userId + name
- * 3. Get or create platform profile
- * 4. Create session
+ * Body: { email, password, requestId? }
+ * Success: 200 { ok, status:'authenticated', user, recovered? }
+ * Busy twin: 202 { ok, status:'processing', operationId }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { loginByEmailPassword, backendAcceptsWrites } from '@/lib/onyxbase';
+import {
+  ONYXBASE_V5_ENABLED,
+  v5LoginAccount,
+  v5GetAuthOpMarker,
+  v5PutAuthOpMarker,
+  loginByEmailPassword,
+  backendAcceptsWrites,
+} from '@/lib/onyxbase';
 import { getProfile, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 import { isReservedUsername } from '@/lib/reserved';
+import {
+  normalizeRequestId,
+  authAttemptBegin,
+  authAttemptComplete,
+  authAttemptFail,
+  authRecordFromV5Marker,
+  authProcessingResponse,
+  type AuthRecoveryRecord,
+} from '@/lib/auth-idempotency';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
+async function issueSessionResponse(rec: AuthRecoveryRecord, recovered = false) {
+  await createSession({
+    userId: rec.userId,
+    username: rec.username,
+    displayName: rec.displayName,
+    email: rec.email,
+    avatar: rec.avatar,
+    bio: rec.bio,
+    apiKey: rec.apiKey,
+    isAdmin: rec.isAdmin,
+  });
+  return NextResponse.json({
+    ok: true,
+    status: 'authenticated',
+    user: {
+      userId: rec.userId,
+      username: rec.username,
+      displayName: rec.displayName,
+      avatar: rec.avatar || '',
+      bio: rec.bio || '',
+      isAdmin: rec.isAdmin,
+    },
+    ...(recovered ? { recovered: true } : {}),
+  });
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const { email, password } = await request.json();
+    const body = await request.json().catch(() => null);
+    if (!body) {
+      return NextResponse.json({ ok: false, error: 'Invalid request body' }, { status: 400 });
+    }
+    const { email, password } = body;
+    const requestId =
+      normalizeRequestId(body.requestId) ?? normalizeRequestId(request.headers.get('idempotency-key'));
+
+    // ─── 1. Idempotent recovery (BEFORE any work) ─────────────────────────
+    if (requestId) {
+      const key = `login:${requestId}`;
+      const begun = authAttemptBegin(key);
+      if (begun.recovery) {
+        return await issueSessionResponse(begun.recovery, true);
+      }
+      if (begun.inFlight) {
+        return authProcessingResponse('login', requestId, request.headers.get('x-request-id') || requestId);
+      }
+      if (ONYXBASE_V5_ENABLED) {
+        const marker = await v5GetAuthOpMarker('login', requestId);
+        if (marker) {
+          const rec = authRecordFromV5Marker(marker);
+          authAttemptComplete(key, rec);
+          return await issueSessionResponse(rec, true);
+        }
+      }
+    }
+
     if (!email || !password) {
       return NextResponse.json(
-        { ok: false, error: 'Email and password are required' },
+        { ok: false, code: 'VALIDATION_ERROR', error: 'Email and password are required' },
         { status: 400 }
       );
     }
+    const normalizedEmail = email.toLowerCase().trim();
 
-    // Login via OnyxBase (verifies credentials, returns API key)
-    // Circuit breaker: fail in seconds when the backend is drowning in
-    // Telegram 429s — never grind minutes into a timeout.
-    if (!(await backendAcceptsWrites())) {
-      return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
-        { status: 503 }
-      );
-    }
-    const loginResult = await loginByEmailPassword(email, password);
-    if (!loginResult.ok || !loginResult.apiKey) {
-      return NextResponse.json(
-        { ok: false, error: loginResult.error || 'Invalid email or password' },
-        { status: 400 }
-      );
+    // ─── 2. Authenticate (V5 fast path / V4 legacy) ────────────────────────
+    let loginUserId: string | undefined;
+    let loginApiKey: string | undefined;
+    let loginName: string | undefined;
+
+    if (ONYXBASE_V5_ENABLED) {
+      const login = await v5LoginAccount(normalizedEmail, password);
+      if (login.ok && login.userId && login.apiKey) {
+        loginUserId = login.userId;
+        loginApiKey = login.apiKey;
+        loginName = login.name;
+      } else if (login.code === 'UPSTREAM_UNAVAILABLE') {
+        if (requestId) authAttemptFail(`login:${requestId}`)
+        return NextResponse.json(
+          { ok: false, code: 'UPSTREAM_UNAVAILABLE', error: login.error, retryable: true },
+          { status: 503 }
+        );
+      } else if (login.code === 'RATE_LIMITED') {
+        return NextResponse.json(
+          { ok: false, code: 'RATE_LIMITED', error: login.error || 'Too many attempts — please wait a moment.', retryable: true },
+          { status: 429 }
+        );
+      } else {
+        // V5 has no such account (or bad password) — fall through to V4 for
+        // legacy accounts that predate the migration, keeping one honest
+        // error when both paths fail.
+        if (await backendAcceptsWrites()) {
+          const legacy = await loginByEmailPassword(normalizedEmail, password);
+          if (legacy.ok && legacy.apiKey && legacy.userId) {
+            loginUserId = legacy.userId;
+            loginApiKey = legacy.apiKey;
+            loginName = legacy.name;
+          }
+        }
+        if (!loginUserId) {
+          if (requestId) authAttemptFail(`login:${requestId}`);
+          return NextResponse.json(
+            { ok: false, code: 'AUTH_INVALID_CREDENTIALS', error: 'Invalid email or password' },
+            { status: 401 }
+          );
+        }
+      }
+    } else {
+      if (!(await backendAcceptsWrites())) {
+        if (requestId) authAttemptFail(`login:${requestId}`)
+        return NextResponse.json(
+          { ok: false, code: 'UPSTREAM_UNAVAILABLE', error: 'The auth service is briefly unavailable — please retry.', retryable: true },
+          { status: 503 }
+        );
+      }
+      const loginResult = await loginByEmailPassword(normalizedEmail, password);
+      if (!loginResult.ok || !loginResult.apiKey || !loginResult.userId) {
+        if (requestId) authAttemptFail(`login:${requestId}`);
+        return NextResponse.json(
+          { ok: false, code: 'AUTH_INVALID_CREDENTIALS', error: loginResult.error || 'Invalid email or password' },
+          { status: 401 }
+        );
+      }
+      loginUserId = loginResult.userId;
+      loginApiKey = loginResult.apiKey;
+      loginName = loginResult.name;
     }
 
-    // Get or create platform profile
-    let profile = await getProfile(loginResult.userId!);
+    // ─── 3. Get-or-create platform profile ─────────────────────────────────
+    let profile = await getProfile(loginUserId!);
     if (!profile) {
-      // Auto-create a minimal profile for first login
       const now = new Date().toISOString();
-      let username = (loginResult.name || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '') || `user_${loginResult.userId!.slice(-6)}`;
-      // Never auto-assign a reserved (staff-lookalike) username
+      let username = (loginName || normalizedEmail.split('@')[0]).toLowerCase().replace(/[^a-z0-9_]/g, '') || `user_${loginUserId!.slice(-6)}`;
       if (isReservedUsername(username)) {
-        username = `user_${loginResult.userId!.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase() || 'member'}`;
+        username = `user_${loginUserId!.replace(/[^a-z0-9]/gi, '').slice(-8).toLowerCase() || 'member'}`;
       }
       profile = {
-        userId: loginResult.userId!,
+        userId: loginUserId!,
         username,
-        displayName: loginResult.name || username,
+        displayName: loginName || username,
         avatar: '',
         bio: '',
-        email: loginResult.email || email.toLowerCase().trim(),
-        apiKey: loginResult.apiKey,
+        email: normalizedEmail,
+        apiKey: loginApiKey!,
         createdAt: now,
         updatedAt: now,
       } as Profile;
-
-      // Single attempt — upsertProfile already retries internally, and login
-      // succeeds regardless (a missing row is recreated lazily next login).
       const profileCreated = await upsertProfile(profile);
       if (!profileCreated) {
-        console.error('[login] Failed to create profile after 2 attempts for user:', loginResult.userId);
+        console.error('[login] Failed to create profile for user:', loginUserId);
       }
-    } else {
-      // Update API key in case it changed
-      if (profile.apiKey !== loginResult.apiKey) {
-        profile.apiKey = loginResult.apiKey;
-        profile.updatedAt = new Date().toISOString();
-        await upsertProfile(profile);
-      }
+    } else if (profile.apiKey !== loginApiKey) {
+      profile.apiKey = loginApiKey!;
+      await upsertProfile(profile);
     }
 
+    // ─── 4. Record completion + session ────────────────────────────────────
     const isAdmin = isAdminUser({
+      userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,
       email: profile.email,
     });
-
-    await createSession({
+    const record: AuthRecoveryRecord = {
       userId: profile.userId,
       username: profile.username,
       displayName: profile.displayName,
       email: profile.email,
       avatar: profile.avatar,
       bio: profile.bio,
-      apiKey: profile.apiKey,
+      apiKey: loginApiKey!,
       isAdmin,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      user: {
-        userId: profile.userId,
-        username: profile.username,
-        displayName: profile.displayName,
-        avatar: profile.avatar,
-        bio: profile.bio,
-        isAdmin,
-      },
-    });
+    };
+    if (requestId) {
+      authAttemptComplete(`login:${requestId}`, record);
+      if (ONYXBASE_V5_ENABLED) {
+        void v5PutAuthOpMarker('login', requestId, { ...record });
+      }
+    }
+    return await issueSessionResponse(record);
   } catch (err) {
     console.error('[login] error:', err);
-    return NextResponse.json({ ok: false, error: 'Login failed' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, code: 'UNKNOWN_ERROR', error: 'Sign-in failed. Please try again.' },
+      { status: 500 }
+    );
   }
 }

@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
     // when it's drowning, before spending time on the image bytes.
     if (!(await backendAcceptsWrites())) {
       return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { ok: false, error: 'The storage service is briefly throttled — your data is safe; please retry in a moment.', retryable: true },
         { status: 503 }
       );
     }

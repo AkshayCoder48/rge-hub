@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     // Telegram 429s — never grind minutes into a timeout.
     if (!(await backendAcceptsWrites())) {
       return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { ok: false, error: 'The storage service is briefly throttled — your data is safe; please retry in a moment.', retryable: true },
         { status: 503 }
       );
     }

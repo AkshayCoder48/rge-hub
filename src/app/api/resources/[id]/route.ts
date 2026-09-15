@@ -106,7 +106,7 @@ export async function GET(
     // Circuit breaker: fail fast in seconds when the backend is drowning.
     if (!(await backendAcceptsWrites())) {
       return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { ok: false, error: 'The storage service is briefly throttled — your data is safe; please retry in a moment.', retryable: true },
         { status: 503 }
       );
     }
@@ -185,7 +185,7 @@ export async function PATCH(
     // Circuit breaker: fail fast in seconds when the backend is drowning.
     if (!(await backendAcceptsWrites())) {
       return NextResponse.json(
-        { ok: false, error: 'Servers are busy — please retry in a minute.', retryable: true },
+        { ok: false, error: 'The storage service is briefly throttled — your data is safe; please retry in a moment.', retryable: true },
         { status: 503 }
       );
     }
