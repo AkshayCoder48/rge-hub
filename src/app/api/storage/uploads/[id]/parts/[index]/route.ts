@@ -10,7 +10,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
-import { storagePutPart, V5StorageError } from '@/lib/v5-storage';
+import { storagePutPart, V5StorageError, type StorageSessionContext } from '@/lib/v5-storage';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -36,7 +36,17 @@ export async function PUT(request: NextRequest, ctx: Ctx) {
     if (buf.byteLength === 0) {
       return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', error: 'Empty part body' }, { status: 400 });
     }
-    const part = await storagePutPart(id, idx, buf, 'application/octet-stream');
+    // Stateless-session context (optional query params from the browser
+    // client) — lets the engine reconstruct the session on any instance.
+    const q = request.nextUrl.searchParams;
+    const cSize = Number(q.get('size'));
+    const cChunk = Number(q.get('cs'));
+    const cTotal = Number(q.get('tc'));
+    const sess: StorageSessionContext | null =
+      Number.isFinite(cSize) && cSize > 0 && Number.isFinite(cChunk) && cChunk > 0 && Number.isInteger(cTotal) && cTotal > 0
+        ? { size: cSize, chunkSize: cChunk, totalChunks: cTotal, checksum: q.get('sum') || null, filename: q.get('fn') || null, mimeType: q.get('mime') || null }
+        : null;
+    const part = await storagePutPart(id, idx, buf, 'application/octet-stream', sess);
     return NextResponse.json({
       ok: true,
       index: part.index,

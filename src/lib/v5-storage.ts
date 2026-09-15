@@ -41,6 +41,17 @@ export interface V5StorageStatus {
   checksum: string | null;
 }
 
+/** Session geometry from init — forwarded with part PUTs and finalize so the
+ *  engine can work statelessly on any instance (no cross-instance wait). */
+export interface StorageSessionContext {
+  size: number;
+  chunkSize: number;
+  totalChunks: number;
+  checksum?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+}
+
 export interface V5StoragePart {
   index: number;
   fileId: string;
@@ -188,10 +199,19 @@ export async function storagePutPart(
   uploadId: string,
   index: number,
   body: ArrayBuffer,
-  mimeType: string
+  mimeType: string,
+  ctx?: StorageSessionContext | null
 ): Promise<V5StoragePart> {
+  // Stateless-session query params: the engine reconstructs the session on
+  // any instance instead of waiting for snapshot convergence (seconds).
+  const q = ctx
+    ? `?size=${Math.floor(ctx.size)}&cs=${Math.floor(ctx.chunkSize)}&tc=${ctx.totalChunks}` +
+      (ctx.checksum ? `&sum=${encodeURIComponent(ctx.checksum)}` : '') +
+      (ctx.filename ? `&fn=${encodeURIComponent(ctx.filename.slice(0, 120))}` : '') +
+      (ctx.mimeType ? `&mime=${encodeURIComponent(ctx.mimeType.slice(0, 60))}` : '')
+    : '';
   const r = await v5Call(
-    `/api/v5/blobs/${encodeURIComponent(uploadId)}/parts/${index}`,
+    `/api/v5/blobs/${encodeURIComponent(uploadId)}/parts/${index}${q}`,
     {
       method: 'PUT',
       headers: { 'Content-Type': mimeType || 'application/octet-stream' },
@@ -214,12 +234,27 @@ export async function storagePutPart(
 
 export async function storageComplete(
   uploadId: string,
-  parts: Array<{ index: number; fileId: string; messageId?: number | null }>
+  parts: Array<{ index: number; fileId: string; messageId?: number | null }>,
+  ctx?: StorageSessionContext | null
 ): Promise<V5StorageComplete> {
   const r = await v5Call(`/api/v5/blobs/${encodeURIComponent(uploadId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'finalize', parts }),
+    body: JSON.stringify({
+      action: 'finalize',
+      parts,
+      // Stateless finalize context — same reason as part PUTs.
+      context: ctx
+        ? {
+            size: Math.floor(ctx.size),
+            chunkSize: Math.floor(ctx.chunkSize),
+            totalChunks: ctx.totalChunks,
+            checksum: ctx.checksum ?? null,
+            filename: ctx.filename ?? null,
+            mimeType: ctx.mimeType ?? null,
+          }
+        : undefined,
+    }),
     timeoutMs: 180_000,
   });
   const data = unwrap(r, 'UPLOAD_STORAGE_ERROR');

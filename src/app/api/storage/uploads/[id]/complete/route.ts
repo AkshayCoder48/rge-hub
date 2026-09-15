@@ -54,7 +54,21 @@ export async function POST(request: NextRequest, ctx: Ctx) {
         { status: 400 }
       );
     }
-    const done = await storageComplete(id, parts);
+    // Stateless-session context (init geometry, optional) — lets the engine
+    // finalize on any instance without waiting for snapshot convergence.
+    const c = (body as { context?: { size?: unknown; chunkSize?: unknown; totalChunks?: unknown; checksum?: unknown; filename?: unknown; mimeType?: unknown } }).context;
+    const sess =
+      c && typeof c.size === 'number' && typeof c.chunkSize === 'number' && typeof c.totalChunks === 'number'
+        ? {
+            size: c.size,
+            chunkSize: c.chunkSize,
+            totalChunks: c.totalChunks,
+            checksum: typeof c.checksum === 'string' ? c.checksum : null,
+            filename: typeof c.filename === 'string' ? c.filename : null,
+            mimeType: typeof c.mimeType === 'string' ? c.mimeType : null,
+          }
+        : null;
+    const done = await storageComplete(id, parts, sess);
     return NextResponse.json({
       ok: true,
       resourceId: done.blobId,

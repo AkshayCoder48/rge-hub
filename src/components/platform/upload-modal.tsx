@@ -94,8 +94,12 @@ interface QueueItem {
   notice?: string | null;
   /** Which backend stored this file (set during transfer). */
   via?: 'hub' | 'getshared' | 'quax' | 'v5';
-  /** V5 permanent-storage session id — retry resumes from where it stopped. */
+  /** V5 permanent-storage session — retry resumes from where it stopped. */
   uploadId?: string;
+  v5ChunkSize?: number;
+  v5TotalChunks?: number;
+  /** Confirmed V5 part refs — client-side resume source (convergence-free). */
+  v5Parts?: Array<{ index: number; fileId: string; messageId?: number | null }>;
   /** Optional cover thumbnail (all types). Uploaded as an image first. */
   thumbnailFile?: File;
   thumbnailPreview?: string;
@@ -618,7 +622,17 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         const result = await uploadFilePermanent(item.file, {
           signal: ctrl.signal,
           resumeUploadId: item.uploadId,
-          onSession: (uploadId) => updateItem(item.uid, { uploadId }),
+          resumeParts: item.v5Parts,
+          resumeGeometry:
+            item.v5ChunkSize && item.v5TotalChunks
+              ? { chunkSize: item.v5ChunkSize, totalChunks: item.v5TotalChunks }
+              : undefined,
+          onSession: (s) =>
+            updateItem(item.uid, { uploadId: s.uploadId, v5ChunkSize: s.chunkSize, v5TotalChunks: s.totalChunks }),
+          onPartStored: (ref) => {
+            const known = getItem(item.uid)?.v5Parts ?? [];
+            updateItem(item.uid, { v5Parts: [...known, ref] });
+          },
           onProgress: (p) => {
             const elapsed = Math.max((Date.now() - t0) / 1000, 0.001);
             const speed = p.loaded / elapsed;
@@ -675,7 +689,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         v5AbortRefs.current.delete(item.uid);
       }
     },
-    [updateItem]
+    [updateItem, getItem]
   );
 
   // Local, instant video cover: seek to ~1s, grab a frame on a canvas — zero

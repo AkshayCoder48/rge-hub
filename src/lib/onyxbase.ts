@@ -1448,14 +1448,25 @@ export function backendWriteReady(): boolean {
 let readProbe = { at: 0, ok: false };
 const READ_PROBE_TTL_MS = 10000;
 
-/** Cheap cached read probe (whoami, 4s) — catches total backend wedges. */
+/** Cheap cached read probe — catches total backend wedges. V5 mode probes
+ *  the engine's own health endpoint (sub-second); the V4 whoami could take
+ *  3.5s+ and trip the 4s timeout, 503-ing perfectly healthy uploads. */
 export async function backendReadReady(): Promise<boolean> {
   const now = Date.now();
   if (now - readProbe.at < READ_PROBE_TTL_MS) return readProbe.ok;
   try {
+    if (V5_ENABLED) {
+      const res = await fetchWithTimeout(
+        `${ONYXBASE_V5_URL}/api/v5/health`,
+        { headers: { Authorization: `Bearer ${ONYXBASE_API_KEY}` } },
+        4000
+      );
+      readProbe = { at: now, ok: res.ok };
+      return res.ok;
+    }
     const res = await fetchWithTimeout(
       `${ONYXBASE_BASE_URL}/v1/whoami`,
-      { headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` } },
+      { headers: { Authorization: `Bearer ${ONYXBASE_API_KEY}` } },
       4000
     );
     readProbe = { at: now, ok: res.ok };

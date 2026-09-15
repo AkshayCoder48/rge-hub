@@ -42,11 +42,23 @@ export interface PermanentUploadOptions {
   signal?: AbortSignal;
   /** Resume a previous interrupted session instead of starting over. */
   resumeUploadId?: string;
+  /** Client-known part refs for the resumed session (collected via
+   *  onPartStored on the previous attempt) — the PRIMARY resume source.
+   *  Engine status is only a fallback: part records may not have converged
+   *  cross-instance yet, but the client's own refs are always exact. */
+  resumeParts?: Array<{ index: number; fileId: string; messageId?: number | null }>;
   /** Human phase changes — for honest status lines ("Verifying integrity…"). */
   onPhase?: (phase: 'hashing' | 'init' | 'resuming' | 'uploading' | 'finalizing') => void;
-  /** Fired as soon as the session id exists — persist it so a later retry
-   *  resumes instead of restarting, even when this attempt fails. */
-  onSession?: (uploadId: string) => void;
+  /** Fired as soon as the session exists — persist {uploadId, chunkSize,
+   *  totalChunks} so a later retry resumes instead of restarting, even when
+   *  this attempt fails. */
+  onSession?: (s: { uploadId: string; chunkSize: number; totalChunks: number }) => void;
+  /** Persisted session geometry (from the previous attempt's onSession) —
+   *  required for client-refs resume (resumeParts) to slice correctly. */
+  resumeGeometry?: { chunkSize: number; totalChunks: number };
+  /** Fired for every confirmed part — persist the refs so a retry resumes
+   *  even when engine convergence lags. */
+  onPartStored?: (ref: { index: number; fileId: string; messageId?: number | null }) => void;
 }
 
 export class PermanentUploadError extends Error {
@@ -178,11 +190,14 @@ interface PartRef {
   messageId?: number | null;
 }
 
-/** PUT one part via XHR — upload-progress-capable, cancellable. */
+/** PUT one part via XHR — upload-progress-capable, cancellable. The query
+ *  string carries the session geometry (from init) so ANY serverless instance
+ *  can validate the part statelessly — no cross-instance convergence wait. */
 function putPart(
   uploadId: string,
   index: number,
   blob: Blob,
+  session: { size: number; chunkSize: number; totalChunks: number; checksum: string | null; filename: string; mimeType: string },
   handlers: {
     onLoaded: (loaded: number) => void;
     signal?: AbortSignal;
@@ -238,7 +253,12 @@ function putPart(
       handlers.onLoaded(0);
       reject(new PermanentUploadError({ code: 'UPLOAD_NETWORK_ERROR', message: 'Network error during upload.' }));
     };
-    xhr.open('PUT', `/api/storage/uploads/${encodeURIComponent(uploadId)}/parts/${index}`);
+    const q =
+      `?size=${session.size}&cs=${session.chunkSize}&tc=${session.totalChunks}` +
+      (session.checksum ? `&sum=${encodeURIComponent(session.checksum)}` : '') +
+      `&fn=${encodeURIComponent(session.filename.slice(0, 120))}` +
+      `&mime=${encodeURIComponent(session.mimeType.slice(0, 60))}`;
+    xhr.open('PUT', `/api/storage/uploads/${encodeURIComponent(uploadId)}/parts/${index}${q}`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.send(blob);
   });
@@ -253,7 +273,7 @@ export async function uploadFilePermanent(
   file: File,
   opts: PermanentUploadOptions = {}
 ): Promise<PermanentUploadResult> {
-  const { onProgress, signal, resumeUploadId, onPhase, onSession } = opts;
+  const { onProgress, signal, resumeUploadId, resumeParts, onPhase, onSession, onPartStored } = opts;
   if (file.size <= 0) {
     throw new PermanentUploadError({ code: 'FILE_SIZE_ERROR', message: 'File is empty.' });
   }
@@ -281,7 +301,13 @@ export async function uploadFilePermanent(
   // finalize; refs are the cross-instance bridge.
   const partRefs = new Map<number, PartRef>();
 
-  const resumed = resumeUploadId ? await callStatus(resumeUploadId, signal) : null;
+  // Client-known refs win: exact, instant, and independent of engine
+  // convergence. Engine status fills in only when the client has none
+  // (e.g. the failure happened before any part landed).
+  const clientKnown = (resumeParts || []).filter(
+    (p) => p && typeof p.index === 'number' && typeof p.fileId === 'string' && p.fileId
+  );
+  const resumed = resumeUploadId && clientKnown.length === 0 ? await callStatus(resumeUploadId, signal) : null;
   if (resumed && resumed.status === 'ready' && resumed.publicUrl) {
     // The previous attempt already finalized — instant success, zero bytes.
     onProgress?.({ loaded: file.size, total: file.size, pct: 100 });
@@ -295,12 +321,38 @@ export async function uploadFilePermanent(
       uploadId: resumeUploadId!,
     };
   }
-  if (resumed && resumed.status !== 'ready' && resumed.totalChunks > 0 && (resumed.receivedChunks.length > 0 || resumed.missingChunks.length > 0)) {
+  const canResumeFromClient =
+    resumeUploadId !== undefined &&
+    clientKnown.length > 0 &&
+    opts.resumeGeometry !== undefined &&
+    opts.resumeGeometry.chunkSize > 0 &&
+    opts.resumeGeometry.totalChunks > 0;
+  if (canResumeFromClient) {
+    // Resume from the client's OWN refs — no engine roundtrip, no
+    // convergence dependency. Geometry comes from the persisted session
+    // (init's response on the previous attempt).
+    onPhase?.('resuming');
+    uploadId = resumeUploadId!;
+    chunkSize = opts.resumeGeometry!.chunkSize;
+    totalChunks = opts.resumeGeometry!.totalChunks;
+    for (const p of clientKnown) {
+      if (p.index >= 0 && p.index < totalChunks) {
+        partRefs.set(p.index, { index: p.index, fileId: p.fileId, messageId: p.messageId ?? null });
+        received.add(p.index);
+      }
+    }
+    const knownBytes = Math.min([...received].length * chunkSize, file.size);
+    onProgress?.({
+      loaded: knownBytes,
+      total: file.size,
+      pct: Math.round((knownBytes / file.size) * 100),
+    });
+  } else if (resumed && resumed.status !== 'ready' && resumed.totalChunks > 0 && (resumed.receivedChunks.length > 0 || resumed.missingChunks.length > 0)) {
     onPhase?.('resuming');
     uploadId = resumeUploadId!;
     chunkSize = resumed.chunkSize;
     totalChunks = resumed.totalChunks;
-    onSession?.(uploadId);
+    onSession?.({ uploadId, chunkSize, totalChunks });
     for (const i of resumed.receivedChunks) received.add(i);
     for (const p of resumed.parts) {
       if (typeof p.index === 'number' && p.fileId) partRefs.set(p.index, { index: p.index, fileId: p.fileId, messageId: p.messageId ?? null });
@@ -315,7 +367,7 @@ export async function uploadFilePermanent(
     uploadId = init.uploadId;
     chunkSize = init.chunkSize;
     totalChunks = init.totalChunks;
-    onSession?.(uploadId);
+    onSession?.({ uploadId, chunkSize, totalChunks });
   }
   checkCancelled(signal);
 
@@ -337,6 +389,15 @@ export async function uploadFilePermanent(
   };
   report();
 
+  const session = {
+    size: file.size,
+    chunkSize,
+    totalChunks,
+    checksum,
+    filename: file.name,
+    mimeType: file.type || 'application/octet-stream',
+  };
+
   const uploadPartWithRetry = async (index: number): Promise<void> => {
     const blob = file.slice(index * chunkSize, index * chunkSize + partSize(index));
     let lastErr: PermanentUploadError | null = null;
@@ -344,7 +405,7 @@ export async function uploadFilePermanent(
       checkCancelled(signal);
       try {
         inflight.set(index, 0);
-        const ref = await putPart(uploadId, index, blob, {
+        const ref = await putPart(uploadId, index, blob, session, {
           onLoaded: (loaded) => {
             inflight.set(index, loaded);
             report();
@@ -354,6 +415,7 @@ export async function uploadFilePermanent(
         inflight.delete(index);
         received.add(index);
         partRefs.set(index, ref);
+        onPartStored?.(ref);
         confirmedBytes += partSize(index);
         report();
         return;
@@ -412,6 +474,15 @@ export async function uploadFilePermanent(
       parts: Array.from(partRefs.entries())
         .sort((a, b) => a[0] - b[0])
         .map(([, ref]) => ({ index: ref.index, fileId: ref.fileId, messageId: ref.messageId ?? undefined })),
+      // Session geometry — stateless finalize on any engine instance.
+      context: {
+        size: file.size,
+        chunkSize,
+        totalChunks,
+        checksum,
+        filename: file.name,
+        mimeType: file.type || 'application/octet-stream',
+      },
     }),
     signal,
   });
