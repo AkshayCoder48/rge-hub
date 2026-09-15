@@ -16,6 +16,11 @@
  *      POST /api/v5/accounts/password → password_hash updated + fresh
  *      apiKey minted for the SAME account. The Hub owns the user-facing
  *      proof (the signed resetToken); the V5 route is the privileged write.
+ *   5. SELF-HEALING profile: the V5 account is the source of truth for
+ *      auth. If the hub profile row is missing (its write at registration
+ *      can fail honestly — register logs "profile pending, login heals
+ *      it"), it is REBUILT from the V5 account here. Reset never dead-ends
+ *      on "No account found" when the account provably exists.
  *      V4 fallback: honest error (the legacy API has no update path).
  */
 import { NextRequest } from 'next/server';
@@ -25,7 +30,7 @@ import {
   registerByEmailPassword,
   backendAcceptsWrites,
 } from '@/lib/onyxbase';
-import { getProfileByEmail, upsertProfile } from '@/lib/resources';
+import { getProfileByEmail, getProfileByUsername, upsertProfile, type Profile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 import { verifyResetToken } from '@/lib/otp';
 import { ok, fail, ERROR_CODES, newRequestId, logRequest } from '@/lib/api-contract';
@@ -33,6 +38,22 @@ import { allow, clientIpFrom } from '@/lib/rate-limit';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
+
+/** Derive a unique, valid username from the account name / email prefix. */
+async function deriveUsername(seed: string, userId: string): Promise<string> {
+  const base =
+    (seed || 'user')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '')
+      .slice(0, 14) || 'user';
+  for (let i = 0; i < 5; i++) {
+    const candidate = i === 0 ? base : `${base}${Math.floor(Math.random() * 9000 + 1000)}`;
+    if (!/^[a-z0-9_]{3,20}$/.test(candidate)) continue;
+    const taken = await getProfileByUsername(candidate);
+    if (!taken || taken.userId === userId) return candidate;
+  }
+  return `user_${userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toLowerCase()}`;
+}
 
 export async function POST(request: NextRequest) {
   const requestId = newRequestId();
@@ -79,21 +100,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Find the existing profile by email.
-    const existingProfile = await getProfileByEmail(normalizedEmail);
-    if (!existingProfile) {
-      // Don't reveal whether the email exists — generic message.
-      meta.durationMs = Date.now() - t0;
-      return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
-        status: 400,
-      });
-    }
-
-    // ─── Password update ────────────────────────────────────────────────────
-    // V5 (production): master-authed REAL update on the same account —
-    // never the old "re-register" hack that collided with EMAIL_TAKEN.
+    // ─── 1. Password update (V5 first — the authoritative account) ────────
     let accountUserId: string | undefined;
     let accountApiKey: string | undefined;
+    let accountName: string | undefined;
+    let profileWasMissing = false;
 
     if (ONYXBASE_V5_ENABLED) {
       const upd = await v5UpdateAccountPassword(normalizedEmail, password);
@@ -101,10 +112,10 @@ export async function POST(request: NextRequest) {
       if (upd.ok && upd.userId && upd.apiKey) {
         accountUserId = upd.userId;
         accountApiKey = upd.apiKey;
+        accountName = upd.name;
       } else if (upd.code === 'ACCOUNT_NOT_FOUND' || upd.code === 'NOT_FOUND') {
-        return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
-          status: 400,
-        });
+        // No V5 account — maybe a V4-era one with a hub profile (below).
+        accountUserId = undefined;
       } else if (upd.code === 'RATE_LIMITED') {
         return fail(ERROR_CODES.RATE_LIMITED, upd.error || 'Too many attempts — please wait a moment.', meta, {
           status: 429,
@@ -116,10 +127,47 @@ export async function POST(request: NextRequest) {
           retryable: true,
         });
       }
-    } else {
-      // V4 legacy: the old API has NO password-update path — its register
-      // endpoint refuses existing emails (the original bug). Be honest
-      // instead of replaying the "already exists" dead end.
+    }
+
+    // ─── 2. Locate the hub profile (get-or-BUILD from the V5 account) ────
+    let existingProfile = await getProfileByEmail(normalizedEmail);
+
+    if (!existingProfile && accountUserId) {
+      // The V5 account PROVABLY exists (we just rotated its password) —
+      // rebuild the missing hub profile row instead of dead-ending. This
+      // heals the register path's honest "profile pending" outcome.
+      profileWasMissing = true;
+      const username = await deriveUsername(accountName || normalizedEmail.split('@')[0], accountUserId);
+      const now = new Date().toISOString();
+      const rebuilt: Profile = {
+        userId: accountUserId,
+        username,
+        displayName: accountName || username,
+        avatar: '',
+        bio: '',
+        email: normalizedEmail,
+        apiKey: accountApiKey!,
+        createdAt: now,
+        updatedAt: now,
+      } as Profile;
+      const saved = await upsertProfile(rebuilt);
+      if (!saved) {
+        // The account's password IS updated — say so honestly and let the
+        // next login heal the profile; never claim the reset failed.
+        console.warn('[reset-password] profile rebuild pending for', accountUserId);
+      }
+      existingProfile = rebuilt;
+    }
+
+    // ─── 3. V4 legacy path (no V5 account + no V5 mode) ───────────────────
+    if (!accountUserId) {
+      if (!existingProfile) {
+        // Don't reveal whether the email exists — generic message.
+        meta.durationMs = Date.now() - t0;
+        return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
+          status: 400,
+        });
+      }
       if (!(await backendAcceptsWrites())) {
         meta.durationMs = Date.now() - t0;
         return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The auth service is briefly unavailable — please retry.', meta, {
@@ -134,7 +182,6 @@ export async function POST(request: NextRequest) {
       );
       meta.durationMs = Date.now() - t0;
       if (regResult.ok && regResult.apiKey && regResult.userId) {
-        // Only possible for an email that did NOT exist — treat as created.
         accountUserId = regResult.userId;
         accountApiKey = regResult.apiKey;
       } else {
@@ -150,8 +197,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Keep the profile's apiKey in sync with the freshly minted key.
-    if (existingProfile.userId !== accountUserId) {
+    // ─── 4. Sync the profile's apiKey + session ───────────────────────────
+    if (!existingProfile || !accountApiKey) {
+      // Unreachable in practice (all paths above either return or set both)
+      // — a defensive honest failure instead of a crash.
+      meta.durationMs = Date.now() - t0;
+      return fail(ERROR_CODES.INTERNAL_ERROR, 'Password reset failed. Please try again.', meta, { status: 500 });
+    }
+    if (existingProfile.userId !== accountUserId && !profileWasMissing) {
       console.warn(
         '[reset-password] account id drift:',
         existingProfile.userId,
@@ -160,14 +213,13 @@ export async function POST(request: NextRequest) {
         '(keeping profile row)'
       );
     }
-    const updatedProfile = {
+    const updatedProfile: Profile = {
       ...existingProfile,
-      apiKey: accountApiKey!,
+      apiKey: accountApiKey,
       updatedAt: new Date().toISOString(),
     };
     await upsertProfile(updatedProfile);
 
-    // Create a new session.
     const isAdmin = isAdminUser({
       username: updatedProfile.username,
       displayName: updatedProfile.displayName,

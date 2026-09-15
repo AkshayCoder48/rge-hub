@@ -193,6 +193,18 @@ export async function isEmailRegistered(email: string): Promise<boolean> {
  */
 export async function getProfileByEmail(email: string): Promise<Profile | null> {
   const normalized = email.toLowerCase().trim();
+  // FAST PATH: the `email:` index maintained by upsertProfile — a POINT-READ,
+  // which converges cross-instance via the engine's miss-probe (a LIST scan
+  // can be served by a stale instance and miss a just-written profile — the
+  // password-reset "No account found" flake).
+  try {
+    const userId = await kvGet<string>(`email:${normalized}`, ONYXBASE_COLLECTIONS.PROFILES);
+    if (userId && typeof userId === 'string') {
+      const p = await getProfile(userId);
+      if (p && p.email && p.email.toLowerCase() === normalized) return p;
+    }
+  } catch {}
+  // Fallback: full collection scan (legacy records without an index entry).
   const all = await kvExport<Record<string, Profile>>(ONYXBASE_COLLECTIONS.PROFILES);
   for (const key of Object.keys(all)) {
     const p = all[key];
