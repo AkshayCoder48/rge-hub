@@ -1168,8 +1168,25 @@ export async function getFileMeta(fileId: string): Promise<OnyxFileMeta | null> 
 
 /**
  * Delete a file.
+ * V5: DELETE /api/v5/blobs/:id — a REAL permanent delete (Telegram part
+ * documents + manifests + part records + dedup keys + row tombstone, shipped
+ * on the fast blobs channel so every instance 404s it within seconds).
+ * 404 (already gone) counts as success — deletes are idempotent.
  */
 export async function deleteFile(fileId: string): Promise<boolean> {
+  if (V5_ENABLED) {
+    const r = await v5Request(
+      `/api/v5/blobs/${encodeURIComponent(fileId)}`,
+      { method: 'DELETE' },
+      { retries: 1, timeoutMs: 30_000 } // doc deletes can fan out over many parts
+    );
+    const ok = r.status === 200 || r.status === 404;
+    if (!ok) {
+      console.warn(`[OnyxBaseV5] deleteFile HTTP ${r.status} for blob:`, fileId, r.netError || '');
+    }
+    recordWrite(ok);
+    return ok;
+  }
   try {
     const res = await fetchWithTimeout(
       `${ONYXBASE_BASE_URL}/v1/files/${fileId}`,

@@ -105,6 +105,8 @@ interface QueueItem {
   thumbnailPreview?: string;
   thumbnailFileId?: string;
   thumbnailUrl?: string;
+  /** Video duration in seconds (captured during cover generation). */
+  durationSec?: number;
 }
 
 interface UploadModalProps {
@@ -695,7 +697,8 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
   // Local, instant video cover: seek to ~1s, grab a frame on a canvas — zero
   // uploads, never blocks or fails the main upload (PRD: non-blocking
   // thumbnail generation). Users can still pick their own cover afterwards.
-  const generateVideoCover = useCallback(async (file: File): Promise<File | null> => {
+  // Also captures the video's duration (free — metadata is already loaded).
+  const generateVideoCover = useCallback(async (file: File): Promise<{ cover: File | null; duration: number | null }> => {
     try {
       const url = URL.createObjectURL(file);
       const video = document.createElement('video');
@@ -713,30 +716,42 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         };
         video.src = url;
       });
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('timeout')), 6000);
-        video.onseeked = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        video.onerror = () => {
-          clearTimeout(timer);
-          reject(new Error('seek failed'));
-        };
-        video.currentTime = Math.min(1, Math.max(0.1, (meta.duration || 2) / 2));
-      });
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 360;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('no canvas');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 0.82));
-      URL.revokeObjectURL(url);
-      if (!blob || blob.size === 0) return null;
-      return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}-cover.jpg`, { type: 'image/jpeg' });
+      const duration = meta.duration > 0 ? meta.duration : null;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('timeout')), 6000);
+          video.onseeked = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          video.onerror = () => {
+            clearTimeout(timer);
+            reject(new Error('seek failed'));
+          };
+          video.currentTime = Math.min(1, Math.max(0.1, (meta.duration || 2) / 2));
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 360;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('no canvas');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 0.82));
+        if (blob && blob.size > 0) {
+          return {
+            cover: new File([blob], `${file.name.replace(/\.[^.]+$/, '')}-cover.jpg`, { type: 'image/jpeg' }),
+            duration,
+          };
+        }
+        return { cover: null, duration };
+      } catch {
+        // Frame grab failed — the DURATION still counts (metadata loaded).
+        return { cover: null, duration };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     } catch {
-      return null;
+      return { cover: null, duration: null };
     }
   }, []);
 
@@ -903,6 +918,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           fileName: transfer.fileName,
           mimeType: transfer.mimeType,
           size: transfer.size,
+          duration: item.durationSec,
           storageUrl: transfer.storageUrl,
           mirrorUrl: transfer.mirrorUrl,
           mirrorHost: transfer.mirrorHost,
@@ -1033,11 +1049,13 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
       }
 
       try {
-        // ---- Phase 0: cover thumbnail (optional; skipped on registration-only retry) ----
-        // BEST-EFFORT: a cover must never kill the upload — continue
-        // without one if the thumbnail leg fails.
-        // Clips without a user-picked cover get an INSTANT local frame grab
-        // (canvas, zero uploads, non-blocking) so videos ship with a preview.
+        // ---- Phase 0 (PARALLEL): cover thumbnail pipeline ----
+        // BEST-EFFORT: a cover must never kill the upload — continue without
+        // one if the thumbnail leg fails. The cover generation (local canvas)
+        // + thumbnail upload run CONCURRENTLY with the file transfer — the
+        // thumbnail no longer delays the video by 2-6s of sequential uploads.
+        // The promise is awaited right before registration (Phase 2), so the
+        // total is max(transfer, thumbnail) instead of transfer + thumbnail.
         const thumbCheck = getItem(uid)!;
         if (
           !opts.skipTransfer &&
@@ -1046,25 +1064,29 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           !thumbCheck.thumbnailFileId &&
           !thumbCheck.thumbnailPreview
         ) {
-          const cover = await generateVideoCover(thumbCheck.file);
+          const { cover, duration } = await generateVideoCover(thumbCheck.file);
           if (stopRef.current) return;
-          if (cover) {
-            updateItem(uid, { thumbnailFile: cover, thumbnailPreview: URL.createObjectURL(cover) });
-          }
+          updateItem(uid, {
+            ...(cover ? { thumbnailFile: cover, thumbnailPreview: URL.createObjectURL(cover) } : {}),
+            ...(duration !== null ? { durationSec: duration } : {}),
+          });
         }
         const thumbReady = getItem(uid)!;
+        let thumbPromise: Promise<void> | null = null;
         if (!opts.skipTransfer && thumbReady.thumbnailFile && !thumbReady.thumbnailFileId) {
-          try {
-            const t = await uploadThumbnail(thumbReady);
-            if (stopRef.current) return;
-            updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
-          } catch (e) {
-            if (stopRef.current) return;
-            console.warn('[upload] cover thumbnail failed (non-fatal, continuing):', e);
-          }
+          thumbPromise = (async () => {
+            try {
+              const t = await uploadThumbnail(thumbReady);
+              if (stopRef.current) return;
+              updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
+            } catch (e) {
+              if (stopRef.current) return;
+              console.warn('[upload] cover thumbnail failed (non-fatal, continuing):', e);
+            }
+          })();
         }
 
-        // ---- Phase 1: transfer (skipped on registration-only retry) ----
+        // ---- Phase 1: transfer (runs CONCURRENTLY with the thumbnail; skipped on registration-only retry) ----
         let transfer: { fileId: string; fileUrl: string; fileName: string; mimeType: string; size: number };
         let timings = item.timings;
         const current = getItem(uid)!;
@@ -1104,6 +1126,16 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           timings = t.timings;
           if (stopRef.current) return;
           updateItem(uid, { fileId: t.fileId, fileUrl: t.fileUrl, timings: t.timings, status: 'uploaded' });
+        }
+
+        // ---- Phase 1.5: the thumbnail pipeline (parallel since Phase 0) must
+        // settle before registration so the record carries the real permanent
+        // thumbnail URL when it landed. Non-fatal by construction — failures
+        // were already swallowed above and the item simply registers without
+        // a cover (never delays the video beyond its own small transfer).
+        if (thumbPromise) {
+          await thumbPromise;
+          if (stopRef.current) return;
         }
 
         // ---- Phase 2: registration ----
@@ -1343,6 +1375,10 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
 
   const readyCount = items.filter((it) => it.status === 'ready').length;
   const failedCount = items.filter((it) => it.status === 'failed').length;
+  // Items whose write was accepted but is still being confirmed server-side
+  // (V4 eventual-consistency path / rare V5 202). Counted HONESTLY — never
+  // hidden from the footer (that was the "successful but 0 uploaded" bug).
+  const verifyingCount = items.filter((it) => it.status === 'verifying').length;
   const pendingCount = items.filter((it) => it.status === 'queued' || it.status === 'cancelled').length;
   // A 'verifying' item only counts as active while the queue is running —
   // once the queue ends it is a resting state owned by the server (the
@@ -1890,7 +1926,9 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
                   <AlertTriangle className="w-4 h-4 text-[#ef233c] shrink-0" />
                 )}
                 <p className="font-inter text-xs text-zinc-300">
-                  {readyCount} uploaded{failedCount ? ` · ${failedCount} failed` : ''}
+                  {readyCount} uploaded
+                  {verifyingCount ? ` · ${verifyingCount} still saving` : ''}
+                  {failedCount ? ` · ${failedCount} failed` : ''}
                   {readyCount > 0 && (published ? ' · published' : ' · saved as draft')}
                 </p>
               </div>

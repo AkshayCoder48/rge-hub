@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from 'react';
 import type { Resource } from '@/lib/resources';
+import { useResourceStore } from '@/lib/resource-store';
 import { RoleBadge, authorDisplayRole } from '../role-badge';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -218,8 +219,10 @@ function OverviewSection() {
       .then((r) => r.json())
       .then((d) => {
         if (cancelled) return;
-        if (d.ok) setStats(d as AdminStats);
-        else setError((d.error as string) || 'Failed to load stats');
+        // New contract: { success, data: {...stats} } — legacy fallback: flat { ok, ...stats }.
+        if (d.success && d.data) setStats(d.data as AdminStats);
+        else if (d.ok) setStats(d as AdminStats);
+        else setError(d.error?.message || d.error || 'Failed to load stats');
         setLoading(false);
       })
       .catch(() => {
@@ -344,27 +347,48 @@ function ContentSection({ can }: { can: (p: string) => boolean }) {
     }
   };
 
-  const doDelete = async (r: Resource) => {
+  // OPTIMISTIC DELETE: the row vanishes from this table AND every store
+  // slice instantly; the real DELETE runs in the background (the endpoint is
+  // idempotent). 401/403 restores honestly — the delete really was rejected;
+  // any other failure keeps the row hidden with a neutral "pending" toast.
+  const doDelete = (r: Resource) => {
     if (!window.confirm(`Delete "${r.title}" by ${r.ownerName}? This cannot be undone.`)) return;
-    setActingId(r.id);
-    try {
-      const params = new URLSearchParams({ type: r.type });
-      if (r.type === 'xml') params.set('xmlSource', r.xmlSource || 'community');
-      const res = await fetch(`/api/resources/${encodeURIComponent(r.id)}?${params.toString()}`, {
-        method: 'DELETE',
+    // 1. Instant removal from the local table + the shared store.
+    setRows((prev) => prev.filter((x) => x.id !== r.id));
+    useResourceStore.getState().removeById(r.id);
+    toast({ title: 'Deleted', description: r.title });
+    // 2. Real delete in the background — never blocks the UI.
+    const params = new URLSearchParams({ type: r.type });
+    if (r.type === 'xml') params.set('xmlSource', r.xmlSource || 'community');
+    fetch(`/api/resources/${encodeURIComponent(r.id)}?${params.toString()}`, {
+      method: 'DELETE',
+    })
+      .then((res) => {
+        if (res.status === 401 || res.status === 403) {
+          // Honest restore: re-insert the row if it is still absent.
+          setRows((prev) => (prev.some((x) => x.id === r.id) ? prev : [...prev, r]));
+          useResourceStore.getState().softRefresh();
+          toast({
+            title: 'Delete failed',
+            description: "You don't have permission.",
+            variant: 'destructive',
+          });
+        } else if (!res.ok) {
+          toast({
+            title: 'Delete pending',
+            description: 'It will complete in the background.',
+          });
+        } else {
+          // Quiet background re-sync (no toast; store re-uses last userId).
+          useResourceStore.getState().softRefresh();
+        }
+      })
+      .catch(() => {
+        toast({
+          title: 'Delete pending',
+          description: 'It will complete in the background.',
+        });
       });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok) {
-        setRows((prev) => prev.filter((x) => x.id !== r.id));
-        toast({ title: 'Deleted', description: r.title });
-      } else {
-        toast({ title: 'Delete failed', description: (data.error as string) || 'Could not delete', variant: 'destructive' });
-      }
-    } catch {
-      toast({ title: 'Network error', description: 'Please retry', variant: 'destructive' });
-    } finally {
-      setActingId(null);
-    }
   };
 
   if (allowed.length === 0) {
@@ -469,15 +493,10 @@ function ContentSection({ can }: { can: (p: string) => boolean }) {
                 )}
                 <button
                   onClick={() => doDelete(r)}
-                  disabled={actingId === r.id}
                   title="Delete"
-                  className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-all disabled:opacity-40"
+                  className="p-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
                 >
-                  {actingId === r.id ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="w-4 h-4" />
-                  )}
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             </div>

@@ -36,6 +36,34 @@ export const RESOURCE_TYPE_LABEL: Record<ResourceType, string> = {
   clip: 'Clip',
   xml: 'File',
 };
+
+/**
+ * Real file extension for display + preview routing (PRD §14–16):
+ *   1. explicit fileName extension (authoritative — the user's real file)
+ *   2. mimeType subtype (image/png → png, video/mp4 → mp4, text/xml → xml)
+ *   3. downloadUrl extension
+ *   4. type fallback (image/clip/file)
+ * Lower-cased, no dot. NEVER the internal type id — that was the "every
+ * file says XML" bug (type 'xml' is the generic-file bucket id).
+ */
+export function resourceExtension(r: Pick<Resource, 'type' | 'fileName' | 'mimeType' | 'downloadUrl'>): string {
+  const fromName = r.fileName?.includes('.') ? r.fileName.split('.').pop()!.trim() : '';
+  if (fromName && /^[A-Za-z0-9]{1,8}$/.test(fromName)) return fromName.toLowerCase();
+  const mime = (r.mimeType || '').toLowerCase();
+  if (mime.includes('/')) {
+    const sub = mime.split('/').pop()!.split('+')[0].trim();
+    if (sub && /^[a-z0-9]{1,8}$/.test(sub)) {
+      if (sub === 'jpeg') return 'jpg';
+      if (sub === 'mpeg' && mime.startsWith('video/')) return 'mpg';
+      if (sub === 'quicktime') return 'mov';
+      if (sub === 'plain' && mime.startsWith('text/')) return 'txt';
+      if (/^(png|gif|webp|avif|bmp|svg|jpg|mp4|webm|mkv|mov|avi|mp3|wav|ogg|pdf|zip|rar|7z|tar|gz|xml|json|csv|txt|apk|iso)$/.test(sub)) return sub;
+    }
+  }
+  const fromUrl = /\.([A-Za-z0-9]{1,8})(?:$|[?#])/.exec(r.downloadUrl || '')?.[1] ?? '';
+  if (fromUrl) return fromUrl.toLowerCase();
+  return r.type === 'image' ? 'image' : r.type === 'clip' ? 'clip' : 'file';
+}
 export type XmlSource = 'community' | 'admin';
 
 export type ResourceStatus = 'ready' | 'processing' | 'pending';
@@ -287,6 +315,16 @@ export async function createResource(resource: Resource): Promise<boolean> {
  * Two-phase persistent create (PRD §9, §14, §49):
  * write the record, then verify it is readable before reporting success.
  * Only { ok: true, verified: true } may be surfaced as "Upload complete".
+ *
+ * V5 FAST PATH: the V5 data layer is AUTHORITATIVE SQLite — a committed kvSet
+ * (HTTP 200) IS the durable write. The old read-back was a V4-era replica
+ * check; against V5 it routed to a DIFFERENT serverless engine instance that
+ * had not yet converged (full snapshots ride a 15-30s cadence), so a freshly
+ * written record 404'd on read-back → verified:false → HTTP 202 → the client
+ * polled an operation for 20-40s → "Processing" after 100% and "0 uploaded".
+ * With V5: 200 = verified. The read-back only runs in V4 mode.
+ * (Cross-instance listing convergence is now handled by the engine's KV
+ * delta channel, which lands within ~1-2s of the write.)
  */
 export async function createResourceVerified(
   resource: Resource,
@@ -313,7 +351,13 @@ export async function createResourceVerified(
     // Spread write (copies across replicas) + quorum read-back (any replica).
     wrote = await kvSetSpread(resource.id, resource, collection, 3);
     if (wrote) {
-      // Single-round read-back: first-hit-wins usually answers <1s; the
+      if (ONYXBASE_V5_ENABLED) {
+        // V5: the commit response IS the proof — an authoritative SQLite
+        // batch committed on the engine. No read-back (it would hit an
+        // unconverged instance and wrongly downgrade to the 202 path).
+        return { ok: true, verified: true, attempts, ms: Date.now() - t0 };
+      }
+      // V4: single-round read-back — first-hit-wins usually answers <1s; the
       // 6-read double round was for the backend's spray era (long gone).
       const back = await kvGetQuorum<Resource>(resource.id, collection, 3);
       if (back && back.id === resource.id) {

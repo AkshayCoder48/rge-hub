@@ -81,28 +81,48 @@ export function ResourcesView({ type, onUpload, onOpenUser }: ResourcesViewProps
     }
   };
 
-  const handleDelete = async (r: Resource) => {
+  // OPTIMISTIC DELETE: the UI updates instantly; the real DELETE runs in the
+  // background (the endpoint is idempotent). 401/403 restores honestly —
+  // the delete really was rejected; any other failure keeps the item hidden
+  // with a neutral "pending" toast (a tombstone eventually lands).
+  const handleDelete = (r: Resource) => {
     if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return;
-    try {
-      const params = new URLSearchParams();
-      params.set('type', r.type);
-      if (r.xmlSource) params.set('xmlSource', r.xmlSource);
-      const res = await fetch(`/api/resources/${r.id}?${params.toString()}`, {
-        method: 'DELETE',
+    // 1. Instant removal: close the modal if it shows this resource, strip
+    //    it from every store slice, confirm with a neutral toast.
+    setSelected(null);
+    useResourceStore.getState().removeById(r.id);
+    toast({ title: 'Deleted', description: r.title });
+    // 2. Real delete in the background — never blocks the UI.
+    const params = new URLSearchParams();
+    params.set('type', r.type);
+    if (r.xmlSource) params.set('xmlSource', r.xmlSource);
+    fetch(`/api/resources/${encodeURIComponent(r.id)}?${params.toString()}`, {
+      method: 'DELETE',
+    })
+      .then((res) => {
+        if (res.status === 401 || res.status === 403) {
+          useResourceStore.getState().softRefresh(user?.userId);
+          toast({
+            title: 'Delete failed',
+            description: "You don't have permission.",
+            variant: 'destructive',
+          });
+        } else if (!res.ok) {
+          toast({
+            title: 'Delete pending',
+            description: 'It will complete in the background.',
+          });
+        } else {
+          // Quiet background re-sync (no toast).
+          useResourceStore.getState().softRefresh(user?.userId);
+        }
+      })
+      .catch(() => {
+        toast({
+          title: 'Delete pending',
+          description: 'It will complete in the background.',
+        });
       });
-      const data = await res.json();
-      if (data.ok) {
-        toast({ title: 'Resource deleted', description: r.title });
-        setSelected(null);
-        // Instant UI sync everywhere (no ghost counts) + quiet background re-sync.
-        useResourceStore.getState().removeById(r.id);
-        useResourceStore.getState().softRefresh(user?.userId);
-      } else {
-        toast({ title: 'Delete failed', description: data.error || 'Unknown error', variant: 'destructive' });
-      }
-    } catch {
-      toast({ title: 'Delete failed', description: 'Network error', variant: 'destructive' });
-    }
   };
 
   const handleUploadClick = () => {

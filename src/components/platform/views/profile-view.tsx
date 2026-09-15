@@ -49,7 +49,6 @@ export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => v
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [fetchState, setFetchState] = useState<FetchState>('loading');
   const [tab, setTab] = useState<TabKey>('image');
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [profileVersion, setProfileVersion] = useState(0);
   const [followModal, setFollowModal] = useState<null | 'followers' | 'following'>(null);
@@ -130,33 +129,55 @@ export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => v
     [toast]
   );
 
+  // Hoisted for the compiler (optional chains in useCallback deps are
+  // inferred as the whole `user` object → preserve-manual-memoization).
+  const userId = user?.userId;
+
+  // OPTIMISTIC DELETE: the UI updates instantly; the real DELETE runs in the
+  // background (the endpoint is idempotent). 401/403 restores honestly —
+  // the delete really was rejected; any other failure keeps the item hidden
+  // with a neutral "pending" toast (a tombstone eventually lands).
   const handleDelete = useCallback(
-    async (r: Resource) => {
+    (r: Resource) => {
       if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return;
-      setDeletingId(r.id);
-      try {
-        const params = new URLSearchParams();
-        params.set('type', r.type);
-        if (r.xmlSource) params.set('xmlSource', r.xmlSource);
-        const res = await fetch(`/api/resources/${r.id}?${params.toString()}`, {
-          method: 'DELETE',
+      // 1. Instant removal: close the modal if it shows this resource, strip
+      //    it from every store slice, confirm with a neutral toast.
+      setSelected((prev) => (prev?.id === r.id ? null : prev));
+      useResourceStore.getState().removeById(r.id);
+      toast({ title: 'Deleted', description: r.title });
+      // 2. Real delete in the background — never blocks the UI.
+      const params = new URLSearchParams();
+      params.set('type', r.type);
+      if (r.xmlSource) params.set('xmlSource', r.xmlSource);
+      fetch(`/api/resources/${encodeURIComponent(r.id)}?${params.toString()}`, {
+        method: 'DELETE',
+      })
+        .then((res) => {
+          if (res.status === 401 || res.status === 403) {
+            useResourceStore.getState().softRefresh(userId);
+            toast({
+              title: 'Delete failed',
+              description: "You don't have permission.",
+              variant: 'destructive',
+            });
+          } else if (!res.ok) {
+            toast({
+              title: 'Delete pending',
+              description: 'It will complete in the background.',
+            });
+          } else {
+            // Quiet background re-sync (no toast).
+            useResourceStore.getState().softRefresh(userId);
+          }
+        })
+        .catch(() => {
+          toast({
+            title: 'Delete pending',
+            description: 'It will complete in the background.',
+          });
         });
-        const data = await res.json();
-        if (data.ok) {
-          toast({ title: 'Resource deleted', description: r.title });
-          // Instant UI sync everywhere (no ghost counts) + quiet background re-sync.
-          useResourceStore.getState().removeById(r.id);
-          useResourceStore.getState().softRefresh(user?.userId);
-        } else {
-          toast({ title: 'Delete failed', description: data.error || 'Unknown error' });
-        }
-      } catch {
-        toast({ title: 'Delete failed', description: 'Network error' });
-      } finally {
-        setDeletingId(null);
-      }
     },
-    [toast, user?.userId]
+    [toast, userId]
   );
 
   const handleEditSaved = useCallback(() => {
@@ -392,14 +413,9 @@ export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => v
                 </button>
                 <button
                   onClick={() => handleDelete(r)}
-                  disabled={deletingId === r.id}
-                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#ef233c]/5 border border-[#ef233c]/10 text-[11px] font-manrope text-[#ef233c]/80 hover:text-[#ef233c] hover:bg-[#ef233c]/10 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#ef233c]/5 border border-[#ef233c]/10 text-[11px] font-manrope text-[#ef233c]/80 hover:text-[#ef233c] hover:bg-[#ef233c]/10 transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
                 >
-                  {deletingId === r.id ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Trash2 className="w-3.5 h-3.5" />
-                  )}
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>

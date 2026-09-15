@@ -2,7 +2,7 @@
 
 import React from 'react';
 import type { Resource } from '@/lib/resources';
-import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
+import { resourceExtension } from '@/lib/resources';
 import { FileCode, Film, Image as ImageIcon, Download, Eye, Link2 } from 'lucide-react';
 import { RoleBadge, authorDisplayRole } from './role-badge';
 
@@ -17,6 +17,11 @@ interface ResourceCardProps {
 export function ResourceCard({ resource, onClick, onDownload, showOwner = true, onOwnerClick }: ResourceCardProps) {
   const typeIcon = resource.type === 'image' ? ImageIcon : resource.type === 'clip' ? Film : FileCode;
   const TypeIcon = typeIcon;
+  // REAL file extension for the badge ('PNG', 'MP4', 'ZIP', 'XML'…). The
+  // fallbacks are the bucket labels ('IMAGE'/'CLIP'/'FILE') — never the
+  // internal type id (type 'xml' is the generic-file bucket, which is why
+  // every file used to show "XML").
+  const ext = resourceExtension(resource).toUpperCase();
   // Red Noir: all type icons use the same red accent
   const typeColor = 'text-[#ef233c]';
 
@@ -65,10 +70,10 @@ export function ResourceCard({ resource, onClick, onDownload, showOwner = true, 
           </div>
         )}
 
-        {/* Type badge */}
+        {/* Type badge — the real extension (only true .xml files show XML) */}
         <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
           <TypeIcon className={`w-3 h-3 ${typeColor}`} />
-          <span className="text-[9px] font-manrope uppercase tracking-wider text-zinc-300">{RESOURCE_TYPE_LABEL[resource.type] ?? resource.type}</span>
+          <span className="text-[9px] font-manrope uppercase tracking-wider text-zinc-300">{ext}</span>
         </div>
 
         {/* Role badge ([Admin] / [Moderator]) */}

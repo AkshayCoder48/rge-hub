@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import type { Resource, Profile } from '@/lib/resources';
-import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
+import { RESOURCE_TYPE_LABEL, resourceExtension } from '@/lib/resources';
 import { X, Download, Share2, ExternalLink, Calendar, Tag, Film, FileCode, Image as ImageIcon } from 'lucide-react';
 import { RoleBadge, authorDisplayRole } from './role-badge';
 import { XmlViewer } from './xml-viewer';
@@ -68,6 +68,12 @@ export function ResourceDetailModal({
   const typeColor = 'text-[#ef233c]';
   const TypeIcon = typeIcon;
 
+  // REAL file extension — drives the header badge, the Type card and the
+  // preview routing below. NEVER resource.type: the internal id 'xml' is
+  // the generic-file bucket, which is why every file used to say "XML".
+  const ext = resourceExtension(resource);
+  const isRealExt = ext !== 'image' && ext !== 'clip' && ext !== 'file';
+
   // Use the dynamically resolved owner profile, fall back to resource's stored ownerName
   const displayName = ownerProfile?.displayName || resource.ownerName;
   const avatar = ownerProfile?.avatar;
@@ -131,7 +137,8 @@ export function ResourceDetailModal({
             <div>
               <h2 className="font-manrope font-semibold text-lg text-white truncate max-w-[300px]">{resource.title}</h2>
               <p className="text-[10px] font-manrope uppercase tracking-wider text-zinc-500">
-                {RESOURCE_TYPE_LABEL[resource.type] ?? resource.type} · {formatDate(resource.createdAt)}
+                {RESOURCE_TYPE_LABEL[resource.type] ?? resource.type}
+                {isRealExt ? ` · ${ext.toUpperCase()}` : ''} · {formatDate(resource.createdAt)}
               </p>
             </div>
           </div>
@@ -158,16 +165,53 @@ export function ResourceDetailModal({
                 className="max-w-full max-h-[50vh] rounded-xl"
               />
             ) : resource.type === 'xml' ? (
-              resource.downloadUrl ? (
-                <XmlViewer
-                  url={resource.downloadUrl}
-                  fileName={resource.fileName || `${resource.title}.xml`}
-                  fileSize={resource.size}
-                />
+              // Preview routing by REAL extension: only code files (xml/svg)
+              // go through the code viewer, PDFs embed, everything else
+              // (zip/apk/…) gets an honest no-preview panel.
+              ext === 'xml' || ext === 'svg' ? (
+                resource.downloadUrl ? (
+                  <XmlViewer
+                    url={resource.downloadUrl}
+                    fileName={resource.fileName || `${resource.title}.${ext}`}
+                    fileSize={resource.size}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-3 py-12">
+                    <FileCode className="w-16 h-16 text-[#ef233c]/30" />
+                    <p className="font-inter text-sm text-zinc-500">File — download to view</p>
+                  </div>
+                )
+              ) : ext === 'pdf' ? (
+                resource.downloadUrl ? (
+                  <object
+                    data={resource.downloadUrl}
+                    type="application/pdf"
+                    className="w-full rounded-xl bg-white/5"
+                    style={{ minHeight: '400px', maxHeight: '50vh' }}
+                  >
+                    {/* Graceful fallback when the browser can't embed the PDF */}
+                    <div className="flex flex-col items-center gap-3 py-12">
+                      <FileCode className="w-16 h-16 text-[#ef233c]/30" />
+                      <p className="font-inter text-sm text-zinc-500">Couldn't embed this PDF — download to open it.</p>
+                    </div>
+                  </object>
+                ) : (
+                  <div className="flex flex-col items-center gap-3 py-12">
+                    <FileCode className="w-16 h-16 text-[#ef233c]/30" />
+                    <p className="font-inter text-sm text-zinc-500">File — download to view</p>
+                  </div>
+                )
               ) : (
                 <div className="flex flex-col items-center gap-3 py-12">
-                  <FileCode className="w-16 h-16 text-[#ef233c]/30" />
-                  <p className="font-inter text-sm text-zinc-500">File — download to view</p>
+                  <TypeIcon className={`w-16 h-16 ${typeColor} opacity-30`} />
+                  <p className="font-inter text-sm text-zinc-500">No in-app preview — download to open it</p>
+                  <button
+                    onClick={handleDownloadClick}
+                    className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#ef233c]/10 border border-[#ef233c]/20 text-[#ef233c] text-xs font-manrope font-medium hover:bg-[#ef233c]/20 transition-all"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    {isRealExt ? `Download ${ext.toUpperCase()}` : 'Download'}
+                  </button>
                 </div>
               )
             ) : (
@@ -240,7 +284,7 @@ export function ResourceDetailModal({
                 <p className="text-[10px] font-manrope uppercase tracking-[0.2em] text-zinc-500 mb-1">Type</p>
                 <div className="flex items-center gap-1.5 text-xs font-inter text-zinc-300">
                   <TypeIcon className={`w-3 h-3 ${typeColor}`} />
-                  {resource.type.toUpperCase()}
+                  {ext.toUpperCase()}
                   {resource.duration && ` · ${resource.duration.toFixed(1)}s`}
                 </div>
               </div>
