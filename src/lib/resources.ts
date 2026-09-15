@@ -11,7 +11,7 @@
  */
 
 import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent, stripExportPrefix } from './onyxbase';
-import { ONYXBASE_COLLECTIONS } from './onyxbase';
+import { ONYXBASE_COLLECTIONS, ONYXBASE_V5_ENABLED } from './onyxbase';
 import { getCached, setCached, setCachedNonEmpty, invalidate } from './cache';
 
 // ============ Types ============
@@ -295,14 +295,11 @@ export async function createResourceVerified(
   const collection = collectionForType(resource.type, resource.xmlSource);
   const t0 = Date.now();
   const maxAttempts = opts.retries ?? 3;
-  // PACING-ESCAPE delays: the backend pins every write to Telegram and
-  // paces pins (~12-15s window). Phase-1 (last chunk / thumbnail) lands
-  // seconds before phase-2, so a failed write means "window armed" —
-  // retrying in 500ms/1s burns EVERY attempt inside the SAME window
-  // (proven live: chunked uploads always failed registration). Retries
-  // sleep PAST the window instead (backend honor-cap is 12s, so 13s
-  // always escapes even without reading the server's retryAfter).
-  const retryDelayMs = opts.baseDelayMs ?? 13000;
+  // PACING MODEL: the V4 backend pins every write to Telegram and paces
+  // pins (~12-15s window), so retries must sleep PAST the window (13s). The
+  // V5 data layer is authoritative SQLite — writes land in ~10ms and a
+  // failed write is a transient blip, so a short backoff is correct there.
+  const retryDelayMs = opts.baseDelayMs ?? (ONYXBASE_V5_ENABLED ? 1500 : 13000);
   // DEADLINE GATE: the route dies at 60s (Vercel). Never START a retry
   // past 20s elapsed — worst case stays ~45s + route overhead, and the
   // client's registration retry (fresh 60s budget, same clientId) owns

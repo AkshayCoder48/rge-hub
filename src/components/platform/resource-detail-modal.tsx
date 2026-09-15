@@ -5,6 +5,7 @@ import type { Resource, Profile } from '@/lib/resources';
 import { RESOURCE_TYPE_LABEL } from '@/lib/resources';
 import { X, Download, Share2, ExternalLink, Calendar, Tag, Film, FileCode, Image as ImageIcon } from 'lucide-react';
 import { RoleBadge, authorDisplayRole } from './role-badge';
+import { XmlViewer } from './xml-viewer';
 import { useToast } from '@/hooks/use-toast';
 
 interface ResourceDetailModalProps {
@@ -157,10 +158,18 @@ export function ResourceDetailModal({
                 className="max-w-full max-h-[50vh] rounded-xl"
               />
             ) : resource.type === 'xml' ? (
-              <div className="flex flex-col items-center gap-3 py-12">
-                <FileCode className="w-16 h-16 text-[#ef233c]/30" />
-                <p className="font-inter text-sm text-zinc-500">File — download to view</p>
-              </div>
+              resource.downloadUrl ? (
+                <XmlViewer
+                  url={resource.downloadUrl}
+                  fileName={resource.fileName || `${resource.title}.xml`}
+                  fileSize={resource.size}
+                />
+              ) : (
+                <div className="flex flex-col items-center gap-3 py-12">
+                  <FileCode className="w-16 h-16 text-[#ef233c]/30" />
+                  <p className="font-inter text-sm text-zinc-500">File — download to view</p>
+                </div>
+              )
             ) : (
               <div className="flex flex-col items-center gap-3 py-12">
                 <TypeIcon className={`w-16 h-16 ${typeColor} opacity-30`} />

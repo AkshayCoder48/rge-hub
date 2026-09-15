@@ -26,6 +26,11 @@ import { uploadInChunks, DIRECT_UPLOAD_LIMIT } from '@/lib/chunked-client';
 import { GETSHARED_MAX_BYTES } from '@/lib/getshared';
 import { uploadToGetshared } from '@/lib/getshared-client';
 import { isQuaxEligible } from '@/lib/quax';
+import {
+  uploadFilePermanent,
+  PermanentUploadError,
+  PERMANENT_UPLOAD_MAX_BYTES,
+} from '@/lib/v5-upload-client';
 import { Link2, ImagePlus } from 'lucide-react';
 
 /**
@@ -50,6 +55,9 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 // Bigger clips/files (up to 5GB) upload straight from the browser to getshared
 // and are stored as URL-only records (no bytes/base64 in OnyxBase).
 const MAX_EXTERNAL_BYTES = GETSHARED_MAX_BYTES;
+// Permanent resumable storage ceiling (V5 parts). Larger files still ride
+// the getshared direct path.
+const MAX_PERMANENT_BYTES = PERMANENT_UPLOAD_MAX_BYTES;
 
 type ItemStatus =
   | 'queued'
@@ -85,7 +93,9 @@ interface QueueItem {
   /** Neutral status line (e.g. still-processing notice) — not an error. */
   notice?: string | null;
   /** Which backend stored this file (set during transfer). */
-  via?: 'hub' | 'getshared' | 'quax';
+  via?: 'hub' | 'getshared' | 'quax' | 'v5';
+  /** V5 permanent-storage session id — retry resumes from where it stopped. */
+  uploadId?: string;
   /** Optional cover thumbnail (all types). Uploaded as an image first. */
   thumbnailFile?: File;
   thumbnailPreview?: string;
@@ -202,6 +212,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
   const itemsRef = useRef<QueueItem[]>([]);
   const xhrRefs = useRef(new Map<string, XMLHttpRequest>());
   const gsAbortRefs = useRef(new Map<string, AbortController>());
+  const v5AbortRefs = useRef(new Map<string, AbortController>());
   const speedRefs = useRef(new Map<string, { loaded: number; t: number; smooth: number | null }>());
   const stopRef = useRef(false);
 
@@ -213,6 +224,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
   useEffect(() => {
     const m = xhrRefs.current;
     const g = gsAbortRefs.current;
+    const v = v5AbortRefs.current;
     return () => {
       m.forEach((xhr) => {
         try {
@@ -226,6 +238,12 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         } catch {}
       });
       g.clear();
+      v.forEach((ctrl) => {
+        try {
+          ctrl.abort();
+        } catch {}
+      });
+      v.clear();
     };
   }, []);
 
@@ -360,7 +378,8 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         },
       });
       updateItem(item.uid, {
-        progress: { loaded: item.file.size, total: item.file.size, pct: 97, speedBps: null, etaSecs: null },
+        notice: 'Assembling & uploading to image host…',
+        progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
       });
       const res = await fetch('/api/resources/upload-complete', {
         method: 'POST',
@@ -488,7 +507,8 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         },
       });
       updateItem(item.uid, {
-        progress: { loaded: item.file.size, total: item.file.size, pct: 97, speedBps: null, etaSecs: null },
+        notice: 'Assembling & publishing file…',
+        progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
       });
       const res = await fetch('/api/quax/complete', {
         method: 'POST',
@@ -578,12 +598,155 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
     [updateItem]
   );
 
+  // ---------- V5 permanent resumable storage (clips & files) ----------
+  //
+  // One logical file → one permanent URL. Internal chunking is invisible:
+  // REAL byte progress, resumable sessions (retry sends only the missing
+  // parts), per-part retries, whole-file checksum dedup, and the final URL
+  // supports Range/206 (video seek) + HEAD + CORS.
+  const uploadTransferV5 = useCallback(
+    async (item: QueueItem): Promise<TransferResult> => {
+      const ctrl = new AbortController();
+      v5AbortRefs.current.set(item.uid, ctrl);
+      updateItem(item.uid, {
+        via: 'v5',
+        notice: null,
+        progress: { loaded: 0, total: item.file.size, pct: 0, speedBps: null, etaSecs: null },
+      });
+      const t0 = Date.now();
+      try {
+        const result = await uploadFilePermanent(item.file, {
+          signal: ctrl.signal,
+          resumeUploadId: item.uploadId,
+          onSession: (uploadId) => updateItem(item.uid, { uploadId }),
+          onProgress: (p) => {
+            const elapsed = Math.max((Date.now() - t0) / 1000, 0.001);
+            const speed = p.loaded / elapsed;
+            updateItem(item.uid, {
+              progress: {
+                loaded: p.loaded,
+                total: p.total,
+                pct: p.pct,
+                speedBps: p.pct >= 100 ? null : speed,
+                etaSecs: p.pct >= 100 || speed <= 0 ? null : (p.total - p.loaded) / speed,
+              },
+            });
+          },
+          onPhase: (phase) => {
+            const notice =
+              phase === 'hashing'
+                ? 'Preparing file…'
+                : phase === 'resuming'
+                  ? 'Resuming interrupted upload — skipping parts already stored…'
+                  : phase === 'finalizing'
+                    ? 'Assembling & verifying file…'
+                    : null;
+            updateItem(item.uid, { notice });
+          },
+        });
+        updateItem(item.uid, {
+          uploadId: result.uploadId,
+          progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
+        });
+        return {
+          fileId: result.resourceId,
+          fileUrl: result.url,
+          fileName: item.file.name,
+          mimeType: item.file.type || 'application/octet-stream',
+          size: result.size,
+          storageUrl: result.url,
+          mirrorHost: 'permanent',
+          timings: { total_upload_ms: Date.now() - t0, attempts: 1 },
+        };
+      } catch (e) {
+        if (e instanceof PermanentUploadError) {
+          if (e.cancelled) {
+            throw { code: 'UPLOAD_CANCELLED' as UploadErrorCode, cancelled: true };
+          }
+          throw {
+            code: (e.code as UploadErrorCode) || 'UPLOAD_STORAGE_ERROR',
+            error: e.message,
+            // Keep the session id so a manual retry resumes, not restarts.
+            uploadId: item.uploadId,
+          };
+        }
+        throw e;
+      } finally {
+        v5AbortRefs.current.delete(item.uid);
+      }
+    },
+    [updateItem]
+  );
+
+  // Local, instant video cover: seek to ~1s, grab a frame on a canvas — zero
+  // uploads, never blocks or fails the main upload (PRD: non-blocking
+  // thumbnail generation). Users can still pick their own cover afterwards.
+  const generateVideoCover = useCallback(async (file: File): Promise<File | null> => {
+    try {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.muted = true;
+      const meta = await new Promise<{ duration: number }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timeout')), 8000);
+        video.onloadedmetadata = () => {
+          clearTimeout(timer);
+          resolve({ duration: isFinite(video.duration) ? video.duration : 0 });
+        };
+        video.onerror = () => {
+          clearTimeout(timer);
+          reject(new Error('decode failed'));
+        };
+        video.src = url;
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timeout')), 6000);
+        video.onseeked = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        video.onerror = () => {
+          clearTimeout(timer);
+          reject(new Error('seek failed'));
+        };
+        video.currentTime = Math.min(1, Math.max(0.1, (meta.duration || 2) / 2));
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 360;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('no canvas');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 0.82));
+      URL.revokeObjectURL(url);
+      if (!blob || blob.size === 0) return null;
+      return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}-cover.jpg`, { type: 'image/jpeg' });
+    } catch {
+      return null;
+    }
+  }, []);
+
   const uploadTransfer = useCallback(
     async (item: QueueItem): Promise<TransferResult> => {
-      // Clips/files: qu.ax permanent storage when eligible (hub relay — qu.ax
-      // has no CORS), else getshared direct from the browser (up to 5GB).
-      // qu.ax failures auto-fall-back to getshared so the item still uploads.
+      // Clips/files: PERMANENT RESUMABLE STORAGE first (up to 2GB, Range-aware
+      // URL, dedup, resume). Falls back to the legacy relays only when the
+      // engine is not configured; a mid-upload failure stays retryable/resumable.
       if (type !== 'image') {
+        if (item.file.size <= MAX_PERMANENT_BYTES) {
+          try {
+            return await uploadTransferV5(item);
+          } catch (e) {
+            const err = e as { cancelled?: boolean; code?: string };
+            if (err?.cancelled) throw e;
+            if (err?.code === 'V5_STORAGE_DISABLED' || err?.code === 'AUTH_ERROR') {
+              // Engine off (or session expired) → legacy paths below.
+            } else {
+              throw e; // honest failure — retry resumes from where it stopped
+            }
+          }
+        }
+        // Legacy: qu.ax permanent storage when eligible (hub relay — qu.ax
+        // has no CORS), else getshared direct from the browser (up to 5GB).
         if (isQuaxEligible(item.file.name, item.file.size)) {
           try {
             if (item.file.size > DIRECT_UPLOAD_LIMIT) {
@@ -597,7 +760,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         }
         return uploadTransferGetshared(item);
       }
-      // Images: our own pipeline (permanent backend bytes + imghosting mirror).
+      // Images: our own pipeline (imghosting mirror-first, permanent).
       // Chunked path for files over the single-request ceiling.
       if (item.file.size > DIRECT_UPLOAD_LIMIT) {
         return uploadTransferChunked(item);
@@ -619,6 +782,16 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           const eta = smooth > 0 && ev.total > 0 ? (ev.total - ev.loaded) / smooth : null;
           updateItem(item.uid, {
             progress: { loaded: ev.loaded, total: ev.total, pct, speedBps: smooth, etaSecs: eta },
+          });
+        };
+        // HONEST PHASE LABEL: once every byte reached the hub, the remaining
+        // time is the image host (imghosting → catbox → telegraph). No fake
+        // "Preparing" state — the bar shows the real bytes, the line says
+        // exactly what is happening.
+        xhr.upload.onload = () => {
+          updateItem(item.uid, {
+            notice: 'Uploaded to hub — saving to image host…',
+            progress: { loaded: item.file.size, total: item.file.size, pct: 100, speedBps: null, etaSecs: null },
           });
         };
 
@@ -686,7 +859,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         xhr.send(formData);
       });
     },
-    [type, updateItem, uploadTransferChunked, uploadTransferGetshared, uploadTransferQuaxSingle, uploadTransferQuaxChunked]
+    [type, updateItem, uploadTransferChunked, uploadTransferGetshared, uploadTransferQuaxSingle, uploadTransferQuaxChunked, uploadTransferV5]
   );
 
   // ---------- Phase 2: DB registration (idempotent) ----------
@@ -849,10 +1022,26 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         // ---- Phase 0: cover thumbnail (optional; skipped on registration-only retry) ----
         // BEST-EFFORT: a cover must never kill the upload — continue
         // without one if the thumbnail leg fails.
+        // Clips without a user-picked cover get an INSTANT local frame grab
+        // (canvas, zero uploads, non-blocking) so videos ship with a preview.
         const thumbCheck = getItem(uid)!;
-        if (!opts.skipTransfer && thumbCheck.thumbnailFile && !thumbCheck.thumbnailFileId) {
+        if (
+          !opts.skipTransfer &&
+          type === 'clip' &&
+          !thumbCheck.thumbnailFile &&
+          !thumbCheck.thumbnailFileId &&
+          !thumbCheck.thumbnailPreview
+        ) {
+          const cover = await generateVideoCover(thumbCheck.file);
+          if (stopRef.current) return;
+          if (cover) {
+            updateItem(uid, { thumbnailFile: cover, thumbnailPreview: URL.createObjectURL(cover) });
+          }
+        }
+        const thumbReady = getItem(uid)!;
+        if (!opts.skipTransfer && thumbReady.thumbnailFile && !thumbReady.thumbnailFileId) {
           try {
-            const t = await uploadThumbnail(thumbCheck);
+            const t = await uploadThumbnail(thumbReady);
             if (stopRef.current) return;
             updateItem(uid, { thumbnailFileId: t.thumbnailFileId, thumbnailUrl: t.thumbnailUrl });
           } catch (e) {
@@ -935,11 +1124,10 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
             }
           } else if (rerr.code === 'DATABASE_REGISTRATION_ERROR' && !stopRef.current) {
             // ONE automatic re-save: the file is already stored (phase 1
-            // done), and a failed save almost always means "backend pacing
-            // window was armed" — 14s later the window is clear and the
-            // same clientId dedupes, so this retry is free and safe. Any
-            // other error (auth/validation) throws straight through.
-            await new Promise((r) => setTimeout(r, 14000));
+            // done) and the same clientId dedupes, so this retry is free and
+            // safe. The V5 data layer needs no pacing escape (authoritative
+            // SQLite — writes land in ~10ms), so a short backoff suffices.
+            await new Promise((r) => setTimeout(r, 2000));
             if (stopRef.current) return;
             updateItem(uid, { status: 'persisting' });
             reg = await registerResource(getItem(uid)!, transfer);
@@ -1018,7 +1206,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
         });
       }
     },
-    [getItem, validateItem, updateItem, uploadTransfer, registerResource, verifyResourceRecord, upsertLocal, uploadThumbnail]
+    [getItem, validateItem, updateItem, uploadTransfer, registerResource, verifyResourceRecord, upsertLocal, uploadThumbnail, generateVideoCover, type]
   );
 
   // ---------- queue runner ----------
@@ -1063,6 +1251,12 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
           gs.abort();
         } catch {}
       }
+      const v5 = v5AbortRefs.current.get(uid);
+      if (v5) {
+        try {
+          v5.abort();
+        } catch {}
+      }
       const it = getItem(uid);
       if (it && it.status !== 'ready') {
         updateItem(uid, { status: 'cancelled', errorCode: 'UPLOAD_CANCELLED', error: null });
@@ -1079,6 +1273,11 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
       } catch {}
     });
     gsAbortRefs.current.forEach((ctrl) => {
+      try {
+        ctrl.abort();
+      } catch {}
+    });
+    v5AbortRefs.current.forEach((ctrl) => {
       try {
         ctrl.abort();
       } catch {}
@@ -1144,6 +1343,10 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
       case 'queued':
         return 'Queued — waiting to start';
       case 'uploading': {
+        // A phase notice ("Uploading to image host…", "Assembling &
+        // verifying file…", "Resuming…") is the honest description of what
+        // is happening AFTER the bytes moved — it wins over the byte line.
+        if (it.notice) return it.notice;
         const p = it.progress;
         const parts = [`Uploading ${it.file.name}… ${p.pct}%`, `${fmtBytes(p.loaded)} / ${fmtBytes(p.total)}`];
         const sp = fmtSpeed(p.speedBps);
@@ -1351,7 +1554,7 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
                 <p className="font-inter text-sm text-white">Drop your {typeLabel} files here</p>
                 <p className="font-inter text-xs text-zinc-500 mt-1">
                   or click to browse — multiple files allowed (max {fmtBytes(sizeLimit)} each)
-                  {type !== 'image' && ' · permanent storage up to 256MB, direct upload up to 5GB'}
+                  {type !== 'image' && ' · permanent resumable storage up to 2GB'}
                 </p>
               </div>
               <input
@@ -1524,7 +1727,10 @@ export function UploadModal({ type, onClose, onSuccess, initialFiles }: UploadMo
                             />
                             <p className="text-[10px] font-manrope text-zinc-500 truncate">
                               {it.file.name} · {fmtBytes(it.file.size)}
-                              {type !== 'image' && (isQuaxEligible(it.file.name, it.file.size) ? ' · permanent storage' : it.file.size > MAX_UPLOAD_BYTES ? ' · large file, direct upload' : ' · direct upload')}
+                              {type !== 'image' &&
+                                (it.file.size <= MAX_PERMANENT_BYTES
+                                  ? ' · permanent resumable storage'
+                                  : ' · large file, direct upload')}
                             </p>
                             {!running && (it.status === 'queued' || it.status === 'cancelled' || it.status === 'failed') && (
                               <button

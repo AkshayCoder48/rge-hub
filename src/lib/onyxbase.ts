@@ -27,6 +27,10 @@ const EMAIL_CREDENTIAL = process.env.ONYXBASE_EMAIL_CREDENTIAL || 'Email_Verific
 const ONYXBASE_V5_URL = (process.env.ONYXBASE_V5_URL || '').trim().replace(/\/+$/, '');
 const V5_ENABLED = ONYXBASE_V5_URL !== '';
 
+// Server-side engine coordinates (empty in browser bundles — non-public env
+// vars are inlined as undefined client-side by Next.js).
+export { ONYXBASE_API_KEY, ONYXBASE_V5_URL };
+
 // Server-only warning: this module also gets bundled when client components
 // import resources.ts (relative chain) — in the browser the env var is
 // intentionally absent, so only warn when actually running on the server.
@@ -427,7 +431,7 @@ export async function v5PutAuthOpMarker(
  * pending mirror is logged, never a false failure (the downstream
  * resource create + its 202/operationId reconciliation cover the rest).
  */
-async function v5UploadBlob(
+export async function v5UploadBlob(
   file: File | Blob,
   fileName: string,
   mimeType: string
