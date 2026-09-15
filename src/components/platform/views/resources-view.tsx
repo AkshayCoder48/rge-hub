@@ -226,6 +226,7 @@ export function ResourcesView({ type, onUpload, onOpenUser }: ResourcesViewProps
           canDelete={isOwn(selected)}
           onDelete={handleDelete}
           onOpenUser={onOpenUser}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
     </div>

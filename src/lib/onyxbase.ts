@@ -319,6 +319,53 @@ export async function v5LoginAccount(email: string, password: string): Promise<V
   };
 }
 
+/**
+ * Update an existing V5 account's password (service route, master-auth).
+ * Called by /api/auth/reset-password AFTER the user verified a reset OTP —
+ * the user-facing proof (signed resetToken) lives in the Hub; this is the
+ * privileged write primitive. Returns the account with a FRESH api key
+ * (same semantics as login).
+ */
+export async function v5UpdateAccountPassword(
+  email: string,
+  password: string
+): Promise<V5AccountResult> {
+  if (!V5_ENABLED) return { ok: false, code: 'UNKNOWN', error: 'ONYXBASE_V5_URL is not set' };
+  const r = await v5Request(
+    '/api/v5/accounts/password',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    },
+    { retries: 0 }
+  );
+  if (r.status === 0 || r.status >= 500) {
+    recordWrite(false);
+    return { ok: false, code: 'UPSTREAM_UNAVAILABLE', error: 'Auth service is unreachable — please retry.' };
+  }
+  if (r.status === 200) {
+    const p = v5Payload(r.body);
+    if (p?.userId) {
+      recordWrite(true);
+      return { ok: true, userId: p.userId, apiKey: p.apiKey, name: p.name, email: p.email };
+    }
+    return { ok: false, code: 'UNKNOWN', error: r.body?.error || 'Password update returned no user.' };
+  }
+  recordWrite(r.status !== 429);
+  const code =
+    typeof r.body?.code === 'string' && r.body.code
+      ? r.body.code
+      : r.status === 404
+        ? 'ACCOUNT_NOT_FOUND'
+        : r.status === 401
+          ? 'AUTH_REQUIRED'
+          : r.status === 429
+            ? 'RATE_LIMITED'
+            : 'UNKNOWN';
+  return { ok: false, code, error: r.body?.error || `Password update failed (HTTP ${r.status})` };
+}
+
 // ---- V5 operations + RGE auth-op recovery markers ----
 
 export interface V5OperationRecord {

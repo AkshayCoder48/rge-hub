@@ -211,3 +211,12 @@ input[type='range']::-moz-range-thumb {
 .stagger-4 { animation-delay: 0.4s; }
 .stagger-5 { animation-delay: 0.5s; }
 .stagger-6 { animation-delay: 0.6s; }
+
+/* Reduced-motion preference (Settings → Preferences) */
+html[data-motion='off'] *,
+html[data-motion='off'] *::before,
+html[data-motion='off'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}

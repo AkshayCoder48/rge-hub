@@ -19,6 +19,7 @@ import {
   X,
   ChevronRight,
   Shield,
+  Settings,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -50,6 +51,9 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'search', label: 'Search', icon: Search, section: 'Discover' },
     { key: 'community', label: 'Community', icon: Users },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
+    // Same "Account" group as Profile — the section header only renders on
+    // the first item of the group, so no duplicate "Account" label.
+    { key: 'settings', label: 'Settings', icon: Settings },
     ...((user.isAdmin || (user.role && user.role !== 'user'))
       ? [{ key: 'admin' as ViewKey, label: 'Admin', icon: Shield, section: 'Staff' }]
       : []),

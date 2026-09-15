@@ -228,6 +228,7 @@ export function SearchView({ onOpenUser }: SearchViewProps) {
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
           onOpenUser={onOpenUser}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
     </div>

@@ -1,24 +1,30 @@
 /**
- * POST /api/auth/reset-password  — FIXED (PRD §10).
+ * POST /api/auth/reset-password  — FIXED (was dead in production).
  *
- * OLD (broken) flow: required `otp:{email}:password_reset` to still exist
- * with `consumed === true` — but verification DELETES the record on
- * success, so the check could never pass; password reset was dead.
+ * THE OLD BUG: the password update went through OnyxBase's V4 REGISTER
+ * endpoint ("re-register to update the password") — but that endpoint
+ * REFUSES existing emails with 409 "An account with this email already
+ * exists…", so tapping Confirm on the new-password step ALWAYS failed with
+ * exactly that message. Password reset could never succeed.
  *
- * NEW flow:
+ * THE NEW FLOW:
  *   1. User requests reset OTP (/api/auth/otp/send, purpose=password_reset)
  *   2. User verifies (/api/auth/otp/verify) → receives a signed resetToken
  *      (HMAC-SHA256, 10-minute TTL, bound to the email)
  *   3. User submits { email, password, resetToken } here.
- *
- * The token is verified SERVER-SIDE against the session secret — no OTP
- * record re-read, no OnyxBase OTP lookup (PRD §3).
- *
- * Password update itself still goes through OnyxBase's native re-register
- * (it mints a fresh apiKey for the account) + profile upsert.
+ *   4. V5 path (production): master-authed service call
+ *      POST /api/v5/accounts/password → password_hash updated + fresh
+ *      apiKey minted for the SAME account. The Hub owns the user-facing
+ *      proof (the signed resetToken); the V5 route is the privileged write.
+ *      V4 fallback: honest error (the legacy API has no update path).
  */
 import { NextRequest } from 'next/server';
-import { registerByEmailPassword } from '@/lib/onyxbase';
+import {
+  ONYXBASE_V5_ENABLED,
+  v5UpdateAccountPassword,
+  registerByEmailPassword,
+  backendAcceptsWrites,
+} from '@/lib/onyxbase';
 import { getProfileByEmail, upsertProfile } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
 import { verifyResetToken } from '@/lib/otp';
@@ -67,7 +73,7 @@ export async function POST(request: NextRequest) {
       meta.durationMs = Date.now() - t0;
       return fail(
         ERROR_CODES.RESET_TOKEN_INVALID,
-        'Your reset link has expired. Please verify a new code and try again.',
+        'Your reset session has expired. Please verify a new code and try again.',
         meta,
         { status: 400 }
       );
@@ -83,24 +89,80 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Re-register with OnyxBase to update the password (mints a new apiKey).
-    const regResult = await registerByEmailPassword(
-      existingProfile.displayName,
-      normalizedEmail,
-      password
-    );
-    meta.durationMs = Date.now() - t0;
-    if (!regResult.ok || !regResult.apiKey) {
-      return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, regResult.error || 'Password reset failed. Please try again.', meta, {
-        status: 502,
-        retryable: true,
-      });
+    // ─── Password update ────────────────────────────────────────────────────
+    // V5 (production): master-authed REAL update on the same account —
+    // never the old "re-register" hack that collided with EMAIL_TAKEN.
+    let accountUserId: string | undefined;
+    let accountApiKey: string | undefined;
+
+    if (ONYXBASE_V5_ENABLED) {
+      const upd = await v5UpdateAccountPassword(normalizedEmail, password);
+      meta.durationMs = Date.now() - t0;
+      if (upd.ok && upd.userId && upd.apiKey) {
+        accountUserId = upd.userId;
+        accountApiKey = upd.apiKey;
+      } else if (upd.code === 'ACCOUNT_NOT_FOUND' || upd.code === 'NOT_FOUND') {
+        return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
+          status: 400,
+        });
+      } else if (upd.code === 'RATE_LIMITED') {
+        return fail(ERROR_CODES.RATE_LIMITED, upd.error || 'Too many attempts — please wait a moment.', meta, {
+          status: 429,
+          retryable: true,
+        });
+      } else {
+        return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, upd.error || 'Password reset failed. Please try again.', meta, {
+          status: 502,
+          retryable: true,
+        });
+      }
+    } else {
+      // V4 legacy: the old API has NO password-update path — its register
+      // endpoint refuses existing emails (the original bug). Be honest
+      // instead of replaying the "already exists" dead end.
+      if (!(await backendAcceptsWrites())) {
+        meta.durationMs = Date.now() - t0;
+        return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The auth service is briefly unavailable — please retry.', meta, {
+          status: 503,
+          retryable: true,
+        });
+      }
+      const regResult = await registerByEmailPassword(
+        existingProfile.displayName,
+        normalizedEmail,
+        password
+      );
+      meta.durationMs = Date.now() - t0;
+      if (regResult.ok && regResult.apiKey && regResult.userId) {
+        // Only possible for an email that did NOT exist — treat as created.
+        accountUserId = regResult.userId;
+        accountApiKey = regResult.apiKey;
+      } else {
+        const taken = /already registered|already exists/i.test(regResult.error || '');
+        return fail(
+          ERROR_CODES.UPSTREAM_UNAVAILABLE,
+          taken
+            ? 'Password reset is temporarily unavailable on the legacy auth service — please retry in a moment.'
+            : regResult.error || 'Password reset failed. Please try again.',
+          meta,
+          { status: 502, retryable: true }
+        );
+      }
     }
 
-    // Update the profile with the new API key.
+    // Keep the profile's apiKey in sync with the freshly minted key.
+    if (existingProfile.userId !== accountUserId) {
+      console.warn(
+        '[reset-password] account id drift:',
+        existingProfile.userId,
+        '→',
+        accountUserId,
+        '(keeping profile row)'
+      );
+    }
     const updatedProfile = {
       ...existingProfile,
-      apiKey: regResult.apiKey,
+      apiKey: accountApiKey!,
       updatedAt: new Date().toISOString(),
     };
     await upsertProfile(updatedProfile);

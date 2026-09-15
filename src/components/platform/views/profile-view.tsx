@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useResourceStore } from '@/lib/resource-store';
+import { usePreferences } from '@/lib/preferences';
 import type { Resource, ResourceType } from '@/lib/resources';
 import { ResourceCard } from '../resource-card';
 import { ResourceDetailModal } from '../resource-detail-modal';
@@ -139,7 +140,9 @@ export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => v
   // with a neutral "pending" toast (a tombstone eventually lands).
   const handleDelete = useCallback(
     (r: Resource) => {
-      if (!confirm(`Delete "${r.title}"? This cannot be undone.`)) return;
+      // Confirmation gate (Settings → Preferences). With the preference
+      // off, deletes stay one-tap optimistic — no dialog.
+      if (usePreferences.getState().confirmBeforeDelete && !window.confirm('Delete this upload?')) return;
       // 1. Instant removal: close the modal if it shows this resource, strip
       //    it from every store slice, confirm with a neutral toast.
       setSelected((prev) => (prev?.id === r.id ? null : prev));
@@ -453,6 +456,7 @@ export function ProfileView({ onOpenUser }: { onOpenUser?: (userId: string) => v
           onDownload={handleDownload}
           canDelete={isOwnProfile}
           onDelete={handleDelete}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
     </div>

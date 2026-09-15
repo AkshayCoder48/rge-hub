@@ -310,6 +310,7 @@ export function UserView({ userId, onOpenUser, onOpenSelf }: UserViewProps) {
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
           onOpenUser={onOpenUser}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
 

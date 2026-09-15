@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import type { Resource } from '@/lib/resources';
 import { useResourceStore } from '@/lib/resource-store';
 import { RoleBadge, authorDisplayRole } from '../role-badge';
+import { EditResourceModal } from '../edit-resource-modal';
 import { useToast } from '@/hooks/use-toast';
 import {
   LayoutDashboard,
@@ -294,6 +295,8 @@ function ContentSection({ can }: { can: (p: string) => boolean }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
+  // Resource row currently open in the edit modal (rows are Resource-shaped).
+  const [editing, setEditing] = useState<Resource | null>(null);
 
   const load = useCallback(async (t: ContentType) => {
     setLoading(true);
@@ -475,6 +478,13 @@ function ContentSection({ can }: { can: (p: string) => boolean }) {
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => setEditing(r)}
+                  title="Edit"
+                  className="p-2 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
                 {can('content.feature') && (
                   <button
                     onClick={() => doFeature(r)}
@@ -502,6 +512,21 @@ function ContentSection({ can }: { can: (p: string) => boolean }) {
             </div>
           ))}
         </div>
+      )}
+
+      {/* Edit modal — metadata editor for the selected row */}
+      {editing && (
+        <EditResourceModal
+          resource={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(saved) => {
+            // Update the local table row + the shared store, quietly.
+            setRows((prev) => prev.map((x) => (x.id === saved.id ? { ...x, ...saved } : x)));
+            useResourceStore.getState().upsertLocal(saved);
+            setEditing(null);
+            toast({ title: 'Saved', description: saved.title });
+          }}
+        />
       )}
     </div>
   );

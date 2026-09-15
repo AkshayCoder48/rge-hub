@@ -190,6 +190,7 @@ export function CommunityView({ onOpenUser }: CommunityViewProps) {
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
           onOpenUser={onOpenUser}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
     </div>

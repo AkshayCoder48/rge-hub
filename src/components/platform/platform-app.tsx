@@ -13,13 +13,18 @@ import { SpeedRampStudio } from '@/components/platform/views/speed-ramp-studio';
 import { AdminView } from '@/components/platform/views/admin-view';
 import { SearchView } from '@/components/platform/views/search-view';
 import { UserView } from '@/components/platform/views/user-view';
+import { SettingsView } from '@/components/platform/views/settings-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 import { Logo } from '@/components/logo';
+import { useApplyReducedMotion } from '@/lib/preferences';
 
-export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'studio' | 'admin' | 'search' | 'user';
+export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'admin' | 'search' | 'user';
 
 export function PlatformApp() {
   const { user, status, loading, refresh } = useAuth();
+  // Global preferences (localStorage) — hydrate once + reflect the
+  // reduced-motion preference onto <html data-motion> for the whole shell.
+  useApplyReducedMotion();
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -169,6 +174,7 @@ export function PlatformApp() {
           {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} onOpenUser={openUser} />}
           {view === 'community' && <CommunityView key={`community-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} onOpenUser={openUser} />}
+          {view === 'settings' && <SettingsView onOpenSelfProfile={() => setView('profile')} />}
           {view === 'search' && <SearchView key={`search-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'user' && selectedUserId && (
             <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />

@@ -182,6 +182,7 @@ export function HomeView({ onNavigate, onUpload }: HomeViewProps) {
           resource={selected}
           onClose={() => setSelected(null)}
           onDownload={handleDownload}
+          onUpdated={(r) => setSelected(r)}
         />
       )}
     </div>
