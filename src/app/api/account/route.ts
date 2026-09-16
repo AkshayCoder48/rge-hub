@@ -84,6 +84,13 @@ export async function DELETE(request: NextRequest) {
       const check = await v5LoginAccount(session.email ?? '', password);
       if (!check.ok) {
         meta.durationMs = Date.now() - t0;
+        // Honest states (PRD §10) — only a real bad password is a 403.
+        if (check.code === 'RATE_LIMITED') {
+          return fail(ERROR_CODES.RATE_LIMITED, 'Too many attempts — please wait a moment and try again.', meta, { status: 429, retryable: true });
+        }
+        if (check.code === 'UPSTREAM_UNAVAILABLE') {
+          return fail(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The auth service is briefly unavailable — please retry.', meta, { status: 503, retryable: true });
+        }
         return fail(ERROR_CODES.FORBIDDEN, 'Incorrect password. Your account was NOT deleted.', meta, { status: 403 });
       }
     }
