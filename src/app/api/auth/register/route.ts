@@ -41,6 +41,7 @@ import {
   type Profile,
 } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
+import { verifyOtp } from '@/lib/otp';
 import {
   isReservedUsername,
   isReservedDisplayName,
@@ -123,7 +124,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // ─── 2. Validation ─────────────────────────────────────────────────────
+    // ─── 2. Validation ─────────────────────────────────────────────────
     if (!email || !username || !displayName || !password) {
       return NextResponse.json(
         { ok: false, code: 'VALIDATION_ERROR', error: 'Email, username, display name, and password are required' },
@@ -149,6 +150,34 @@ export async function POST(request: NextRequest) {
     }
     if (isReservedDisplayName(displayName)) {
       return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', error: reservedDisplayNameMessage() }, { status: 400 });
+    }
+
+    // ─── 2.5 OTP PROOF (SECURITY — email ownership, enforced server-side) ─
+    // The user MUST present the 6-digit code from their email + the otpRef
+    // (the AI SENSE temp-storage capability). This is the SAME workflow as
+    // login/verify: the temp KV record carries the hashed code + expiry +
+    // attempt counter. Without this check anyone could register with an
+    // email they don't own (the old frontend-only verify was decorative).
+    const otpRef = typeof body.otpRef === 'string' ? body.otpRef.trim() : '';
+    const otpCode = typeof body.code === 'string' ? body.code.trim() : '';
+    if (!otpRef || !/^\d{6}$/.test(otpCode)) {
+      return NextResponse.json(
+        { ok: false, code: 'OTP_REQUIRED', error: 'Enter the 6-digit code sent to your email to verify this address.' },
+        { status: 400 }
+      );
+    }
+    const otpCheck = await verifyOtp(normalizedEmail, otpCode, 'registration', otpRef);
+    if (!otpCheck.ok) {
+      const status = otpCheck.errorCode === 'OTP_ATTEMPTS_EXCEEDED' ? 429 : 400;
+      return NextResponse.json(
+        {
+          ok: false,
+          code: otpCheck.errorCode || 'OTP_INVALID',
+          error: otpCheck.error || 'Invalid verification code.',
+          ...(otpCheck.otpRef ? { otpRef: otpCheck.otpRef } : {}),
+        },
+        { status }
+      );
     }
 
     // ─── 3. Account creation (V5 fast path / V4 legacy) ───────────────────

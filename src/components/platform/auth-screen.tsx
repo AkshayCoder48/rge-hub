@@ -360,7 +360,10 @@ export function AuthScreen() {
     try {
       const outcome = await runAuthMutation(
         '/api/auth/register',
-        { email, username, displayName, password },
+        // OTP proof rides the register call — the server verifies email
+        // ownership itself (same temp-KV workflow as login); the client-side
+        // verify step alone was decorative.
+        { email, username, displayName, password, code: otp, ...(otpRef ? { otpRef } : {}) },
         registerRequestId.current,
         setAuthPhase
       );
@@ -399,7 +402,7 @@ export function AuthScreen() {
       authInFlight.current = false;
       setAuthPhase('idle');
     }
-  }, [email, username, displayName, password, refresh, toast]);
+  }, [email, username, displayName, password, otp, otpRef, refresh, toast]);
 
   const handleLogin = useCallback(async () => {
     if (authInFlight.current) return;
