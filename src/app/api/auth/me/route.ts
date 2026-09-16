@@ -12,12 +12,36 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/session';
 import { resolveRole } from '@/lib/admin';
+import { kvGetStatus, ONYXBASE_COLLECTIONS } from '@/lib/onyxbase';
 
 export async function GET() {
   const result = await getSession();
 
   if (result.status === 'ok') {
     const s = result.session;
+    // DELETED-ACCOUNT CHECK: stateless HMAC cookies stay valid until expiry,
+    // and the in-memory revocation from DELETE /api/account only covers the
+    // instance that handled the deletion. The profile row is the durable
+    // truth — a session whose profile no longer exists (account deleted)
+    // is dead everywhere. Engine trouble degrades to "loading" (never a
+    // false logout); ONLY a confirmed 404 signs the user out.
+    const profileRead = await kvGetStatus(`profile:${s.userId}`, ONYXBASE_COLLECTIONS.PROFILES);
+    if (profileRead.status === 'missing') {
+      return NextResponse.json({
+        ok: false,
+        status: 'unauthenticated',
+        user: null,
+      }, { status: 200 });
+    }
+    if (profileRead.status === 'error') {
+      // Engine unreachable — tell the frontend to RETRY, not log out.
+      return NextResponse.json({
+        ok: true,
+        status: 'loading',
+        user: null,
+        message: 'Session check in progress',
+      }, { status: 200 });
+    }
     // Role lookup is advisory here — KV trouble degrades to plain user
     // rather than breaking login.
     const resolved = await resolveRole({ userId: s.userId, email: s.email }).catch(() => ({
