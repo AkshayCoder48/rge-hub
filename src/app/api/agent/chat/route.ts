@@ -1,7 +1,20 @@
 /**
- * POST /api/agent/chat — the RGE Agent core (SSE).
+ * POST /api/agent/chat — the RGE Agent core (SSE, STATELESS).
  *
- * Body: { chatId?: string, message?: string, regenerate?: boolean }
+ * Chats + provider config live in the USER'S BROWSER (localStorage). The
+ * client sends the FULL conversation with every turn; the server runs the
+ * multi-round LLM loop + tools, streams the frames, and persists NOTHING
+ * (except real workspace file writes, which go through the tools).
+ *
+ * Body: {
+ *   chatId?: string            — client-managed chat id (echoed on done)
+ *   messages: AgentMessage[]   — full history INCLUDING the new user message
+ *                                (for regenerate the client already dropped
+ *                                the trailing assistant turns)
+ *   config: AgentConfig        — provider config from localStorage (the API
+ *                                key rides the request and is never stored)
+ * }
+ *
  * Response: text/event-stream of AgentEvent frames:
  *   data: {"type":"status","state":"thinking"|"working","label":"…"}
  *   data: {"type":"token","text":"…"}          — assistant text deltas
@@ -12,20 +25,17 @@
  *   data: {"type":"done","chatId","title","usage":{"rounds","ms"}}
  *
  * Multi-round loop: up to 12 rounds / 50s cumulative LLM time. Tool
- * execution runs between rounds; every round's tool calls + results are
- * persisted on the assistant message. Errors mid-stream still persist the
- * partial assistant message and end with error + done — never a fake
- * success.
+ * execution runs between rounds. Errors mid-stream still end with error +
+ * done — never a fake success.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, type SessionData } from '@/lib/session';
 import { newRequestId } from '@/lib/api-contract';
-import { getAgentConfig, isConfigured } from '@/lib/agent/config';
-import { getChat, createChat, appendMessages, autoTitle } from '@/lib/agent/sessions';
-import { loadIndex, buildTreeFromIndex } from '@/lib/agent/workspace';
+import { sanitizeConfig, isConfigured } from '@/lib/agent/config';
+import { loadIndex } from '@/lib/agent/workspace';
 import { streamChat, buildProviderMessages, type ParsedToolCall } from '@/lib/agent/llm';
 import { executeTool, TOOLS, type ToolContext } from '@/lib/agent/tools';
-import type { AgentEvent, AgentMessage, AgentToolCall } from '@/lib/agent/types';
+import type { AgentEvent, AgentMessage, AgentConfig, AgentToolCall } from '@/lib/agent/types';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
@@ -33,6 +43,8 @@ export const dynamic = 'force-dynamic';
 const MAX_ROUNDS = 12;
 const LLM_BUDGET_MS = 50_000;
 const HARD_DEADLINE_MS = 230_000; // safety net incl. slow tools (speedramp)
+const MAX_HISTORY_MESSAGES = 200;
+const MAX_MESSAGE_CHARS = 60 * 1024;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -84,6 +96,32 @@ interface HistoryItem {
   toolCalls?: { id: string; name: string; args: Record<string, unknown>; status: string; result?: string }[];
 }
 
+/** Sanitize the client-supplied history (cap size, roles, strings). */
+function sanitizeHistory(raw: unknown): HistoryItem[] {
+  if (!Array.isArray(raw)) return [];
+  const msgs = raw
+    .filter((m): m is AgentMessage =>
+      !!m && typeof m === 'object' && typeof (m as AgentMessage).content === 'string' &&
+      ((m as AgentMessage).role === 'user' || (m as AgentMessage).role === 'assistant'))
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map((m) => ({
+      role: m.role,
+      content: String(m.content).slice(0, MAX_MESSAGE_CHARS),
+      ...(Array.isArray(m.toolCalls) && m.toolCalls.length
+        ? {
+            toolCalls: m.toolCalls.slice(0, 32).map((c) => ({
+              id: String(c.id || '').slice(0, 64),
+              name: String(c.name || '').slice(0, 64),
+              args: (c.args && typeof c.args === 'object' ? c.args : {}) as Record<string, unknown>,
+              status: String(c.status || 'ok'),
+              result: c.result === undefined ? undefined : String(c.result).slice(0, 8 * 1024),
+            })),
+          }
+        : {}),
+    }));
+  return msgs;
+}
+
 export async function POST(request: NextRequest) {
   const requestId = newRequestId();
 
@@ -99,13 +137,17 @@ export async function POST(request: NextRequest) {
   const userId = session.userId;
 
   const body = await request.json().catch(() => null);
-  const chatIdIn = typeof body?.chatId === 'string' ? body.chatId.trim() : '';
-  const message = typeof body?.message === 'string' ? body.message.trim() : '';
-  const regenerate = body?.regenerate === true;
+  const chatIdIn = typeof body?.chatId === 'string' ? body.chatId.trim().slice(0, 64) : '';
+  const history = sanitizeHistory(body?.messages);
+  const config = sanitizeConfig((body?.config ?? {}) as AgentConfig);
 
-  if (!chatIdIn && !message) {
+  if (history.length === 0 || history[history.length - 1].role !== 'user') {
     return NextResponse.json(
-      { success: false, error: { code: 'VALIDATION_ERROR', message: 'Provide a message (or chatId + regenerate).' }, requestId },
+      {
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Provide the conversation (last message must be from the user).' },
+        requestId,
+      },
       { status: 400 }
     );
   }
@@ -135,64 +177,19 @@ export async function POST(request: NextRequest) {
         }
       };
 
-      // State
-      let chatId = chatIdIn;
-      let title = '';
       let rounds = 0;
-      let assistantText = '';
-      let assistantReasoning = '';
-      const collectedToolCalls: AgentToolCall[] = [];
       let hadError = false;
+      let assistantText = '';
+      let toolCallsRun = 0;
 
       try {
-        // ── Load / create the chat ─────────────────────────────────────
-        let chat = chatId ? await getChat(userId, chatId) : null;
-        if (chatId && !chat) {
-          send({ type: 'error', message: `Chat not found: ${chatId}` });
-          send({ type: 'done', chatId: '', title: '', usage: { rounds: 0, ms: Date.now() - t0 } });
-          finish();
-          return;
-        }
-        if (!chat) {
-          chat = await createChat(userId, autoTitle(message));
-          chatId = chat.id;
-        }
-        title = chat.title;
-
-        // ── Regenerate: drop the trailing assistant turn(s) ────────────
-        if (regenerate) {
-          const lastUserIdx = findLastUserIndex(chat.messages);
-          if (lastUserIdx === -1) {
-            send({ type: 'error', message: 'Nothing to regenerate — this chat has no user message yet.' });
-            send({ type: 'done', chatId, title, usage: { rounds: 0, ms: Date.now() - t0 } });
-            finish();
-            return;
-          }
-          chat.messages = chat.messages.slice(0, lastUserIdx + 1);
-        }
-
-        // ── Persist the user message immediately ───────────────────────
-        if (message) {
-          const userMsg: AgentMessage = {
-            id: `m_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`,
-            role: 'user',
-            content: message,
-            createdAt: nowIso(),
-          };
-          chat = (await appendMessages(userId, chatId, [userMsg])) || chat;
-          if (regenerate && chat.title === 'New chat') title = autoTitle(message);
-          else title = chat.title;
-        }
-
-        // ── Provider config ────────────────────────────────────────────
-        const cfg = await getAgentConfig(userId);
-        if (!isConfigured(cfg)) {
+        // ── Provider config (from the request — never persisted) ─────────
+        if (!isConfigured(config)) {
           const why =
-            cfg.provider === 'openai'
+            config.provider === 'openai'
               ? 'The OpenAI-compatible provider needs a base URL and an API key — set them in Settings → Agent.'
               : 'The built-in provider is not available right now — configure an OpenAI-compatible provider in Settings → Agent.';
           send({ type: 'error', message: why });
-          send({ type: 'done', chatId, title, usage: { rounds: 0, ms: Date.now() - t0 } });
           finish();
           return;
         }
@@ -200,13 +197,6 @@ export async function POST(request: NextRequest) {
         // ── System prompt (with live workspace tree) ───────────────────
         const tree = await workspaceListing(userId);
         const systemPrompt = buildSystemPrompt(session, tree);
-
-        // ── Working history (provider-neutral) ────────────────────────
-        const history: HistoryItem[] = chat.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          ...(m.toolCalls?.length ? { toolCalls: m.toolCalls } : {}),
-        }));
 
         const ctx: ToolContext = { userId, session, req: request };
         let llmTimeMs = 0;
@@ -221,21 +211,17 @@ export async function POST(request: NextRequest) {
           rounds++;
           send({ type: 'status', state: 'thinking', label: rounds === 1 ? 'Thinking' : 'Continuing' });
 
-          const providerMessages = buildProviderMessages(cfg.provider, history, systemPrompt);
+          const providerMessages = buildProviderMessages(config.provider, history, systemPrompt);
           const roundStart = Date.now();
           let roundText = '';
-          let roundReasoning = '';
           let calls: ParsedToolCall[] = [];
           let streamError: string | null = null;
 
           try {
-            for await (const ev of streamChat(cfg, providerMessages, TOOLS)) {
+            for await (const ev of streamChat(config, providerMessages, TOOLS)) {
               if (closed) break;
               if (ev.type === 'token') {
                 roundText += ev.text;
-                send(ev);
-              } else if (ev.type === 'thinking') {
-                roundReasoning += ev.text;
                 send(ev);
               } else if (ev.type === 'tool_calls') {
                 calls = ev.calls;
@@ -247,7 +233,7 @@ export async function POST(request: NextRequest) {
           }
 
           assistantText += roundText;
-          assistantReasoning += roundReasoning;
+          toolCallsRun += calls.length;
           llmTimeMs += Date.now() - roundStart;
 
           if (streamError) {
@@ -281,7 +267,6 @@ export async function POST(request: NextRequest) {
                 ...(res.meta ? { meta: res.meta } : {}),
               };
               executed.push(tc);
-              collectedToolCalls.push(tc);
               send({
                 type: 'tool_result',
                 callId: call.id,
@@ -305,7 +290,7 @@ export async function POST(request: NextRequest) {
           break;
         }
 
-        if (!closed && !hadError && assistantText === '' && collectedToolCalls.length === 0) {
+        if (!closed && !hadError && assistantText === '' && toolCallsRun === 0) {
           // Nothing streamed at all — either the budget ran out before the
           // provider produced anything, or the provider returned an empty
           // completion. Honest error either way (no fake success).
@@ -323,26 +308,13 @@ export async function POST(request: NextRequest) {
         send({ type: 'error', message: err instanceof Error ? err.message : 'Unexpected agent error.' });
       }
 
-      // ── Persist the assistant message (ALWAYS — partial on error) ────
-      try {
-        if (chatId && (assistantText || assistantReasoning || collectedToolCalls.length)) {
-          const assistantMessage: AgentMessage = {
-            id: `m_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`,
-            role: 'assistant',
-            content: assistantText,
-            ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
-            ...(collectedToolCalls.length ? { toolCalls: collectedToolCalls } : {}),
-            createdAt: nowIso(),
-          };
-          const updated = await appendMessages(userId, chatId, [assistantMessage]);
-          if (updated) title = updated.title;
-        }
-      } catch (err) {
-        console.error('[agent/chat] persist error:', err instanceof Error ? err.message : err);
-      }
-
       if (!closed) {
-        send({ type: 'done', chatId: chatId || '', title, usage: { rounds, ms: Date.now() - t0 } });
+        send({
+          type: 'done',
+          chatId: chatIdIn,
+          title: '',
+          usage: { rounds, ms: Date.now() - t0 },
+        });
       }
       finish();
     },
@@ -357,11 +329,4 @@ export async function POST(request: NextRequest) {
       'x-request-id': requestId,
     },
   });
-}
-
-function findLastUserIndex(messages: AgentMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') return i;
-  }
-  return -1;
 }

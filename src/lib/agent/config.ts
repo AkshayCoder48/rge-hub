@@ -1,15 +1,13 @@
 /**
- * RGE Agent — per-user LLM provider configuration.
+ * RGE Agent — LLM provider configuration (PURE — client + server safe).
  *
- * Stored in the engine KV (master-authed, server-only) under collection
- * 'agentConfig', key `cfg:${userId}`. The raw apiKey NEVER leaves the
- * server — every client-facing surface uses `toPublicConfig()` masking.
+ * The config (including the provider API key) lives in the USER'S BROWSER
+ * (localStorage via the zustand persist store) and rides each chat request.
+ * The server NEVER persists it. Every client-facing surface masks the key
+ * via toPublicConfig()/maskApiKey().
  */
 
-import { kvGet, kvSet } from '../onyxbase';
 import type { AgentConfig, AgentConfigPublic, AgentProvider } from './types';
-
-const AGENT_CONFIG_COLLECTION = 'agentConfig';
 
 export const DEFAULT_TEMPERATURE = 0.6;
 export const DEFAULT_MAX_TOKENS = 4096;
@@ -21,44 +19,6 @@ export function defaultAgentConfig(): AgentConfig {
     temperature: DEFAULT_TEMPERATURE,
     maxTokens: DEFAULT_MAX_TOKENS,
   };
-}
-
-function configKey(userId: string): string {
-  return `cfg:${userId}`;
-}
-
-/** Load the stored config (falling back to defaults). Never throws. */
-export async function getAgentConfig(userId: string): Promise<AgentConfig> {
-  const stored = await kvGet<Partial<AgentConfig>>(configKey(userId), AGENT_CONFIG_COLLECTION).catch(
-    () => null
-  );
-  const base = defaultAgentConfig();
-  if (!stored || typeof stored !== 'object') return base;
-  return sanitizeConfig({ ...base, ...stored });
-}
-
-/**
- * Merge + persist a config patch. Undefined fields keep their stored
- * values; the apiKey follows "empty string clears, masked-looking value
- * keeps the stored key" semantics so the UI can round-trip the mask.
- */
-export async function saveAgentConfig(
-  userId: string,
-  patch: Partial<AgentConfig>
-): Promise<AgentConfig> {
-  const current = await getAgentConfig(userId);
-  const next = sanitizeConfig({ ...current, ...patch });
-
-  // apiKey handling: undefined → keep; '' → clear; masked echo → keep.
-  if (patch.apiKey === '') {
-    next.apiKey = undefined;
-  } else if (typeof patch.apiKey === 'string' && patch.apiKey.includes('…')) {
-    next.apiKey = current.apiKey;
-  }
-
-  next.updatedAt = new Date().toISOString();
-  await kvSet(configKey(userId), next, AGENT_CONFIG_COLLECTION);
-  return next;
 }
 
 /** Clamp/validate field values into a well-formed AgentConfig. */

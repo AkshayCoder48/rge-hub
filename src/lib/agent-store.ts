@@ -1,29 +1,42 @@
 /**
- * RGE Agent — client store (zustand).
+ * RGE Agent — client store (zustand + localStorage persistence).
  *
  * Shared state between the three surfaces of the agent feature:
  *   • left sidebar  — chat history (visible only inside the agent view)
  *   • agent view    — streaming chat thread + composer
  *   • right sidebar — workspace file explorer
  *
- * All network goes through the standard { success, data } contract; the chat
- * stream consumes the SSE AgentEvent frames from POST /api/agent/chat.
+ * LOCAL STORAGE (per the platform's data policy — the server never stores
+ * chats or provider keys): chats, messages AND the provider config are
+ * persisted to the user's browser via zustand/persist. Each chat request
+ * carries the full conversation + config; the server is stateless. The
+ * workspace (real files) still lives on the server through /api/agent/workspace.
  */
 'use client';
 
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import type {
-  AgentChatMeta,
   AgentChat,
   AgentMessage,
   AgentToolCall,
   AgentEvent,
+  AgentConfig,
   WorkspaceFileMeta,
   TreeNode,
 } from '@/lib/agent/types';
+import {
+  newChatId,
+  autoTitle,
+  capMessages,
+  metaOf,
+  sortChats,
+  MAX_CHATS,
+} from '@/lib/agent/chat-utils';
+import { defaultAgentConfig, sanitizeConfig, isConfigured } from '@/lib/agent/config';
 
 // ────────────────────────────────────────────────────────────────────────────
-// REST helpers
+// REST helper (workspace only — chats/config are local)
 // ────────────────────────────────────────────────────────────────────────────
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -66,11 +79,14 @@ export interface LiveTurn {
   error?: string;
 }
 
-interface AgentStore {
-  // chat list (sidebar)
-  chats: AgentChatMeta[];
-  chatsLoading: boolean;
+/** What gets persisted to localStorage. */
+interface PersistedAgentState {
+  chats: AgentChat[];
   activeChatId: string | null;
+  config: AgentConfig;
+}
+
+interface AgentStore extends PersistedAgentState {
   messages: AgentMessage[];
   chatLoading: boolean;
 
@@ -89,12 +105,15 @@ interface AgentStore {
   // config summary for the header badge
   providerReady: boolean | null;
 
-  // actions — chats
-  loadChats: () => Promise<void>;
-  selectChat: (id: string) => Promise<void>;
-  newChat: () => Promise<void>;
-  deleteChat: (id: string) => Promise<void>;
-  renameChat: (id: string, title: string) => Promise<void>;
+  // actions — chats (all local)
+  loadChats: () => void;
+  selectChat: (id: string) => void;
+  newChat: () => void;
+  deleteChat: (id: string) => void;
+  renameChat: (id: string, title: string) => void;
+
+  // actions — config (local)
+  saveConfig: (patch: Partial<AgentConfig>) => AgentConfig;
 
   // actions — streaming
   sendMessage: (text: string) => Promise<void>;
@@ -108,7 +127,7 @@ interface AgentStore {
   deleteWorkspaceFile: (path: string) => Promise<void>;
   toggleRightPanel: (open?: boolean) => void;
 
-  refreshProviderReady: () => Promise<void>;
+  refreshProviderReady: () => void;
 }
 
 let abortController: AbortController | null = null;
@@ -147,225 +166,286 @@ function splitReasoningSentences(text: string): string[] {
     .filter(Boolean);
 }
 
-export const useAgentStore = create<AgentStore>((set, get) => ({
-  chats: [],
-  chatsLoading: false,
-  activeChatId: null,
-  messages: [],
-  chatLoading: false,
+export const useAgentStore = create<AgentStore>()(
+  persist(
+    (set, get) => ({
+      chats: [],
+      activeChatId: null,
+      config: defaultAgentConfig(),
 
-  streaming: false,
-  live: null,
-  stoppedWords: null,
+      messages: [],
+      chatLoading: false,
 
-  wsFiles: [],
-  wsTree: [],
-  wsTotalBytes: 0,
-  wsLoading: false,
-  rightPanelOpen: true,
-
-  providerReady: null,
-
-  // ── chats ────────────────────────────────────────────────────────────────
-
-  loadChats: async () => {
-    set({ chatsLoading: true });
-    try {
-      const data = await api<{ chats: AgentChatMeta[] }>('/api/agent/chats');
-      set({ chats: data.chats, chatsLoading: false });
-    } catch {
-      set({ chatsLoading: false });
-    }
-  },
-
-  selectChat: async (id) => {
-    if (get().streaming) return;
-    set({ chatLoading: true, activeChatId: id, stoppedWords: null });
-    try {
-      const data = await api<{ chat: AgentChat }>(`/api/agent/chats/${id}`);
-      set({ messages: data.chat.messages, chatLoading: false });
-    } catch {
-      set({ messages: [], chatLoading: false });
-    }
-  },
-
-  newChat: async () => {
-    if (get().streaming) return;
-    set({ activeChatId: null, messages: [], stoppedWords: null });
-  },
-
-  deleteChat: async (id) => {
-    try {
-      await api(`/api/agent/chats/${id}`, { method: 'DELETE' });
-    } catch {
-      /* optimistic removal anyway */
-    }
-    const wasActive = get().activeChatId === id;
-    set((s) => ({ chats: s.chats.filter((c) => c.id !== id) }));
-    if (wasActive) set({ activeChatId: null, messages: [] });
-  },
-
-  renameChat: async (id, title) => {
-    set((s) => ({
-      chats: s.chats.map((c) => (c.id === id ? { ...c, title } : c)),
-    }));
-    try {
-      await api(`/api/agent/chats/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title }),
-      });
-    } catch {
-      get().loadChats();
-    }
-  },
-
-  // ── streaming ────────────────────────────────────────────────────────────
-
-  sendMessage: async (text) => {
-    const trimmed = text.trim();
-    if (!trimmed || get().streaming || get().chatLoading) return;
-
-    const userMsg: AgentMessage = {
-      id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      role: 'user',
-      content: trimmed,
-      createdAt: new Date().toISOString(),
-    };
-
-    set((s) => ({
-      messages: [...s.messages, userMsg],
-      streaming: true,
+      streaming: false,
+      live: null,
       stoppedWords: null,
-      live: {
-        content: '',
-        reasoning: '',
-        reasoningSentences: [],
-        toolCalls: [],
-        statusState: 'thinking',
-        statusLabel: 'Thinking',
-        startedAt: Date.now(),
+
+      wsFiles: [],
+      wsTree: [],
+      wsTotalBytes: 0,
+      wsLoading: false,
+      rightPanelOpen: true,
+
+      providerReady: null,
+
+      // ── chats (localStorage — no network) ──────────────────────────────
+
+      loadChats: () => {
+        // Chats are already in the store (persisted); just re-derive nothing.
+        // Kept as an action so existing call sites stay valid.
+        set((s) => ({ chats: sortChats(s.chats) }));
       },
-    }));
 
-    await runStream(get().activeChatId, trimmed, false, set, get);
-  },
-
-  regenerate: async () => {
-    if (get().streaming || get().chatLoading) return;
-    const msgs = get().messages;
-    const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
-    if (!lastUser) return;
-    // drop trailing assistant messages after the last user message
-    const idx = msgs.lastIndexOf(lastUser);
-    set({
-      messages: msgs.slice(0, idx + 1),
-      streaming: true,
-      stoppedWords: null,
-      live: {
-        content: '',
-        reasoning: '',
-        reasoningSentences: [],
-        toolCalls: [],
-        statusState: 'thinking',
-        statusLabel: 'Thinking',
-        startedAt: Date.now(),
+      selectChat: (id) => {
+        if (get().streaming) return;
+        const chat = get().chats.find((c) => c.id === id);
+        set({
+          activeChatId: id,
+          messages: chat ? capMessages(chat.messages) : [],
+          stoppedWords: null,
+          chatLoading: false,
+        });
       },
-    });
-    await runStream(get().activeChatId, lastUser.content, true, set, get);
-  },
 
-  stop: () => {
-    const live = get().live;
-    if (live && live.content) {
-      set({ stoppedWords: live.content });
+      newChat: () => {
+        if (get().streaming) return;
+        set({ activeChatId: null, messages: [], stoppedWords: null });
+      },
+
+      deleteChat: (id) => {
+        const wasActive = get().activeChatId === id;
+        set((s) => ({
+          chats: s.chats.filter((c) => c.id !== id),
+          ...(wasActive ? { activeChatId: null, messages: [] } : {}),
+        }));
+      },
+
+      renameChat: (id, title) => {
+        set((s) => ({
+          chats: s.chats.map((c) =>
+            c.id === id
+              ? { ...c, title: (title || 'Untitled').trim().slice(0, 120) || 'Untitled', updatedAt: new Date().toISOString() }
+              : c
+          ),
+        }));
+      },
+
+      // ── config (localStorage) ──────────────────────────────────────────
+
+      saveConfig: (patch) => {
+        // apiKey handling: undefined → keep; '' → clear; masked echo → keep.
+        const current = get().config;
+        const merged = { ...current, ...patch };
+        if (patch.apiKey === '') {
+          merged.apiKey = undefined;
+        } else if (typeof patch.apiKey === 'string' && patch.apiKey.includes('…')) {
+          merged.apiKey = current.apiKey;
+        }
+        const next = sanitizeConfig(merged);
+        next.updatedAt = new Date().toISOString();
+        set({ config: next, providerReady: isConfigured(next) });
+        return next;
+      },
+
+      // ── streaming ──────────────────────────────────────────────────────
+
+      sendMessage: async (text) => {
+        const trimmed = text.trim();
+        if (!trimmed || get().streaming || get().chatLoading) return;
+
+        const userMsg: AgentMessage = {
+          id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          content: trimmed,
+          createdAt: new Date().toISOString(),
+        };
+
+        // Resolve (or create) the local chat this turn belongs to.
+        const existing = get().chats.find((c) => c.id === get().activeChatId) || null;
+        const chatId = existing ? existing.id : newChatId();
+        let history: AgentMessage[];
+        if (!existing) {
+          const chat: AgentChat = {
+            id: chatId,
+            title: autoTitle(trimmed),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            messages: [],
+          };
+          history = [userMsg];
+          set((s) => ({ chats: [chat, ...s.chats].slice(0, MAX_CHATS) }));
+        } else {
+          history = capMessages([...existing.messages, userMsg]);
+        }
+
+        set({
+          activeChatId: chatId,
+          messages: history,
+          streaming: true,
+          stoppedWords: null,
+          live: {
+            content: '',
+            reasoning: '',
+            reasoningSentences: [],
+            toolCalls: [],
+            statusState: 'thinking',
+            statusLabel: 'Thinking',
+            startedAt: Date.now(),
+          },
+        });
+
+        await runStream(chatId, history, set, get);
+      },
+
+      regenerate: async () => {
+        if (get().streaming || get().chatLoading) return;
+        const chat = get().chats.find((c) => c.id === get().activeChatId);
+        if (!chat) return;
+        const chatId = chat.id;
+        const msgs = capMessages(chat.messages);
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+        if (!lastUser) return;
+        // drop trailing assistant messages after the last user message
+        const idx = msgs.lastIndexOf(lastUser);
+        const history = msgs.slice(0, idx + 1);
+        set({
+          messages: history,
+          streaming: true,
+          stoppedWords: null,
+          live: {
+            content: '',
+            reasoning: '',
+            reasoningSentences: [],
+            toolCalls: [],
+            statusState: 'thinking',
+            statusLabel: 'Thinking',
+            startedAt: Date.now(),
+          },
+        });
+        await runStream(chatId, history, set, get);
+      },
+
+      stop: () => {
+        const live = get().live;
+        if (live && live.content) {
+          set({ stoppedWords: live.content });
+        }
+        abortController?.abort();
+        abortController = null;
+      },
+
+      continueStopped: () => {
+        const words = get().stoppedWords;
+        if (!words) return;
+        set({ stoppedWords: null });
+        // treat the partial answer as context and ask the agent to continue
+        get().sendMessage('Continue exactly where you stopped.');
+      },
+
+      discardStopped: () => set({ stoppedWords: null }),
+
+      // ── workspace (server — real files) ────────────────────────────────
+
+      loadWorkspace: async () => {
+        set({ wsLoading: true });
+        try {
+          const data = await api<{
+            files: WorkspaceFileMeta[];
+            tree: TreeNode[];
+            totalSizeBytes: number;
+          }>('/api/agent/workspace');
+          set({
+            wsFiles: data.files,
+            wsTree: data.tree,
+            wsTotalBytes: data.totalSizeBytes,
+            wsLoading: false,
+          });
+        } catch {
+          set({ wsLoading: false });
+        }
+      },
+
+      deleteWorkspaceFile: async (path) => {
+        try {
+          await api(
+            `/api/agent/workspace/file?path=${encodeURIComponent(path)}`,
+            { method: 'DELETE' }
+          );
+        } catch {
+          /* refresh regardless */
+        }
+        await get().loadWorkspace();
+      },
+
+      toggleRightPanel: (open) =>
+        set((s) => ({ rightPanelOpen: open === undefined ? !s.rightPanelOpen : open })),
+
+      refreshProviderReady: () => {
+        set({ providerReady: isConfigured(get().config) });
+      },
+    }),
+    {
+      name: 'rge-agent-storage',
+      version: 1,
+      storage: createJSONStorage(() => localStorage),
+      // SSR-safe: the initial client render matches the server (empty), then
+      // PlatformApp's mount effect calls useAgentStore.persist.rehydrate().
+      skipHydration: true,
+      // Persist ONLY the durable data — never streaming/UI state.
+      partialize: (s): PersistedAgentState => ({
+        chats: s.chats,
+        activeChatId: s.activeChatId,
+        config: s.config,
+      }),
     }
-    abortController?.abort();
-    abortController = null;
-  },
-
-  continueStopped: () => {
-    const words = get().stoppedWords;
-    if (!words) return;
-    set({ stoppedWords: null });
-    // treat the partial answer as context and ask the agent to continue
-    get().sendMessage('Continue exactly where you stopped.');
-  },
-
-  discardStopped: () => set({ stoppedWords: null }),
-
-  // ── workspace ────────────────────────────────────────────────────────────
-
-  loadWorkspace: async () => {
-    set({ wsLoading: true });
-    try {
-      const data = await api<{
-        files: WorkspaceFileMeta[];
-        tree: TreeNode[];
-        totalSizeBytes: number;
-      }>('/api/agent/workspace');
-      set({
-        wsFiles: data.files,
-        wsTree: data.tree,
-        wsTotalBytes: data.totalSizeBytes,
-        wsLoading: false,
-      });
-    } catch {
-      set({ wsLoading: false });
-    }
-  },
-
-  deleteWorkspaceFile: async (path) => {
-    try {
-      await api(
-        `/api/agent/workspace/file?path=${encodeURIComponent(path)}`,
-        { method: 'DELETE' }
-      );
-    } catch {
-      /* refresh regardless */
-    }
-    await get().loadWorkspace();
-  },
-
-  toggleRightPanel: (open) =>
-    set((s) => ({ rightPanelOpen: open === undefined ? !s.rightPanelOpen : open })),
-
-  refreshProviderReady: async () => {
-    try {
-      const data = await api<{ configured: boolean }>('/api/agent/config');
-      set({ providerReady: data.configured });
-    } catch {
-      set({ providerReady: false });
-    }
-  },
-}));
+  )
+);
 
 // ────────────────────────────────────────────────────────────────────────────
-// The stream runner — shared by sendMessage + regenerate.
+// The stream runner — sends full history + config, commits the turn locally.
 // ────────────────────────────────────────────────────────────────────────────
 
 type SetState = (partial: Partial<AgentStore> | ((s: AgentStore) => Partial<AgentStore>)) => void;
 type GetState = () => AgentStore;
 
 async function runStream(
-  chatId: string | null,
-  message: string,
-  regenerate: boolean,
+  chatId: string,
+  history: AgentMessage[],
   set: SetState,
   get: GetState
 ) {
   abortController = new AbortController();
-  let finalChatId = chatId || '';
-  let finalTitle = '';
+  const config = get().config;
 
   const patchLive = (patch: Partial<LiveTurn>) =>
     set((s) => (s.live ? { live: { ...s.live, ...patch } } : {}));
+
+  /** Commit messages + chat meta to the local (persisted) store. */
+  const commitToChat = (msgs: AgentMessage[], fallbackTitle?: string) => {
+    set((s) => ({
+      messages: msgs,
+      chats: sortChats(
+        s.chats.map((c) => {
+          if (c.id !== chatId) return c;
+          const title =
+            c.title === 'New chat' && fallbackTitle ? fallbackTitle : c.title;
+          return {
+            ...c,
+            title,
+            messages: capMessages(msgs),
+            updatedAt: new Date().toISOString(),
+          };
+        })
+      ),
+    }));
+  };
 
   try {
     const res = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: abortController.signal,
-      body: JSON.stringify({ chatId: chatId || undefined, message, regenerate }),
+      body: JSON.stringify({ chatId, messages: history, config }),
     });
 
     if (!res.ok || !res.body) {
@@ -431,8 +511,6 @@ async function runStream(
           patchLive({ error: ev.message });
           break;
         case 'done': {
-          finalChatId = ev.chatId || finalChatId;
-          finalTitle = ev.title || '';
           // advance plan progress to full
           if (live.plan) patchLive({ plan: { ...live.plan, activeIndex: live.plan.steps.length } });
           break;
@@ -440,7 +518,7 @@ async function runStream(
       }
     }
 
-    // Commit the finished assistant message to the thread.
+    // Commit the finished assistant message to the local chat.
     const finished = get().live;
     if (finished && (finished.content || finished.toolCalls.length || finished.error)) {
       const assistantMsg: AgentMessage = {
@@ -458,7 +536,9 @@ async function runStream(
         })),
         createdAt: new Date().toISOString(),
       };
-      set((s) => ({ messages: [...s.messages, assistantMsg] }));
+      commitToChat([...history, assistantMsg]);
+    } else {
+      commitToChat(history);
     }
   } catch (err) {
     const aborted = err instanceof DOMException && err.name === 'AbortError';
@@ -474,16 +554,19 @@ async function runStream(
           reasoning: live.reasoning || undefined,
           createdAt: new Date().toISOString(),
         };
-        set((s) => ({ messages: [...s.messages, assistantMsg] }));
+        commitToChat([...history, assistantMsg]);
+      } else {
+        commitToChat(history);
       }
     }
   } finally {
     abortController = null;
     set({ streaming: false, live: null });
-    // refresh chat list (title/updatedAt changed, maybe new chat)
-    if (finalChatId) set({ activeChatId: finalChatId });
-    get().loadChats();
+    // Workspace may have changed through tool writes.
     get().loadWorkspace();
     get().refreshProviderReady();
   }
 }
+
+// Re-export for the sidebar/settings surfaces.
+export { metaOf };

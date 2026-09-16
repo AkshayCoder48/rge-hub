@@ -18,6 +18,7 @@ import { AgentView } from '@/components/platform/views/agent-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 import { Logo } from '@/components/logo';
 import { useApplyReducedMotion } from '@/lib/preferences';
+import { useAgentStore } from '@/lib/agent-store';
 
 export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'agent' | 'admin' | 'search' | 'user';
 
@@ -26,6 +27,13 @@ export function PlatformApp() {
   // Global preferences (localStorage) — hydrate once + reflect the
   // reduced-motion preference onto <html data-motion> for the whole shell.
   useApplyReducedMotion();
+
+  // Agent store (chats + provider config) is persisted to localStorage with
+  // skipHydration (SSR-safe) — rehydrate explicitly on the client after mount
+  // so the first client render matches the server and no data is lost.
+  useEffect(() => {
+    useAgentStore.persist.rehydrate();
+  }, []);
   const [view, setView] = useState<ViewKey>('home');
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);

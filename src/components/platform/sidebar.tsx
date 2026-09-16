@@ -49,7 +49,6 @@ interface SidebarProps {
  */
 function AgentChatHistory({ onNavigate }: { onNavigate: (v: ViewKey) => void }) {
   const chats = useAgentStore((s) => s.chats);
-  const chatsLoading = useAgentStore((s) => s.chatsLoading);
   const activeChatId = useAgentStore((s) => s.activeChatId);
   const selectChat = useAgentStore((s) => s.selectChat);
   const deleteChat = useAgentStore((s) => s.deleteChat);
@@ -77,10 +76,7 @@ function AgentChatHistory({ onNavigate }: { onNavigate: (v: ViewKey) => void }) 
         </button>
       </div>
       <div className="max-h-64 overflow-y-auto custom-scrollbar space-y-0.5">
-        {chatsLoading && chats.length === 0 && (
-          <div className="text-[10px] text-zinc-600 px-2 py-2">Loading…</div>
-        )}
-        {!chatsLoading && chats.length === 0 && (
+        {chats.length === 0 && (
           <div className="text-[10px] text-zinc-600 px-2 py-2 leading-relaxed">
             No chats yet — start one in the agent view.
           </div>

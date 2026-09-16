@@ -21,6 +21,9 @@ import { useToast } from '@/hooks/use-toast';
 import { usePreferences } from '@/lib/preferences';
 import { api, newIdempotencyKey, TIMEOUTS, type ApiError } from '@/lib/api-client';
 import { Switch } from '@/components/ui/switch';
+import { useAgentStore } from '@/lib/agent-store';
+import { maskApiKey, isConfigured } from '@/lib/agent/config';
+import type { AgentConfig } from '@/lib/agent/types';
 import {
   User as UserIcon,
   ShieldCheck,
@@ -1039,20 +1042,12 @@ function PreferencesCard() {
 
 // ============ AI Agent config ============
 
-interface AgentConfigPublicClient {
-  provider: 'zai' | 'openai';
-  baseUrl?: string;
-  model?: string;
-  temperature?: number;
-  hasApiKey: boolean;
-  apiKeyMasked?: string;
-  configured: boolean;
-}
-
 function AgentConfigCard() {
   const { toast } = useToast();
-  const [cfg, setCfg] = useState<AgentConfigPublicClient | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Provider config lives in the USER'S BROWSER (localStorage via the agent
+  // store) — the server never stores chats or provider keys.
+  const storedConfig = useAgentStore((s) => s.config);
+  const saveConfig = useAgentStore((s) => s.saveConfig);
   const [provider, setProvider] = useState<'zai' | 'openai'>('zai');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -1065,56 +1060,31 @@ function AgentConfigCard() {
   >(null);
 
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res = await fetch('/api/agent/config');
-        const body = await res.json();
-        if (!alive) return;
-        if (body?.success && body.data) {
-          const d = body.data as AgentConfigPublicClient;
-          setCfg(d);
-          setProvider(d.provider || 'zai');
-          setBaseUrl(d.baseUrl || '');
-          setModel(d.model || '');
-          setTemperature(typeof d.temperature === 'number' ? d.temperature : 0.6);
-        }
-      } catch {
-        /* leave defaults */
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
+    const d = storedConfig;
+    setProvider(d.provider || 'zai');
+    setBaseUrl(d.baseUrl || '');
+    setModel(d.model || '');
+    setTemperature(typeof d.temperature === 'number' ? d.temperature : 0.6);
+  }, [storedConfig]);
 
   const save = async () => {
     setSaving(true);
     try {
-      const payload: Record<string, unknown> = { provider, model, temperature };
+      const payload: Partial<AgentConfig> = { provider, model, temperature };
       if (provider === 'openai') {
         payload.baseUrl = baseUrl.trim();
-        // Only send the key when the user typed a new one (masked echo keeps stored).
+        // Only update the key when the user typed a new one (masked echo keeps stored).
         if (apiKey.trim()) payload.apiKey = apiKey.trim();
-        if (!apiKey.trim() && !cfg?.hasApiKey) payload.apiKey = '';
+        if (!apiKey.trim() && !storedConfig.apiKey) payload.apiKey = '';
       }
-      const res = await fetch('/api/agent/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const body = await res.json();
-      if (!res.ok || !body?.success) {
-        throw new Error(body?.error?.message || 'Save failed');
-      }
-      const d = body.data as AgentConfigPublicClient;
-      setCfg(d);
+      saveConfig(payload);
       setApiKey('');
       toast({
         title: 'Agent settings saved',
-        description: provider === 'zai' ? 'Using the built-in engine.' : 'Connected to your endpoint.',
+        description:
+          provider === 'zai'
+            ? 'Using the built-in engine.'
+            : 'Saved in this browser — the key never leaves your device except to run chats.',
       });
     } catch (err) {
       toast({
@@ -1132,10 +1102,18 @@ function AgentConfigCard() {
     setTesting(true);
     setTestResult(null);
     try {
-      // Save first so the test exercises the stored server-side config —
-      // that is exactly what the agent runtime will use.
+      // Save first so the test exercises exactly what the agent runtime uses.
       await save();
-      const res = await fetch('/api/agent/config/test', { method: 'POST' });
+      const payload: Partial<AgentConfig> = { provider, model, temperature };
+      if (provider === 'openai') {
+        payload.baseUrl = baseUrl.trim();
+        payload.apiKey = apiKey.trim() || storedConfig.apiKey;
+      }
+      const res = await fetch('/api/agent/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       const body = await res.json();
       if (body?.success && body.data?.ok) {
         setTestResult({ ok: true, models: body.data.models || [] });
@@ -1151,14 +1129,6 @@ function AgentConfigCard() {
       setTesting(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 text-xs text-zinc-500 py-4">
-        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading agent settings…
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-5">
@@ -1210,9 +1180,9 @@ function AgentConfigCard() {
           <div>
             <label className={LABEL_CLS}>
               API key{' '}
-              {cfg?.hasApiKey && (
+              {storedConfig.apiKey && (
                 <span className="text-zinc-600 normal-case tracking-normal">
-                  (stored: {cfg.apiKeyMasked})
+                  (saved: {maskApiKey(storedConfig.apiKey)})
                 </span>
               )}
             </label>
@@ -1220,7 +1190,7 @@ function AgentConfigCard() {
               className={INPUT_CLS}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={cfg?.hasApiKey ? 'Leave empty to keep the stored key' : 'sk-…'}
+              placeholder={storedConfig.apiKey ? 'Leave empty to keep the saved key' : 'sk-…'}
               type="password"
               spellCheck={false}
             />
@@ -1270,7 +1240,7 @@ function AgentConfigCard() {
           {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
           {testing ? 'Testing…' : 'Test connection'}
         </button>
-        {cfg?.configured && (
+        {isConfigured(storedConfig) && (
           <span className="text-[10px] text-emerald-400/80 font-manrope uppercase tracking-wider">
             ● Configured
           </span>
@@ -1303,9 +1273,9 @@ function AgentConfigCard() {
       )}
 
       <p className="text-[10px] text-zinc-600 leading-relaxed">
-        The key is stored server-side with your account and is never exposed to
-        the browser. The agent uses it to stream replies, run tools and edit
-        your files.
+        Chats and this configuration are stored in YOUR browser only (local
+        storage) — they are never saved on the server. The agent uses your key
+        to stream replies, run tools and edit your files.
       </p>
     </div>
   );
