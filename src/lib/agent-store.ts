@@ -341,7 +341,7 @@ export const useAgentStore = create<AgentStore>()(
       wsTotalBytes: 0,
       wsLoading: false,
       containerStatus: 'idle',
-      rightPanelOpen: true,
+      rightPanelOpen: false,
 
       providerReady: null,
 
@@ -441,6 +441,9 @@ export const useAgentStore = create<AgentStore>()(
           messages: history,
           streaming: true,
           stoppedWords: null,
+          // The workspace explorer stays hidden while the agent responds — it
+          // is revealed at the END of the response (see runAgentTurn).
+          rightPanelOpen: false,
           live: {
             timeline: [],
             blocks: {},
@@ -471,6 +474,8 @@ export const useAgentStore = create<AgentStore>()(
           messages: history,
           streaming: true,
           stoppedWords: null,
+          // Hide the explorer during the response; it reappears at the end.
+          rightPanelOpen: false,
           live: {
             timeline: [],
             blocks: {},
@@ -983,8 +988,10 @@ async function runAgentTurn(
   abortController = null;
   activeRunToken = null;
   set({ streaming: false, live: null });
-  // Workspace may have changed through tool writes.
-  get().refreshWorkspaceSoon();
+  // Workspace may have changed through tool writes — refresh it, then reveal
+  // the file explorer at the END of the response (only when files exist).
+  await get().loadWorkspace();
+  if (get().wsFiles.length > 0) set({ rightPanelOpen: true });
   get().refreshProviderReady();
 }
 

@@ -53,14 +53,11 @@ import { UIBlockHost, UiBlockActionsContext } from '@/components/agent/ui-blocks
 import { Markdown } from '@/components/agent/markdown';
 import {
   AgentPlan,
-  AgentStatus,
   TodoList,
   StoppedRun,
   ThinkingReasoning,
-  GenerationLoader,
   ShimmerLabel,
   Collapse,
-  Orb,
 } from '@/components/agent/elements';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -362,11 +359,9 @@ function TextSegmentView({ text, active }: { text: string; active: boolean }) {
 function LiveTurnBlock({
   live,
   streaming,
-  elapsedLabel,
 }: {
   live: LiveTurn;
   streaming: boolean;
-  elapsedLabel: string;
 }) {
   const calls = liveToolCalls(live);
   const showLoader = live.timeline.length === 0 && !live.error;
@@ -410,10 +405,12 @@ function LiveTurnBlock({
         ) : null;
       })}
 
-      {showLoader && streaming && (
-        <div className="flex items-center gap-3 py-2">
-          <LiveLoaderTick label={live.statusLabel} />
-        </div>
+      {/* Basic thinking text — a plain, quiet line while the agent has
+          nothing to show yet (no dot matrix, no status pill). */}
+      {showLoader && streaming && !live.reasoning && (
+        <p className="py-1 text-sm text-zinc-500 animate-pulse" data-slot="thinking-text">
+          {live.statusLabel || 'Thinking'}…
+        </p>
       )}
 
       {live.error && (
@@ -422,38 +419,8 @@ function LiveTurnBlock({
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        <AgentStatus
-          state={streaming ? (live.statusState === 'working' ? 'working' : 'waiting') : 'done'}
-          label={streaming ? live.statusLabel : 'Finished'}
-          elapsed={streaming ? elapsedLabel : undefined}
-        />
-      </div>
     </div>
   );
-}
-
-/** Loader with its own tick clock. */
-function LiveLoaderTick({ label }: { label: string }) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 120);
-    return () => clearInterval(id);
-  }, []);
-  return <GenerationLoader label={label} tick={tick} />;
-}
-
-/** Elapsed mm:ss for the live turn. */
-function useElapsed(startedAt: number, active: boolean): string {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [active]);
-  const s = Math.max(0, Math.floor((now - startedAt) / 1000));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -833,7 +800,6 @@ export function AgentView({ onOpenSettings }: { onOpenSettings: () => void }) {
 
   const [input, setInput] = useState('');
   const threadRef = useRef<HTMLDivElement>(null);
-  const elapsed = useElapsed(live?.startedAt ?? 0, streaming);
 
   // Structured-UI download actions (generated-file / download blocks).
   const uiActions = useMemo(
@@ -907,7 +873,6 @@ export function AgentView({ onOpenSettings }: { onOpenSettings: () => void }) {
                   <span className="text-[9px] font-manrope uppercase tracking-[0.15em] px-1.5 py-0.5 rounded-full bg-white/5 border border-white/10 text-zinc-400">
                     Beta
                   </span>
-                  {streaming && <Orb pill size={14} label="Working" />}
                 </div>
                 <div className="text-[10px] text-zinc-500">
                   Resource workspace · web container · realtime UI
@@ -968,7 +933,7 @@ export function AgentView({ onOpenSettings }: { onOpenSettings: () => void }) {
                 )
               )}
 
-              {live && <LiveTurnBlock live={live} streaming={streaming} elapsedLabel={elapsed} />}
+              {live && <LiveTurnBlock live={live} streaming={streaming} />}
 
               {stoppedWords && (
                 <StoppedRun
