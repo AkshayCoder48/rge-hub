@@ -117,6 +117,34 @@ async function persistIndex(userId: string, files: WorkspaceFileMeta[]): Promise
   return kvSet(indexKey(userId), files, WS_COLLECTION);
 }
 
+/**
+ * Delete EVERYTHING in a user's workspace (account deletion): all content
+ * keys, all V5 blobs, the index. Bounded concurrency; never throws.
+ * Returns the number of files purged.
+ */
+export async function purgeWorkspace(userId: string): Promise<number> {
+  try {
+    const files = await loadIndex(userId);
+    let purged = 0;
+    // Content keys + blobs, 8 at a time.
+    for (let i = 0; i < files.length; i += 8) {
+      const chunk = files.slice(i, i + 8);
+      await Promise.all(
+        chunk.map(async (f) => {
+          await kvDelete(contentKey(userId, f.path), WS_COLLECTION).catch(() => {});
+          const blobId = f.blobUrl?.split('/f/')[1];
+          if (blobId) await deleteBlobFile(blobId).catch(() => {});
+          purged++;
+        })
+      );
+    }
+    await kvDelete(indexKey(userId), WS_COLLECTION).catch(() => {});
+    return purged;
+  } catch {
+    return 0;
+  }
+}
+
 export function totalSizeBytesOf(files: WorkspaceFileMeta[]): number {
   return files.reduce((sum, f) => sum + (typeof f.size === 'number' ? f.size : 0), 0);
 }

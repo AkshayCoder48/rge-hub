@@ -112,7 +112,7 @@ interface V5Response {
  * verbatim and never retried here, so callers can map codes precisely.
  * Never throws.
  */
-async function v5Request(
+export async function v5Request(
   path: string,
   init: V5RequestInit = {},
   opts: { timeoutMs?: number; retries?: number } = {}

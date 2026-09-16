@@ -38,6 +38,8 @@ import {
   SlidersHorizontal,
   Bot,
   FlaskConical,
+  Trash2,
+  TriangleAlert,
 } from 'lucide-react';
 
 // ============ Shared bits ============
@@ -262,6 +264,9 @@ export function SettingsView({ onOpenSelfProfile }: SettingsViewProps) {
 
       {/* ============ Sign out ============ */}
       <SignOutCard logout={logout} />
+
+      {/* ============ Danger zone: delete account ============ */}
+      <DangerZoneCard logout={logout} />
     </div>
   );
 }
@@ -1315,6 +1320,155 @@ function SignOutCard({ logout }: { logout: () => Promise<void> }) {
           Sign out
         </button>
       </div>
+    </section>
+  );
+}
+
+// ============ Danger zone: delete account ============
+
+/**
+ * Permanently deletes the signed-in account (PRD §11–§16).
+ *
+ * Destructive + explicit: the user must type DELETE and confirm their
+ * current password (re-authenticated server-side). The server identifies
+ * the account from the session cookie ONLY. After the server accepts the
+ * deletion the UI transitions to the signed-out state immediately —
+ * metadata is gone; any oversized blob cleanup finishes engine-side.
+ */
+function DangerZoneCard({ logout }: { logout: () => Promise<void> }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const canConfirm = confirmText.trim() === 'DELETE' && password.length > 0 && !busy;
+
+  const reset = useCallback(() => {
+    setOpen(false);
+    setConfirmText('');
+    setPassword('');
+    setBusy(false);
+  }, []);
+
+  const handleDelete = useCallback(async () => {
+    if (!canConfirm) return;
+    setBusy(true);
+    try {
+      const res = await fetch('/api/account', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { success?: boolean; error?: { message?: string; code?: string } }
+        | null;
+      if (!res.ok || !data?.success) {
+        const msg = data?.error?.message || 'Account deletion failed. Please try again.';
+        toast({ title: 'Not deleted', description: msg, variant: 'destructive' });
+        setBusy(false);
+        return;
+      }
+      // Server accepted the deletion transition — clear this browser's
+      // agent data (chats/config live in localStorage) and sign out.
+      try {
+        useAgentStore.persist.clearStorage();
+      } catch {
+        /* best-effort */
+      }
+      toast({ title: 'Account deleted', description: 'Your account and data have been removed.' });
+      await logout();
+      reset();
+    } catch {
+      toast({
+        title: 'Network error',
+        description: 'Could not reach the server. Check your connection and try again.',
+        variant: 'destructive',
+      });
+      setBusy(false);
+    }
+  }, [canConfirm, password, toast, logout, reset]);
+
+  return (
+    <section className="rounded-2xl bg-black/60 backdrop-blur-xl border border-[#ef233c]/25 p-6">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-[#ef233c]/15 flex items-center justify-center shrink-0">
+            <TriangleAlert className="w-4 h-4 text-[#ef233c]" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-manrope font-semibold text-base text-white">Danger zone</h2>
+            <p className="text-[11px] font-inter text-zinc-500">
+              Permanently delete your account, files, and all data
+            </p>
+          </div>
+        </div>
+        {!open && (
+          <button
+            onClick={() => setOpen(true)}
+            className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-[#ef233c]/10 border border-[#ef233c]/40 text-sm text-red-300 hover:bg-[#ef233c]/20 hover:text-red-200 font-medium transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]"
+          >
+            <Trash2 className="w-4 h-4" /> Delete account
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="mt-5 pt-5 border-t border-white/10 space-y-4">
+          <p className="text-xs font-inter text-zinc-400 leading-relaxed">
+            This <span className="text-red-300 font-semibold">cannot be undone</span>. It will
+            permanently delete your account, profile, every image, clip, and XML you uploaded,
+            your follows, your AI agent workspace, and your API key. Other users&apos; content is
+            not affected.
+          </p>
+          <div>
+            <label className={LABEL_CLS} htmlFor="del-confirm">
+              Type <span className="text-red-300 font-semibold">DELETE</span> to confirm
+            </label>
+            <input
+              id="del-confirm"
+              className={INPUT_CLS}
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="DELETE"
+              autoComplete="off"
+              spellCheck={false}
+              disabled={busy}
+            />
+          </div>
+          <div>
+            <label className={LABEL_CLS} htmlFor="del-password">
+              Your current password
+            </label>
+            <input
+              id="del-password"
+              type="password"
+              className={INPUT_CLS}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              autoComplete="current-password"
+              disabled={busy}
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleDelete}
+              disabled={!canConfirm}
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-[#ef233c] text-sm text-white hover:bg-red-500 font-semibold transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              {busy ? 'Deleting…' : 'Permanently delete'}
+            </button>
+            <button
+              onClick={reset}
+              disabled={busy}
+              className="px-5 py-2.5 rounded-full bg-white/[0.03] border border-white/10 text-sm text-zinc-300 hover:text-white hover:bg-white/10 transition-all disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

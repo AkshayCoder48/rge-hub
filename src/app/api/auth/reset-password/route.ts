@@ -162,9 +162,12 @@ export async function POST(request: NextRequest) {
     // ─── 3. V4 legacy path (no V5 account + no V5 mode) ───────────────────
     if (!accountUserId) {
       if (!existingProfile) {
-        // Don't reveal whether the email exists — generic message.
+        // Honest, machine-readable state (PRD §10) — the old code reused
+        // RESET_TOKEN_INVALID here, which mislabeled an account problem as
+        // a token problem and sent the client back to re-verify a code that
+        // was perfectly fine.
         meta.durationMs = Date.now() - t0;
-        return fail(ERROR_CODES.RESET_TOKEN_INVALID, 'No account found with this email address.', meta, {
+        return fail(ERROR_CODES.ACCOUNT_NOT_FOUND, 'No account found with this email address.', meta, {
           status: 400,
         });
       }

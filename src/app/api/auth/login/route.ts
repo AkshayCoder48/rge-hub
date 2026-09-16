@@ -120,24 +120,16 @@ export async function POST(request: NextRequest) {
           { status: 429 }
         );
       } else {
-        // V5 has no such account (or bad password) — fall through to V4 for
-        // legacy accounts that predate the migration, keeping one honest
-        // error when both paths fail.
-        if (await backendAcceptsWrites()) {
-          const legacy = await loginByEmailPassword(normalizedEmail, password);
-          if (legacy.ok && legacy.apiKey && legacy.userId) {
-            loginUserId = legacy.userId;
-            loginApiKey = legacy.apiKey;
-            loginName = legacy.name;
-          }
-        }
-        if (!loginUserId) {
-          if (requestId) authAttemptFail(`login:${requestId}`);
-          return NextResponse.json(
-            { ok: false, code: 'AUTH_INVALID_CREDENTIALS', error: 'Invalid email or password' },
-            { status: 401 }
-          );
-        }
+        // V5 is authoritative for ALL accounts (legacy V4 users were migrated
+        // into v5_accounts). A V5 failure = wrong email or wrong password.
+        // The old V4-layer fallback cost the engine a full Telegram index
+        // fetch + per-account manifest rehydrate on EVERY failed V5 login —
+        // a major Fluid-CPU burn with zero benefit.
+        if (requestId) authAttemptFail(`login:${requestId}`);
+        return NextResponse.json(
+          { ok: false, code: 'AUTH_INVALID_CREDENTIALS', error: 'Invalid email or password' },
+          { status: 401 }
+        );
       }
     } else {
       if (!(await backendAcceptsWrites())) {
