@@ -338,7 +338,10 @@ export async function v5UpdateAccountPassword(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     },
-    { retries: 0 }
+    // The engine publishes the post-update snapshot SYNCHRONOUSLY (so an
+    // immediate re-login always sees the new password) — that legitimately
+    // takes several seconds (gzip + Telegram send). Rare, critical op.
+    { retries: 0, timeoutMs: 30_000 }
   );
   if (r.status === 0 || r.status >= 500) {
     recordWrite(false);
