@@ -33,6 +33,8 @@ import {
   RefreshCw,
   AlertCircle,
   SlidersHorizontal,
+  Bot,
+  FlaskConical,
 } from 'lucide-react';
 
 // ============ Shared bits ============
@@ -235,6 +237,15 @@ export function SettingsView({ onOpenSelfProfile }: SettingsViewProps) {
       {/* ============ Security: API key ============ */}
       <SectionCard icon={ShieldCheck} title="API key" subtitle="Programmatic access to your account">
         <ApiKeyCard />
+      </SectionCard>
+
+      {/* ============ AI Agent ============ */}
+      <SectionCard
+        icon={Bot}
+        title="AI Agent"
+        subtitle="The brain behind RGE Agent — built-in or any OpenAI-compatible API"
+      >
+        <AgentConfigCard />
       </SectionCard>
 
       {/* ============ Preferences ============ */}
@@ -1022,6 +1033,280 @@ function PreferencesCard() {
         checked={reducedMotion}
         onChange={(v) => setPreference('reducedMotion', v)}
       />
+    </div>
+  );
+}
+
+// ============ AI Agent config ============
+
+interface AgentConfigPublicClient {
+  provider: 'zai' | 'openai';
+  baseUrl?: string;
+  model?: string;
+  temperature?: number;
+  hasApiKey: boolean;
+  apiKeyMasked?: string;
+  configured: boolean;
+}
+
+function AgentConfigCard() {
+  const { toast } = useToast();
+  const [cfg, setCfg] = useState<AgentConfigPublicClient | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [provider, setProvider] = useState<'zai' | 'openai'>('zai');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState('');
+  const [temperature, setTemperature] = useState(0.6);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    { ok: true; models: string[] } | { ok: false; error: string } | null
+  >(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/agent/config');
+        const body = await res.json();
+        if (!alive) return;
+        if (body?.success && body.data) {
+          const d = body.data as AgentConfigPublicClient;
+          setCfg(d);
+          setProvider(d.provider || 'zai');
+          setBaseUrl(d.baseUrl || '');
+          setModel(d.model || '');
+          setTemperature(typeof d.temperature === 'number' ? d.temperature : 0.6);
+        }
+      } catch {
+        /* leave defaults */
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const payload: Record<string, unknown> = { provider, model, temperature };
+      if (provider === 'openai') {
+        payload.baseUrl = baseUrl.trim();
+        // Only send the key when the user typed a new one (masked echo keeps stored).
+        if (apiKey.trim()) payload.apiKey = apiKey.trim();
+        if (!apiKey.trim() && !cfg?.hasApiKey) payload.apiKey = '';
+      }
+      const res = await fetch('/api/agent/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok || !body?.success) {
+        throw new Error(body?.error?.message || 'Save failed');
+      }
+      const d = body.data as AgentConfigPublicClient;
+      setCfg(d);
+      setApiKey('');
+      toast({
+        title: 'Agent settings saved',
+        description: provider === 'zai' ? 'Using the built-in engine.' : 'Connected to your endpoint.',
+      });
+    } catch (err) {
+      toast({
+        title: 'Could not save agent settings',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      });
+      throw err;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // Save first so the test exercises the stored server-side config —
+      // that is exactly what the agent runtime will use.
+      await save();
+      const res = await fetch('/api/agent/config/test', { method: 'POST' });
+      const body = await res.json();
+      if (body?.success && body.data?.ok) {
+        setTestResult({ ok: true, models: body.data.models || [] });
+      } else {
+        setTestResult({
+          ok: false,
+          error: body?.data?.error || body?.error?.message || 'Test failed',
+        });
+      }
+    } catch (err) {
+      setTestResult({ ok: false, error: err instanceof Error ? err.message : 'Test failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-zinc-500 py-4">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading agent settings…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Provider */}
+      <div>
+        <label className={LABEL_CLS}>Provider</label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setProvider('zai')}
+            className={`px-4 py-3 rounded-xl border text-left transition-all duration-300 ${
+              provider === 'zai'
+                ? 'border-[#ef233c]/50 bg-[#ef233c]/10 text-white'
+                : 'border-white/10 bg-white/[0.02] text-zinc-400 hover:text-white hover:border-white/20'
+            }`}
+          >
+            <div className="text-sm font-manrope font-semibold flex items-center gap-2">
+              <Bot className="w-4 h-4 text-[#ef233c]" /> Built-in engine
+            </div>
+            <div className="text-[10px] text-zinc-500 mt-1">Zero setup — works out of the box</div>
+          </button>
+          <button
+            onClick={() => setProvider('openai')}
+            className={`px-4 py-3 rounded-xl border text-left transition-all duration-300 ${
+              provider === 'openai'
+                ? 'border-[#ef233c]/50 bg-[#ef233c]/10 text-white'
+                : 'border-white/10 bg-white/[0.02] text-zinc-400 hover:text-white hover:border-white/20'
+            }`}
+          >
+            <div className="text-sm font-manrope font-semibold flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-[#ef233c]" /> OpenAI-compatible
+            </div>
+            <div className="text-[10px] text-zinc-500 mt-1">Any /v1/chat/completions endpoint</div>
+          </button>
+        </div>
+      </div>
+
+      {provider === 'openai' && (
+        <>
+          <div>
+            <label className={LABEL_CLS}>Base URL</label>
+            <input
+              className={INPUT_CLS}
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://api.openai.com/v1"
+              spellCheck={false}
+            />
+          </div>
+          <div>
+            <label className={LABEL_CLS}>
+              API key{' '}
+              {cfg?.hasApiKey && (
+                <span className="text-zinc-600 normal-case tracking-normal">
+                  (stored: {cfg.apiKeyMasked})
+                </span>
+              )}
+            </label>
+            <input
+              className={INPUT_CLS}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={cfg?.hasApiKey ? 'Leave empty to keep the stored key' : 'sk-…'}
+              type="password"
+              spellCheck={false}
+            />
+          </div>
+        </>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label className={LABEL_CLS}>
+            Model {provider === 'zai' && (
+              <span className="text-zinc-600 normal-case tracking-normal">(optional)</span>
+            )}
+          </label>
+          <input
+            className={INPUT_CLS}
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder={provider === 'zai' ? 'default' : 'gpt-4o-mini'}
+            spellCheck={false}
+          />
+        </div>
+        <div>
+          <label className={LABEL_CLS}>Temperature — {temperature.toFixed(1)}</label>
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.1}
+            value={temperature}
+            onChange={(e) => setTemperature(parseFloat(e.target.value))}
+            className="w-full mt-3 accent-[#ef233c]"
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <button onClick={() => save().catch(() => {})} disabled={saving} className={PRIMARY_BTN_CLS}>
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          {saving ? 'Saving…' : 'Save agent settings'}
+        </button>
+        <button
+          onClick={testConnection}
+          disabled={testing || saving}
+          className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full border border-white/15 text-zinc-300 hover:text-white hover:border-white/30 text-sm font-medium transition-all duration-300 disabled:opacity-50 disabled:pointer-events-none"
+        >
+          {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
+          {testing ? 'Testing…' : 'Test connection'}
+        </button>
+        {cfg?.configured && (
+          <span className="text-[10px] text-emerald-400/80 font-manrope uppercase tracking-wider">
+            ● Configured
+          </span>
+        )}
+      </div>
+
+      {testResult && (
+        <div
+          className={`rounded-xl border px-4 py-3 text-xs leading-relaxed ${
+            testResult.ok
+              ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-300'
+              : 'border-red-500/25 bg-red-500/5 text-red-300'
+          }`}
+        >
+          {testResult.ok ? (
+            <>
+              <span className="font-semibold">Connection OK.</span>{' '}
+              {testResult.models.length > 0
+                ? `Available models: ${testResult.models.slice(0, 5).join(', ')}${
+                    testResult.models.length > 5 ? '…' : ''
+                  }`
+                : 'The endpoint responded.'}
+            </>
+          ) : (
+            <>
+              <span className="font-semibold">Connection failed.</span> {testResult.error}
+            </>
+          )}
+        </div>
+      )}
+
+      <p className="text-[10px] text-zinc-600 leading-relaxed">
+        The key is stored server-side with your account and is never exposed to
+        the browser. The agent uses it to stream replies, run tools and edit
+        your files.
+      </p>
     </div>
   );
 }

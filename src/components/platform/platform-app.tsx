@@ -14,11 +14,12 @@ import { AdminView } from '@/components/platform/views/admin-view';
 import { SearchView } from '@/components/platform/views/search-view';
 import { UserView } from '@/components/platform/views/user-view';
 import { SettingsView } from '@/components/platform/views/settings-view';
+import { AgentView } from '@/components/platform/views/agent-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 import { Logo } from '@/components/logo';
 import { useApplyReducedMotion } from '@/lib/preferences';
 
-export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'admin' | 'search' | 'user';
+export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'agent' | 'admin' | 'search' | 'user';
 
 export function PlatformApp() {
   const { user, status, loading, refresh } = useAuth();
@@ -180,6 +181,11 @@ export function PlatformApp() {
             <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />
           )}
           {view === 'studio' && <SpeedRampStudio onPublishClip={(f) => openUploadWithFiles('clip', [f])} />}
+          {view === 'agent' && (
+            <div className="lg:-ml-0">
+              <AgentView onOpenSettings={() => setView('settings')} />
+            </div>
+          )}
           {view === 'admin' && (user.isAdmin || (user.role && user.role !== 'user')) && <AdminView key={`admin-${uploadVersion}`} />}
         </main>
       </div>

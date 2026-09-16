@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { Logo } from '@/components/logo';
 import type { ViewKey } from './platform-app';
+import { useAgentStore } from '@/lib/agent-store';
 import {
   Home,
   Search,
@@ -20,6 +21,10 @@ import {
   ChevronRight,
   Shield,
   Settings,
+  Bot,
+  MessageSquare,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -37,6 +42,100 @@ interface SidebarProps {
   onUpload: (type: 'image' | 'clip' | 'xml') => void;
 }
 
+/**
+ * Chat history block for the RGE Agent — rendered ONLY while the agent
+ * view is active (per product decision: the section appears in the same
+ * sidebar, scoped to the agent section).
+ */
+function AgentChatHistory({ onNavigate }: { onNavigate: (v: ViewKey) => void }) {
+  const chats = useAgentStore((s) => s.chats);
+  const chatsLoading = useAgentStore((s) => s.chatsLoading);
+  const activeChatId = useAgentStore((s) => s.activeChatId);
+  const selectChat = useAgentStore((s) => s.selectChat);
+  const deleteChat = useAgentStore((s) => s.deleteChat);
+  const newChat = useAgentStore((s) => s.newChat);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  return (
+    <div className="mt-4 mb-2 rounded-2xl bg-white/[0.02] border border-white/5 p-2.5">
+      <div className="flex items-center justify-between px-1.5 pb-2">
+        <div className="flex items-center gap-1.5">
+          <MessageSquare className="w-3 h-3 text-[#ef233c]" />
+          <span className="text-[9px] font-manrope uppercase tracking-[0.2em] text-zinc-500">
+            Chat history
+          </span>
+        </div>
+        <button
+          onClick={() => {
+            newChat();
+            onNavigate('agent');
+          }}
+          className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-300"
+          title="New chat"
+        >
+          <Plus className="w-3 h-3" /> New
+        </button>
+      </div>
+      <div className="max-h-64 overflow-y-auto custom-scrollbar space-y-0.5">
+        {chatsLoading && chats.length === 0 && (
+          <div className="text-[10px] text-zinc-600 px-2 py-2">Loading…</div>
+        )}
+        {!chatsLoading && chats.length === 0 && (
+          <div className="text-[10px] text-zinc-600 px-2 py-2 leading-relaxed">
+            No chats yet — start one in the agent view.
+          </div>
+        )}
+        {chats.map((c) => (
+          <div
+            key={c.id}
+            className={`group flex items-center gap-1.5 px-2 py-1.5 rounded-xl cursor-pointer transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
+              activeChatId === c.id
+                ? 'bg-[#ef233c]/10 border border-[#ef233c]/20'
+                : 'border border-transparent hover:bg-white/[0.04]'
+            }`}
+            onClick={() => {
+              selectChat(c.id);
+              onNavigate('agent');
+            }}
+          >
+            <MessageSquare
+              className={`w-3 h-3 shrink-0 ${activeChatId === c.id ? 'text-[#ef233c]' : 'text-zinc-600'}`}
+            />
+            <span
+              className={`flex-1 min-w-0 truncate text-[11px] ${
+                activeChatId === c.id ? 'text-white' : 'text-zinc-400 group-hover:text-zinc-200'
+              }`}
+              title={c.title}
+            >
+              {c.title || 'Untitled chat'}
+            </span>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (confirmDelete === c.id) {
+                  deleteChat(c.id);
+                  setConfirmDelete(null);
+                } else {
+                  setConfirmDelete(c.id);
+                  setTimeout(() => setConfirmDelete((p) => (p === c.id ? null : p)), 2500);
+                }
+              }}
+              className={`shrink-0 p-1 rounded transition-all ${
+                confirmDelete === c.id
+                  ? 'text-red-400 opacity-100'
+                  : 'text-zinc-600 opacity-0 group-hover:opacity-100 hover:text-red-400'
+              }`}
+              title={confirmDelete === c.id ? 'Click again to delete' : 'Delete chat'}
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProps) {
   const { logout } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -45,6 +144,7 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
   const navItems: { key: ViewKey; label: string; icon: typeof Home; section?: string }[] = [
     { key: 'home', label: 'Home', icon: Home },
     { key: 'studio', label: 'Speed Ramp Studio', icon: Zap },
+    { key: 'agent', label: 'RGE Agent', icon: Bot },
     { key: 'images', label: 'Images', icon: ImageIcon, section: 'Resources' },
     { key: 'clips', label: 'Clips', icon: Film },
     { key: 'xmls', label: 'Files', icon: FileCode },
@@ -107,6 +207,8 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
 
           {/* Nav */}
           <nav className="flex-1 overflow-y-auto custom-scrollbar space-y-0.5">
+            {/* Agent chat history — visible ONLY inside the agent section */}
+            {currentView === 'agent' && <AgentChatHistory onNavigate={onNavigate} />}
             {navItems.map((item, i) => (
               <div key={item.key}>
                 {item.section && (

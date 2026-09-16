@@ -1,0 +1,135 @@
+/*
+ * Shared keyframe surfaces for the agent element library (Red Noir).
+ * Consumed through surfaces.tsx so every element shares one animation
+ * vocabulary; retheming these classes restyles every element at once.
+ */
+
+/* Zinc-500 → zinc-200 → zinc-500 sweep behind clipped text. */
+.shimmerText {
+  background-image: linear-gradient(90deg, #71717a 0%, #e4e4e7 50%, #71717a 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rge-shimmer-sweep 1.8s linear infinite;
+}
+
+@keyframes rge-shimmer-sweep {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Caret / cursor blink (streaming text, stopped runs). */
+.blink {
+  animation: rge-blink 1.06s linear infinite;
+}
+
+@keyframes rge-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Row / card entrance: fade in and rise (diff lines, tree rows, todos). */
+.rowIn {
+  animation: rge-row-in 0.3s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@keyframes rge-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Label crossfade: fade and de-blur between values (AgentStatus). */
+.labelIn {
+  animation: rge-label-in 0.45s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@keyframes rge-label-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+/* Slide-in replayed every time a label changes (ThinkingIndicator). */
+.slideIn {
+  animation: rge-slide-in 0.4s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@keyframes rge-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Per-word soft landing for streamed text. */
+.wordIn {
+  animation: rge-word-in 0.18s ease-out both;
+}
+
+@keyframes rge-word-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Reduced motion + the app's global motion kill switch settle into static states. */
+@media (prefers-reduced-motion: reduce) {
+  .shimmerText {
+    animation: none;
+    background-image: none;
+    color: #a1a1aa;
+  }
+  .blink {
+    animation: none;
+  }
+  .rowIn,
+  .labelIn,
+  .slideIn,
+  .wordIn {
+    animation: none;
+  }
+}
+
+:global(html[data-motion='off']) .shimmerText {
+  animation: none;
+  background-image: none;
+  color: #a1a1aa;
+}
+:global(html[data-motion='off']) .blink {
+  animation: none;
+}
+:global(html[data-motion='off']) .rowIn,
+:global(html[data-motion='off']) .labelIn,
+:global(html[data-motion='off']) .slideIn,
+:global(html[data-motion='off']) .wordIn {
+  animation: none;
+}

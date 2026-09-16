@@ -1,0 +1,88 @@
+/*
+ * Orb — compact lattice activity indicator (S1: a wavefront radiating from the
+ * centre). The geometry is tuned on a 28px stage; --orb-k (set inline from the
+ * size prop) scales it to the requested size.
+ */
+
+.root {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pill {
+  padding: 0.375rem 0.625rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.glyph {
+  position: relative;
+  display: inline-block;
+  flex: none;
+}
+
+.lattice {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 16px; /* (N-1)×PITCH + one cell */
+  height: 16px;
+  transform: scale(var(--orb-k, 1));
+  transform-origin: center;
+}
+
+.cell {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: #fafafa;
+  opacity: 0;
+  animation: rge-orb-cell 2400ms cubic-bezier(0.23, 1, 0.32, 1) infinite;
+}
+
+.text {
+  font-size: 0.75rem;
+  line-height: 1;
+  color: #d4d4d8;
+  white-space: nowrap;
+}
+
+/* Each cell gathers from a position swirled one way around the centre,
+ * swells to its slot, then releases to the mirror rotation — so the cycle
+ * keeps swirling the same direction instead of rewinding. */
+@keyframes rge-orb-cell {
+  0% {
+    opacity: 0;
+    transform: translate(var(--orb-ax, 0), var(--orb-ay, 0)) scale(0.3);
+  }
+  30% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+  65% {
+    opacity: 0.85;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--orb-bx, 0), var(--orb-by, 0)) scale(0.3);
+  }
+}
+
+/* Reduced motion + the app's global kill switch: settle into a static frame. */
+@media (prefers-reduced-motion: reduce) {
+  .cell {
+    animation: none;
+    opacity: 0.6;
+    transform: none;
+  }
+}
+
+:global(html[data-motion='off']) .cell {
+  animation: none;
+  opacity: 0.6;
+  transform: none;
+}
