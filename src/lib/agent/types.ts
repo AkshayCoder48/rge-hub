@@ -18,10 +18,12 @@ export interface AgentConfig {
   provider: AgentProvider;
   /** OpenAI-compatible base URL (provider 'openai' only), e.g. https://api.openai.com/v1 */
   baseUrl?: string;
-  /** Provider API key (provider 'openai' only). NEVER returned raw to the client. */
+  /** Provider API key (provider 'openai' only). Optional — keyless providers are supported. NEVER returned raw to the client. */
   apiKey?: string;
   /** Model id. Empty → provider default. */
   model?: string;
+  /** Models discovered from GET {baseUrl}/models (provider 'openai' only) — powers the model picker. */
+  models?: string[];
   /** Sampling temperature (0–2). */
   temperature?: number;
   maxTokens?: number;
@@ -33,6 +35,7 @@ export interface AgentConfigPublic {
   provider: AgentProvider;
   baseUrl?: string;
   model?: string;
+  models?: string[];
   temperature?: number;
   maxTokens?: number;
   hasApiKey: boolean;
@@ -103,7 +106,15 @@ export interface ToolsSegment {
   calls: AgentToolCall[];
 }
 
-export type AssistantSegment = TextSegment | ToolsSegment;
+/** A structured UI block the agent emitted mid-run (emit_ui tool). */
+export interface UiSegment {
+  kind: 'ui';
+  id: string;
+  /** Snapshot of the block state at commit time — renders on reload. */
+  block: import('./ui-protocol').UiBlockState;
+}
+
+export type AssistantSegment = TextSegment | ToolsSegment | UiSegment;
 
 export interface AgentToolCall {
   id: string;

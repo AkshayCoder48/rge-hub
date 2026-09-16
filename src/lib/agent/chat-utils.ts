@@ -43,15 +43,17 @@ export function capMessage(msg: AgentMessage): AgentMessage {
       .map((seg) =>
         seg.kind === 'text'
           ? { ...seg, text: truncate(seg.text, MAX_CONTENT_CHARS) }
-          : {
-              ...seg,
-              calls: seg.calls.map((c) => ({
-                ...c,
-                result: truncate(c.result, MAX_TOOL_RESULT_CHARS),
-              })),
-            }
+          : seg.kind === 'tools'
+            ? {
+                ...seg,
+                calls: seg.calls.map((c) => ({
+                  ...c,
+                  result: truncate(c.result, MAX_TOOL_RESULT_CHARS),
+                })),
+              }
+            : { ...seg }
       )
-      .filter((seg) => (seg.kind === 'text' ? seg.text.length > 0 : seg.calls.length > 0));
+      .filter((seg) => (seg.kind === 'text' ? seg.text.length > 0 : seg.kind === 'tools' ? seg.calls.length > 0 : true));
   }
   return capped;
 }

@@ -30,60 +30,24 @@
  */
 
 import type { AgentConfig } from './types';
+import type { ToolSchema, ProviderMessage, ParsedToolCall, StreamChatEvent } from './protocol';
+import { normalizeOpenAiBaseUrl } from './protocol';
+
+// The protocol layer (types + URL normalization + provider-message building)
+// lives in protocol.ts so the BROWSER agent engine can share it without ever
+// importing this server-only module (z-ai-web-dev-sdk). Re-exported here for
+// the existing call sites.
+export {
+  normalizeOpenAiBaseUrl,
+  buildProviderMessages,
+} from './protocol';
+export type { ToolSchema, ProviderMessage, ParsedToolCall, StreamChatEvent } from './protocol';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────────────────────────────────────
 
-/** OpenAI function-tool schema (also understood by GLM endpoints). */
-export interface ToolSchema {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-  };
-}
-
-/** Provider-neutral chat message (superset; serialized per provider). */
-export interface ProviderMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
-  /** Openai-style tool calls (assistant messages). */
-  toolCalls?: { id: string; name: string; arguments: string }[];
-  toolCallId?: string;
-}
-
-export interface ParsedToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
-export type StreamChatEvent =
-  | { type: 'token'; text: string }
-  | { type: 'thinking'; text: string }
-  | { type: 'tool_calls'; calls: ParsedToolCall[] }
-  | { type: 'finish'; reason: string };
-
 const CALL_TIMEOUT_MS = 55_000;
-
-// ────────────────────────────────────────────────────────────────────────────
-// Base URL normalization (openai)
-// ────────────────────────────────────────────────────────────────────────────
-
-/**
- * Normalize an OpenAI-compatible base URL: strip trailing slashes, append
- * /v1 when the URL has no version suffix (e.g. https://api.openai.com →
- * https://api.openai.com/v1). URLs that already end with /v1 (or contain
- * one, like /v1/…) pass through untouched.
- */
-export function normalizeOpenAiBaseUrl(raw: string): string {
-  let base = String(raw || '').trim().replace(/\/+$/, '');
-  if (!base) return '';
-  if (/\/v\d+(\/|$)/.test(base)) return base;
-  return `${base}/v1`;
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // SSE body → StreamChatEvent (shared by both providers)
@@ -324,8 +288,8 @@ async function* streamOpenAi(
   tools: ToolSchema[]
 ): AsyncGenerator<StreamChatEvent> {
   const base = normalizeOpenAiBaseUrl(cfg.baseUrl || '');
-  if (!base || !cfg.apiKey) {
-    throw new Error('OpenAI-compatible provider needs a base URL and an API key (Settings → Agent).');
+  if (!base) {
+    throw new Error('OpenAI-compatible provider needs a base URL (Settings → Agent).');
   }
 
   const body: Record<string, unknown> = {
@@ -358,14 +322,15 @@ async function* streamOpenAi(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS);
+  // Keyless providers are supported — the Authorization header only rides
+  // the request when the user configured a key.
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
   let res: Response;
   try {
     res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${cfg.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -545,62 +510,6 @@ export function streamChat(
   return streamZai(cfg, messages, tools);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Conversation serialization (persisted AgentMessage[] → provider messages)
-// ────────────────────────────────────────────────────────────────────────────
+// buildProviderMessages + normalizeOpenAiBaseUrl moved to protocol.ts
+// (client-safe) — re-exported at the top of this module.
 
-/**
- * Build the provider message array for one chat turn.
- *
- * openai: native — assistant tool_calls + role:'tool' results.
- * zai:    SDK ChatMessage only allows system|user|assistant strings, so the
- *         same history is serialized: tool calls become an assistant note
- *         and results become a user message labelled [tool results].
- */
-export function buildProviderMessages(
-  provider: 'zai' | 'openai',
-  history: {
-    role: 'user' | 'assistant';
-    content: string;
-    toolCalls?: { id: string; name: string; args: Record<string, unknown>; status: string; result?: string }[];
-  }[],
-  systemPrompt: string
-): ProviderMessage[] {
-  const out: ProviderMessage[] = [{ role: 'system', content: systemPrompt }];
-
-  for (const m of history) {
-    if (m.role === 'user') {
-      out.push({ role: 'user', content: m.content });
-      continue;
-    }
-    // assistant
-    if (!m.toolCalls?.length) {
-      out.push({ role: 'assistant', content: m.content || '' });
-      continue;
-    }
-    if (provider === 'openai') {
-      out.push({
-        role: 'assistant',
-        content: m.content || '',
-        toolCalls: m.toolCalls.map((c) => ({
-          id: c.id,
-          name: c.name,
-          arguments: JSON.stringify(c.args ?? {}),
-        })),
-      });
-      for (const c of m.toolCalls) {
-        out.push({ role: 'tool', toolCallId: c.id, content: c.result || '(no result)' });
-      }
-    } else {
-      const callNote = m.toolCalls
-        .map((c) => `- ${c.name}(${JSON.stringify(c.args ?? {})}) → ${c.status}: ${String(c.result || '').slice(0, 2000)}`)
-        .join('\n');
-      if (m.content) out.push({ role: 'assistant', content: m.content });
-      out.push({
-        role: 'user',
-        content: `[tool results]\n${callNote}\n(Continue with the next tool call or your final answer.)`,
-      });
-    }
-  }
-  return out;
-}

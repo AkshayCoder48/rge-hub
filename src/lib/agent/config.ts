@@ -31,6 +31,13 @@ export function sanitizeConfig(cfg: AgentConfig): AgentConfig {
   if (!Number.isFinite(maxTokens) || maxTokens < 256) maxTokens = DEFAULT_MAX_TOKENS;
   if (maxTokens > 32768) maxTokens = 32768;
   const model = typeof cfg.model === 'string' ? cfg.model.trim().slice(0, 120) : '';
+  const models =
+    Array.isArray(cfg.models)
+      ? cfg.models
+          .filter((m): m is string => typeof m === 'string' && m.trim().length > 0)
+          .map((m) => m.trim().slice(0, 120))
+          .slice(0, 500)
+      : undefined;
   const baseUrl =
     typeof cfg.baseUrl === 'string' && cfg.baseUrl.trim()
       ? cfg.baseUrl.trim().replace(/\/+$/, '').slice(0, 300)
@@ -42,6 +49,7 @@ export function sanitizeConfig(cfg: AgentConfig): AgentConfig {
     baseUrl: provider === 'openai' ? baseUrl : undefined,
     apiKey: provider === 'openai' ? apiKey : undefined,
     model,
+    ...(models && models.length > 0 ? { models } : {}),
     temperature,
     maxTokens,
     updatedAt: typeof cfg.updatedAt === 'string' ? cfg.updatedAt : undefined,
@@ -55,10 +63,12 @@ export function maskApiKey(key: string | undefined): string | undefined {
   return `${key.slice(0, 4)}…${key.slice(-4)}`;
 }
 
-/** True when the config can actually run a chat (used for honest errors). */
+/** True when the config can actually run a chat (used for honest errors).
+ * Keyless OpenAI-compatible providers are valid — only the base URL is
+ * required (the key rides requests when present). */
 export function isConfigured(cfg: AgentConfig): boolean {
   if (cfg.provider === 'openai') {
-    return !!cfg.baseUrl && /^https?:\/\//.test(cfg.baseUrl) && !!cfg.apiKey;
+    return !!cfg.baseUrl && /^https?:\/\//.test(cfg.baseUrl);
   }
   // 'zai' uses the sandbox-provisioned z-ai-web-dev-sdk credentials.
   return true;
@@ -72,6 +82,7 @@ export function toPublicConfig(cfg: AgentConfig): AgentConfigPublic {
     model: cfg.model,
     temperature: cfg.temperature,
     maxTokens: cfg.maxTokens,
+    ...(cfg.models && cfg.models.length > 0 ? { models: cfg.models } : {}),
     hasApiKey: !!cfg.apiKey,
     apiKeyMasked: maskApiKey(cfg.apiKey),
     updatedAt: cfg.updatedAt,

@@ -1064,13 +1064,64 @@ function AgentConfigCard() {
     { ok: true; models: string[] } | { ok: false; error: string } | null
   >(null);
 
+  // Model auto-discovery state.
+  const [models, setModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [manualModel, setManualModel] = useState(false);
+  const baseUrlTouched = useRef(false);
+
   useEffect(() => {
     const d = storedConfig;
     setProvider(d.provider || 'zai');
     setBaseUrl(d.baseUrl || '');
     setModel(d.model || '');
     setTemperature(typeof d.temperature === 'number' ? d.temperature : 0.6);
+    setModels(Array.isArray(d.models) ? d.models : []);
+    setManualModel(false);
   }, [storedConfig]);
+
+  /** POST /api/agent/models — discover models from GET {base}/models. */
+  const fetchModels = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const base = baseUrl.trim();
+      if (!base || !/^https?:\/\//.test(base)) {
+        if (!opts?.silent) setModelError('Enter the provider base URL first (e.g. https://api.example.com/v1).');
+        return;
+      }
+      setFetchingModels(true);
+      setModelError(null);
+      try {
+        const res = await fetch('/api/agent/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseUrl: base, apiKey: apiKey.trim() || storedConfig.apiKey || '' }),
+        });
+        const body = await res.json().catch(() => null);
+        if (!res.ok || !body?.success || !body.data?.ok) {
+          const err = body?.data?.error || body?.error?.message || `Discovery failed (HTTP ${res.status}).`;
+          setModelError(err);
+          setModels([]);
+          return;
+        }
+        // Discovered models live in LOCAL state — they persist when the user
+        // saves (calling saveConfig here would flip the form back to the
+        // stored provider via the storedConfig sync effect).
+        const list: string[] = Array.isArray(body.data.models) ? body.data.models : [];
+        setModels(list);
+        // keep the selected model only when it still exists; otherwise pick the first
+        if (list.length > 0) {
+          if (!model || !list.includes(model)) setModel(list[0]);
+          setManualModel(false);
+        }
+      } catch (err) {
+        setModelError(err instanceof Error ? err.message : 'Discovery failed.');
+      } finally {
+        setFetchingModels(false);
+      }
+    },
+    [baseUrl, apiKey, storedConfig.apiKey, model]
+  );
 
   const save = async () => {
     setSaving(true);
@@ -1081,6 +1132,7 @@ function AgentConfigCard() {
         // Only update the key when the user typed a new one (masked echo keeps stored).
         if (apiKey.trim()) payload.apiKey = apiKey.trim();
         if (!apiKey.trim() && !storedConfig.apiKey) payload.apiKey = '';
+        if (models.length > 0) payload.models = models;
       }
       saveConfig(payload);
       setApiKey('');
@@ -1174,17 +1226,50 @@ function AgentConfigCard() {
         <>
           <div>
             <label className={LABEL_CLS}>Base URL</label>
-            <input
-              className={INPUT_CLS}
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.openai.com/v1"
-              spellCheck={false}
-            />
+            <div className="flex items-center gap-2">
+              <input
+                className={INPUT_CLS}
+                value={baseUrl}
+                onChange={(e) => {
+                  baseUrlTouched.current = true;
+                  setBaseUrl(e.target.value);
+                  setModelError(null);
+                }}
+                onBlur={() => {
+                  // Refresh models when the base URL changes (spec: refresh on change).
+                  if (baseUrlTouched.current && baseUrl.trim() && /^https?:\/\//.test(baseUrl.trim())) {
+                    void fetchModels({ silent: true });
+                  }
+                  baseUrlTouched.current = false;
+                }}
+                placeholder="https://api.openai.com/v1"
+                spellCheck={false}
+              />
+              <button
+                onClick={() => void fetchModels()}
+                disabled={fetchingModels || !baseUrl.trim()}
+                className="shrink-0 inline-flex items-center gap-1.5 px-4 py-3 rounded-xl border border-white/15 text-zinc-300 hover:text-white hover:border-white/30 text-xs font-medium transition-all duration-300 disabled:opacity-50 disabled:pointer-events-none whitespace-nowrap"
+                title="Fetch the model list from {base URL}/models"
+              >
+                {fetchingModels ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                {fetchingModels ? 'Fetching…' : 'Fetch models'}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[10px] text-zinc-600">
+              The models endpoint is derived automatically — trailing slashes and /v1 are
+              normalized (never /v1/v1/models).
+            </p>
           </div>
           <div>
             <label className={LABEL_CLS}>
               API key{' '}
+              <span className="text-zinc-600 normal-case tracking-normal">
+                (optional)
+              </span>{' '}
               {storedConfig.apiKey && (
                 <span className="text-zinc-600 normal-case tracking-normal">
                   (saved: {maskApiKey(storedConfig.apiKey)})
@@ -1195,7 +1280,7 @@ function AgentConfigCard() {
               className={INPUT_CLS}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={storedConfig.apiKey ? 'Leave empty to keep the saved key' : 'sk-…'}
+              placeholder={storedConfig.apiKey ? 'Leave empty to keep the saved key' : 'sk-… (leave empty for keyless providers)'}
               type="password"
               spellCheck={false}
             />
@@ -1203,20 +1288,57 @@ function AgentConfigCard() {
         </>
       )}
 
+      {/* Model picker */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className={LABEL_CLS}>
-            Model {provider === 'zai' && (
+            Model{' '}
+            {provider === 'zai' ? (
               <span className="text-zinc-600 normal-case tracking-normal">(optional)</span>
-            )}
+            ) : models.length > 0 && !manualModel ? (
+              <span className="text-zinc-600 normal-case tracking-normal">({models.length} discovered)</span>
+            ) : null}
           </label>
-          <input
-            className={INPUT_CLS}
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder={provider === 'zai' ? 'default' : 'gpt-4o-mini'}
-            spellCheck={false}
-          />
+          {provider === 'openai' && models.length > 0 && !manualModel ? (
+            <div className="space-y-1.5">
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className={INPUT_CLS + ' appearance-none cursor-pointer'}
+                aria-label="Model"
+              >
+                {models.map((m) => (
+                  <option key={m} value={m} className="bg-zinc-950">
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => setManualModel(true)}
+                className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                Enter a model id manually instead
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <input
+                className={INPUT_CLS}
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={provider === 'zai' ? 'default' : models.length > 0 ? 'model id from the list' : 'gpt-4o-mini (or fetch models above)'}
+                spellCheck={false}
+              />
+              {provider === 'openai' && models.length > 0 && (
+                <button
+                  onClick={() => setManualModel(false)}
+                  className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  Back to the discovered list
+                </button>
+              )}
+            </div>
+          )}
         </div>
         <div>
           <label className={LABEL_CLS}>Temperature — {temperature.toFixed(1)}</label>
@@ -1231,6 +1353,19 @@ function AgentConfigCard() {
           />
         </div>
       </div>
+
+      {/* Discovery feedback */}
+      {provider === 'openai' && modelError && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 px-4 py-3 text-xs leading-relaxed text-amber-300">
+          <span className="font-semibold">Could not fetch models.</span> {modelError}
+        </div>
+      )}
+      {provider === 'openai' && !modelError && models.length > 0 && !fetchingModels && (
+        <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-4 py-3 text-xs leading-relaxed text-emerald-300">
+          <span className="font-semibold">{models.length} model{models.length === 1 ? '' : 's'} discovered.</span>{' '}
+          Pick one above — the list refreshes whenever the base URL changes.
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <button onClick={() => save().catch(() => {})} disabled={saving} className={PRIMARY_BTN_CLS}>
@@ -1280,7 +1415,8 @@ function AgentConfigCard() {
       <p className="text-[10px] text-zinc-600 leading-relaxed">
         Chats and this configuration are stored in YOUR browser only (local
         storage) — they are never saved on the server. The agent uses your key
-        to stream replies, run tools and edit your files.
+        to stream replies, run tools and edit your files; the key is never
+        rendered in chats, tool output or errors.
       </p>
     </div>
   );
