@@ -22,14 +22,21 @@ import {
   updateResource,
   deleteResourceVerified,
   blindDeleteResource,
-  tombstoneAdd,
+  purgeLegacyTombstones,
   type Resource,
   type ResourceType,
   type XmlSource,
 } from '@/lib/resources';
 import { deleteFile, backendAcceptsWrites } from '@/lib/onyxbase';
+import { deleteImageBytes } from '@/lib/image-bytes';
 import { isGetsharedUrl, pingGetsharedFile } from '@/lib/getshared';
 import { isQuaxUrl, pingQuaxFile } from '@/lib/quax';
+
+// Deletes honestly propagate before responding (engine-side in-request
+// snapshot attempts) — allow the full budget so a delete is never cut off
+// mid-propagation by the platform default.
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
 
 function isResourceType(v: string | null): v is ResourceType {
   return v === 'image' || v === 'clip' || v === 'xml';
@@ -300,14 +307,15 @@ export async function DELETE(
     const elevatedDel = await isElevated(session);
     const resource = await locateResource(id, type, xmlSource, elevatedDel);
     if (!resource) {
-      // IDEMPOTENT delete: locate missed, but the row may still exist
-      // (backend read flaps) — so issue REAL blind deletes in every
-      // collection first, then tombstone. Success is reported, but the
-      // DELETEs genuinely go out; nothing is UI-only.
+      // IDEMPOTENT delete: V5 reads are authoritative, so a locate miss
+      // means the row is already gone — but the caller may carry a stale or
+      // wrong type param, so REAL idempotent deletes still go out to every
+      // resource collection (each a no-op when absent). Nothing is UI-only.
       await blindDeleteResource(id);
-      await tombstoneAdd(id);
       const { invalidateResources } = await import('@/lib/cache');
       invalidateResources();
+      // Fire-and-forget: sweep legacy V4 tombstone debris (bounded, throttled).
+      void purgeLegacyTombstones().catch(() => {});
       return NextResponse.json({ ok: true, alreadyDeleted: true });
     }
 
@@ -321,12 +329,18 @@ export async function DELETE(
 
     // Delete the OnyxBase file (best-effort; also delete thumbnail if present).
     // ext: records hold no backend bytes (URL-only) — nothing to delete.
+    // V5 deletes the blob permanently; a V5 404 falls through to the legacy
+    // V4 store delete so pre-V5 files are really removed too.
     if (resource.fileId && !resource.fileId.startsWith('ext:')) {
       try {
         await deleteFile(resource.fileId);
       } catch (e) {
         console.warn('[resources/delete] failed to delete file', resource.fileId, e);
       }
+      // Also purge the lossless byte-store shards (rb:*) for this fileKey —
+      // legacy-era images parked original bytes in KV; without this they
+      // would leak in KV + the Telegram snapshot forever. Idempotent.
+      void deleteImageBytes(resource.fileId).catch(() => {});
     }
     if (resource.thumbnailFileId) {
       try {
@@ -334,12 +348,17 @@ export async function DELETE(
       } catch (e) {
         console.warn('[resources/delete] failed to delete thumbnail', resource.thumbnailFileId, e);
       }
+      void deleteImageBytes(resource.thumbnailFileId).catch(() => {});
     }
 
-    // Deterministic delete: tombstone (spread write = instant + durable
-    // hide) + backend record deletes (parallel, idempotent). Always
-    // succeeds from the user's perspective — ghosts can no longer error.
+    // V5-native deterministic delete: ONE authoritative row delete on the
+    // exact collection (durable SQLite soft-delete + Telegram mirror op +
+    // ~1-2s kv-delta convergence to every engine instance). Idempotent —
+    // ghosts can never error, deleted ids can never resurrect.
     const result = await deleteResourceVerified(id, resource.type, resource.xmlSource);
+
+    // Fire-and-forget: sweep legacy V4 tombstone debris (bounded, throttled).
+    void purgeLegacyTombstones().catch(() => {});
 
     // Invalidate server-side cache
     const { invalidateResources } = await import('@/lib/cache');

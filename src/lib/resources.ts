@@ -10,7 +10,7 @@
  * - admin_xmls:      admin XML resource records keyed by resource ID (privileged)
  */
 
-import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvGetQuorum, kvSetSpread, kvDeleteSpread, kvDeleteIdempotent, stripExportPrefix } from './onyxbase';
+import { kvSet, kvSetMulti, kvGet, kvDelete, kvExport, kvList, kvDeleteIdempotent, kvDeleteDeterministic, stripExportPrefix } from './onyxbase';
 import { ONYXBASE_COLLECTIONS, ONYXBASE_V5_ENABLED } from './onyxbase';
 import { getCached, setCached, setCachedNonEmpty, invalidate } from './cache';
 
@@ -276,47 +276,42 @@ function collectionForType(type: ResourceType, xmlSource?: XmlSource) {
   return 'default';
 }
 
-// ============ Tombstones (deterministic deletes over a flaky backend) ============
+// ============ Deletes (V5-native) ============
 //
-// The backend flaps (same key: 200 then 404 seconds apart) and LISTs lag or
-// miss keys (proven by direct probe). Deletes are therefore made
-// DETERMINISTIC with immutable per-id tombstone keys `tomb:{id}` (plain
-// SETs, no read-modify-write). Every listing quorum-checks each id's tomb
-// via point-reads (never via tomb-LISTs — those flap too) — a deleted id
-// stays hidden even if its record lingers somewhere. No ghosts, no stale
-// counts, no delete errors.
-
-// NOTE: tombs + index live in the pre-registered `categories` collection
-// (otherwise unused). Ad-hoc collections (rge_*) proved non-durable:
-// keys vanished within ~25 min, while pre-registered collections persist.
-const TOMBSTONE_COLLECTION = ONYXBASE_COLLECTIONS.CATEGORIES;
-
-function tombKeyFor(id: string): string {
-  return `tomb:${id}`;
-}
+// V5 is AUTHORITATIVE SQLite: a kvDelete is a durable row soft-delete that
+// (a) commits transactionally, (b) mirrors a DELETE op to the Telegram
+// snapshot, and (c) ships on the ~1-2s kv-delta channel so every engine
+// instance converges on the same `deleted_at` row state. The V4 machinery —
+// tombstone keys (`tomb:{id}` written into the hijacked `categories`
+// collection), 3-5x spread copies, quorum read-backs, blind deletes across
+// every collection — existed only to fight V4 replica divergence and is
+// gone. A deleted id cannot resurrect, so listings no longer tomb-check.
 
 /**
- * Hide an id from every listing instantly (deleted or ghost).
- * Spread-write + quorum-confirm (2 tries): an unconfirmed tomb is worthless
- * against flapping reads, so verify at least one copy is readable.
+ * Legacy V4 debris cleanup: `tomb:*` keys in the old hijacked `categories`
+ * collection are pure garbage now that nothing reads them. Bounded sweep
+ * (≤100 keys/run), rate-limited to once per process per 10 min. Never
+ * throws — fire-and-forget from the delete route.
  */
-export async function tombstoneAdd(id: string): Promise<void> {
+const TOMB_PURGE_MIN_INTERVAL_MS = 10 * 60 * 1000;
+let lastTombPurgeAt = 0;
+export async function purgeLegacyTombstones(): Promise<number> {
+  const now = Date.now();
+  if (now - lastTombPurgeAt < TOMB_PURGE_MIN_INTERVAL_MS) return 0;
+  lastTombPurgeAt = now;
   try {
-    for (let i = 0; i < 2; i++) {
-      await kvSetSpread(tombKeyFor(id), { id, at: Date.now() }, TOMBSTONE_COLLECTION, 3);
-      const back = await kvGetQuorum(tombKeyFor(id), TOMBSTONE_COLLECTION, 6);
-      if (back) return;
+    const keys = (await kvList(ONYXBASE_COLLECTIONS.CATEGORIES)).filter((k) => k.startsWith('tomb:'));
+    if (keys.length === 0) return 0;
+    let purged = 0;
+    for (const k of keys.slice(0, 100)) {
+      if (await kvDeleteIdempotent(k, ONYXBASE_COLLECTIONS.CATEGORIES)) purged++;
     }
+    if (keys.length > 100) lastTombPurgeAt = 0; // debris remains — allow the next delete to resume the sweep
+    return purged;
   } catch {
-    // non-fatal
+    return 0;
   }
 }
-
-// NOTE (2026-09-13): an append-only membership index lived here. Removed —
-// the backend evaporates untouched KV within minutes (proven: keys in 3/3
-// collections 404 six minutes after write), so server-side indexes/tombs
-// are session-scoped mitigations at best. Membership = backend LIST union
-// (+10-min client overlay for instant UX). Durability needs a real store.
 
 export async function createResource(resource: Resource): Promise<boolean> {
   const collection = collectionForType(resource.type, resource.xmlSource);
@@ -360,8 +355,8 @@ export async function createResourceVerified(
   for (let i = 0; i < maxAttempts; i++) {
     if (i > 0 && Date.now() - t0 > RETRY_DEADLINE_MS) break;
     attempts += 1;
-    // Spread write (copies across replicas) + quorum read-back (any replica).
-    wrote = await kvSetSpread(resource.id, resource, collection, 3);
+    // One authoritative write (V5 SQLite commit; V4 single durable SET).
+    wrote = await kvSet(resource.id, resource, collection);
     if (wrote) {
       if (ONYXBASE_V5_ENABLED) {
         // V5: the commit response IS the proof — an authoritative SQLite
@@ -369,9 +364,8 @@ export async function createResourceVerified(
         // unconverged instance and wrongly downgrade to the 202 path).
         return { ok: true, verified: true, attempts, ms: Date.now() - t0 };
       }
-      // V4: single-round read-back — first-hit-wins usually answers <1s; the
-      // 6-read double round was for the backend's spray era (long gone).
-      const back = await kvGetQuorum<Resource>(resource.id, collection, 3);
+      // V4-only read-back: single point read.
+      const back = await kvGet<Resource>(resource.id, collection);
       if (back && back.id === resource.id) {
         return { ok: true, verified: true, attempts, ms: Date.now() - t0 };
       }
@@ -388,11 +382,12 @@ export async function createResourceVerified(
 }
 
 /**
- * Deterministic delete over divergent replicas: tombstone (spread 3× —
- * instant + durable hide) → record deletes (5× parallel, idempotent).
- * Read-back confirmation is meaningless when replicas disagree; the
- * tombstone is what guarantees the id never resurfaces. Never throws —
- * ghosts count as deleted.
+ * V5-native delete: ONE authoritative row delete on the exact collection.
+ * The engine soft-deletes the row (deleted_at), mirrors a DELETE op to the
+ * Telegram snapshot, and ships the kv-delta so every instance hides the id
+ * within ~1-2s. Idempotent: deleting an already-deleted id is a no-op that
+ * still reports success — ghosts can never error. No tombstone keys, no
+ * spread copies, no quorum read-back; those were V4-era workarounds.
  */
 export async function deleteResourceVerified(
   id: string,
@@ -400,62 +395,30 @@ export async function deleteResourceVerified(
   xmlSource?: XmlSource
 ): Promise<{ deleted: boolean; confirmed: boolean }> {
   const collection = collectionForType(type, xmlSource);
-  await tombstoneAdd(id);
-  const deleted = await kvDeleteSpread(id, collection, 5);
-  // Piggyback: prune day-old tombs so the DB doesn't accumulate them.
-  void pruneOldTombs(24 * 60 * 60 * 1000);
+  // Deterministic delete: the engine tombstones the row (resurrection-proof
+  // upsert) and ships its kv-delta in-request; if the delta cannot ship
+  // (Telegram flood) the hub retries once — possibly on a healthier engine
+  // instance — so a deleted id cannot ghost.
+  const deleted = await kvDeleteDeterministic(id, collection);
   return { deleted, confirmed: deleted };
 }
 
 /**
- * Best-effort REAL deletes for an id across every resource collection.
- * Used when locate-by-type misses (record may still exist — backend flaps),
- * so "already gone" never skips the actual DELETE calls. Idempotent.
+ * Idempotent deletes across every resource collection — used when
+ * locate-by-type misses (stale/wrong/absent type param; V5 reads are
+ * authoritative, so a genuine miss means the row is already gone). One
+ * delete per collection; each is a no-op when absent. Never throws.
  */
 export async function blindDeleteResource(id: string): Promise<void> {
   try {
     await Promise.all([
-      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.IMAGES, 3),
-      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.CLIPS, 3),
-      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.COMMUNITY_XMLS, 3),
-      kvDeleteSpread(id, ONYXBASE_COLLECTIONS.ADMIN_XMLS, 3),
+      kvDeleteIdempotent(id, ONYXBASE_COLLECTIONS.IMAGES),
+      kvDeleteIdempotent(id, ONYXBASE_COLLECTIONS.CLIPS),
+      kvDeleteIdempotent(id, ONYXBASE_COLLECTIONS.COMMUNITY_XMLS),
+      kvDeleteIdempotent(id, ONYXBASE_COLLECTIONS.ADMIN_XMLS),
     ]);
   } catch {
     // best-effort
-  }
-}
-
-/**
- * Prune tombstones older than `olderThanMs`. Tombs only need to outlive
- * backend convergence (minutes–hours); day-old tombs are dead weight.
- * ONLY touches `tomb:*` keys in the tomb collection. Returns pruned count.
- */
-export async function pruneOldTombs(olderThanMs: number): Promise<number> {
-  try {
-    const [a, b] = await Promise.all([
-      kvList(TOMBSTONE_COLLECTION),
-      kvList(TOMBSTONE_COLLECTION),
-    ]);
-    const keys = [...new Set([...a, ...b])].filter((k) => k.startsWith('tomb:'));
-    if (keys.length === 0) return 0;
-    const now = Date.now();
-    let pruned = 0;
-    await Promise.all(
-      keys.map(async (k) => {
-        try {
-          const v = await kvGet<{ at?: number }>(k, TOMBSTONE_COLLECTION);
-          if (v && typeof v.at === 'number' && now - v.at > olderThanMs) {
-            await kvDeleteSpread(k, TOMBSTONE_COLLECTION, 3);
-            pruned++;
-          }
-        } catch {
-          // skip — next sweep retries
-        }
-      })
-    );
-    return pruned;
-  } catch {
-    return 0;
   }
 }
 
@@ -471,7 +434,7 @@ export async function verifyResource(
   xmlSource?: XmlSource
 ): Promise<{ verified: boolean; resource: Resource | null; attempts: number }> {
   const collection = collectionForType(type, xmlSource);
-  const value = await kvGetQuorum<Resource>(id, collection, 5);
+  const value = await kvGet<Resource>(id, collection);
   return { verified: value !== null && !!value.id, resource: value, attempts: 1 };
 }
 
@@ -499,13 +462,13 @@ export async function getResourceAny(
 
 export async function getResource(id: string, type: ResourceType, xmlSource?: XmlSource): Promise<Resource | null> {
   const collection = collectionForType(type, xmlSource);
-  return kvGetQuorum<Resource>(id, collection, 3);
+  return kvGet<Resource>(id, collection);
 }
 
 export async function updateResource(resource: Resource): Promise<boolean> {
   resource.updatedAt = new Date().toISOString();
   const collection = collectionForType(resource.type, resource.xmlSource);
-  return kvSetSpread(resource.id, resource, collection, 3);
+  return kvSet(resource.id, resource, collection);
 }
 
 export async function deleteResource(id: string, type: ResourceType, xmlSource?: XmlSource): Promise<boolean> {
@@ -516,35 +479,20 @@ export async function deleteResource(id: string, type: ResourceType, xmlSource?:
 export async function listResources(type: ResourceType, xmlSource?: XmlSource): Promise<Resource[]> {
   const collection = collectionForType(type, xmlSource);
 
-  // WAVE 1 — membership: union of 2 parallel backend LISTs (a single
-  // LIST can miss keys). Fresh uploads appear here within seconds; the
-  // client's 10-min overlay covers the gap instantly. No sleeps anywhere.
-  const [listA, listB] = await Promise.all([
-    kvList(collection),
-    kvList(collection),
-  ]);
-  const ids = [...new Set([...listA, ...listB])];
+  // V5-native membership: ONE authoritative LIST (SQLite scan; deleted rows
+  // are already excluded engine-side via deleted_at — no tombstone checks,
+  // no LIST unions, no quorum fan-out).
+  const ids = await kvList(collection);
   if (ids.length === 0) return [];
 
-  // WAVE 2 — per id, in parallel chunks: quorum record read + quorum
-  // tombstone check. A tombstoned id is hidden even if its record lingers
-  // on some replica (tomb checks are quorum point-reads, never LISTs —
-  // tomb-LISTs proved just as divergent as everything else).
-  const CHUNK = 20;
+  // Records: one point-read per id, in parallel chunks (kvGet never throws).
+  const CHUNK = 40;
   const found: Resource[] = [];
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     const rows = await Promise.all(
       chunk.map(async (id) => {
-        const [rec, tomb] = await Promise.all([
-          kvGetQuorum<Resource>(id, collection, 6),
-          // Tomb check: full 2-round quorum. Single-round checks proved
-          // flaky (parallel reads aren't independent), and a missed tomb =
-          // a resurrected ghost. Clean misses cost ~5s (backend 404s are
-          // slow) — the price of correct deletes on this backend.
-          kvGetQuorum(tombKeyFor(id), TOMBSTONE_COLLECTION, 6),
-        ]);
-        if (tomb) return null;
+        const rec = await kvGet<Resource>(id, collection);
         return rec && rec.id ? rec : null;
       })
     );
@@ -556,13 +504,14 @@ export async function listResources(type: ResourceType, xmlSource?: XmlSource): 
 }
 
 /**
- * FAST listing (PRD §14, §20–24 of the perf spec): ONE collection export
- * + ONE (cached) tombstone export, filtered locally — replaces the
- * 2 LISTs + 12N point-reads fan-out that made listing pages take minutes.
+ * FAST listing (PRD §14, §20–24 of the perf spec): ONE collection export,
+ * filtered locally. V5 makes this a live-rows-only SQLite scan (deleted
+ * rows are excluded engine-side via deleted_at) — no tombstone export, no
+ * per-id tomb checks.
  *
  * Server-cached for 20s (non-empty results only, same policy as /all).
- * Writes invalidate via invalidateResources(). Falls back to the proven
- * quorum path when the export call fails.
+ * Writes invalidate via invalidateResources(). Falls back to the point-read
+ * path when the export call fails.
  */
 export async function listResourcesFast(type: ResourceType, xmlSource?: XmlSource): Promise<Resource[]> {
   const collection = collectionForType(type, xmlSource);
@@ -570,25 +519,15 @@ export async function listResourcesFast(type: ResourceType, xmlSource?: XmlSourc
   const cached = getCached<Resource[]>(cacheKey);
   if (cached) return cached;
 
-  const [exported, tombs] = await Promise.all([
-    kvExport(collection).catch(() => null),
-    kvExport(TOMBSTONE_COLLECTION).catch(() => ({}) as Record<string, unknown>),
-  ]);
+  const exported = await kvExport(collection).catch(() => null);
   if (!exported) {
-    // Export failed (backend flap) — the old path still works.
+    // Export failed — the point-read path still works.
     return listResources(type, xmlSource);
   }
-
-  const tombSet = new Set(
-    Object.keys(tombs)
-      .map((k) => stripExportPrefix(k, TOMBSTONE_COLLECTION))
-      .filter((k) => k.startsWith('tomb:'))
-  );
 
   const out: Resource[] = [];
   for (const rawKey of Object.keys(exported)) {
     const key = stripExportPrefix(rawKey, collection);
-    if (tombSet.has(`tomb:${key}`)) continue; // deleted — stays hidden
     const rec = exported[rawKey] as Resource | null;
     if (rec && rec.id && rec.id === key) out.push(rec);
   }

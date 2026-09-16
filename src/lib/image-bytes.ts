@@ -18,7 +18,7 @@
  */
 
 import crypto from 'crypto';
-import { kvSet, kvSetVerified, kvGetQuorum, ONYXBASE_COLLECTIONS } from './onyxbase';
+import { kvSet, kvSetVerified, kvGetQuorum, kvDeleteIdempotent, ONYXBASE_COLLECTIONS } from './onyxbase';
 
 const BYTES_COLLECTION =
   (ONYXBASE_COLLECTIONS as Record<string, string>).RESOURCE_BYTES || 'resource_bytes';
@@ -160,5 +160,38 @@ export async function loadImageBytes(
   } catch (err) {
     console.warn('[image-bytes] load failed:', err);
     return null;
+  }
+}
+
+/**
+ * Permanently delete a fileKey's byte-store records (manifest + all shards).
+ * Called when a resource is deleted so the lossless bytes don't leak in KV +
+ * the Telegram snapshot forever. Idempotent — deleting absent keys is a
+ * no-op. Manifest-first for the shard count; without a manifest it probes a
+ * bounded window of shard slots (legacy partial stores) and always removes
+ * the manifest key itself.
+ */
+export async function deleteImageBytes(fileKey: string): Promise<number> {
+  try {
+    const manifest = await kvGetQuorum<BytesManifest>(manifestKey(fileKey), BYTES_COLLECTION, 3);
+    const shardCount =
+      manifest && manifest.v === 1 && manifest.shards && manifest.shards <= 64
+        ? manifest.shards
+        : 16; // bounded legacy probe (10MB cap / 2MB shards ≈ max 7 real shards)
+    let deleted = 0;
+    const jobs: Array<Promise<boolean>> = [
+      kvDeleteIdempotent(manifestKey(fileKey), BYTES_COLLECTION),
+    ];
+    for (let i = 0; i < shardCount; i++) {
+      jobs.push(kvDeleteIdempotent(shardKey(fileKey, i), BYTES_COLLECTION));
+    }
+    const results = await Promise.all(jobs);
+    results.forEach((ok) => {
+      if (ok) deleted++;
+    });
+    return deleted;
+  } catch (err) {
+    console.warn('[image-bytes] delete failed:', err);
+    return 0;
   }
 }

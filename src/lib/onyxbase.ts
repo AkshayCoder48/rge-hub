@@ -469,7 +469,7 @@ export async function v5PutAuthOpMarker(
  * Upload bytes through the V5 blob pipeline:
  *   POST /api/v5/blobs                      → {blobId, chunkSize, …}
  *   PUT  /api/v5/blobs/:id/data?chunk=0&total=1  (raw bytes, Content-Type)
- *   POST /api/v5/blobs/:id/finalize         → {status:'ready'|'finalizing'}
+ *   POST /api/v5/blobs/:id {action:'finalize'} → {status:'ready'|'finalizing'}
  *
  * fileId = blobId; the public URL is ${ONYXBASE_V5_URL}/f/{blobId}
  * (V4-compatible route shape). When finalize answers 'finalizing' the
@@ -539,10 +539,16 @@ export async function v5UploadBlob(
   }
 
   // --- finalize: local commit + async durability mirror ---
+  // Engine contract: POST /api/v5/blobs/:id with {action:'finalize'} (there
+  // is no /finalize subroute — the old URL 404'd every single-PUT upload).
   const tFinal = Date.now();
   const fin = await v5Request(
-    `/api/v5/blobs/${encodeURIComponent(blobId)}/finalize`,
-    { method: 'POST' },
+    `/api/v5/blobs/${encodeURIComponent(blobId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'finalize' }),
+    },
     { retries: 1 } // re-finalize of a ready blob answers ready again
   );
   const finP = fin.status === 200 ? v5Payload(fin.body) : null;
@@ -837,6 +843,39 @@ export async function kvDelete(key: string, collection: string = 'default'): Pro
     recordWrite(false);
     return false;
   }
+}
+
+/**
+ * DETERMINISTIC delete with propagation-aware retry (V5): the engine commits
+ * the tombstone locally and ships a KB-sized kv-delta in-request; when the
+ * delta cannot ship (e.g. Telegram flood) it answers { propagated: false }.
+ * One retry re-attempts propagation — often landing on a healthier engine
+ * instance. 404 counts as success (already gone). Used by the resource
+ * delete path where a lost tombstone means a resurrected ghost.
+ */
+export async function kvDeleteDeterministic(
+  key: string,
+  collection: string = 'default'
+): Promise<boolean> {
+  if (!V5_ENABLED) return kvDeleteIdempotent(key, collection);
+  const attempt = async (): Promise<{ ok: boolean; propagated: boolean }> => {
+    const r = await v5Request(
+      `/api/v5/kv/${encodeURIComponent(key)}?collection=${encodeURIComponent(collection)}`,
+      { method: 'DELETE' },
+      { retries: 1 }
+    );
+    if (r.status === 404) return { ok: true, propagated: true };
+    if (r.status !== 200) return { ok: false, propagated: false };
+    const p = v5Payload(r.body);
+    return { ok: r.body?.ok !== false, propagated: !p || p.propagated !== false };
+  };
+  let res = await attempt();
+  if (res.ok && !res.propagated) {
+    await new Promise((r) => setTimeout(r, 1500));
+    res = await attempt();
+  }
+  recordWrite(res.ok);
+  return res.ok;
 }
 
 /**
@@ -1214,25 +1253,71 @@ export async function getFileMeta(fileId: string): Promise<OnyxFileMeta | null> 
 }
 
 /**
+ * One-shot legacy (V4-era) file delete: DELETE /v1/files/:id on the V4 store.
+ * Files uploaded before V5 still hold bytes + manifests in the OLD data
+ * store — a V5 blob 404 does not remove them. 200 (deleted now) and 404
+ * (already gone) are both success — deletes are idempotent.
+ */
+async function deleteLegacyV4File(fileId: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${ONYXBASE_BASE_URL}/v1/files/${encodeURIComponent(fileId)}`,
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${ONYXBASE_API_KEY}` },
+      },
+      15000
+    );
+    return res.ok || res.status === 404;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Delete a file.
  * V5: DELETE /api/v5/blobs/:id — a REAL permanent delete (Telegram part
  * documents + manifests + part records + dedup keys + row tombstone, shipped
  * on the fast blobs channel so every instance 404s it within seconds).
- * 404 (already gone) counts as success — deletes are idempotent.
+ * 404 (not a V5 blob) falls through to the legacy V4 delete so pre-V5 files
+ * are really removed from the OLD store too. Deletes are idempotent either
+ * way — "already gone" counts as success.
  */
 export async function deleteFile(fileId: string): Promise<boolean> {
   if (V5_ENABLED) {
-    const r = await v5Request(
-      `/api/v5/blobs/${encodeURIComponent(fileId)}`,
-      { method: 'DELETE' },
-      { retries: 1, timeoutMs: 30_000 } // doc deletes can fan out over many parts
-    );
-    const ok = r.status === 200 || r.status === 404;
-    if (!ok) {
-      console.warn(`[OnyxBaseV5] deleteFile HTTP ${r.status} for blob:`, fileId, r.netError || '');
+    const attemptV5 = async () =>
+      v5Request(
+        `/api/v5/blobs/${encodeURIComponent(fileId)}`,
+        { method: 'DELETE' },
+        { retries: 1, timeoutMs: 30_000 } // doc deletes can fan out over many parts
+      );
+    let r = await attemptV5();
+    if (r.status === 404) {
+      // A blob finalized seconds ago may still be converging to this engine
+      // instance (blobs snapshot channel). One short wait + retry before
+      // concluding "not a V5 blob" — a premature conclusion would leak the
+      // file forever (the V4 fallback also 404s on a V5 blob id).
+      await new Promise((res) => setTimeout(res, 2500));
+      r = await attemptV5();
     }
-    recordWrite(ok);
-    return ok;
+    if (r.status === 200) {
+      recordWrite(true);
+      return true;
+    }
+    if (r.status === 404) {
+      // Not a V5 blob — either already gone, or a V4-era file whose bytes
+      // + manifest still live in the OLD store. Issue ONE legacy delete so
+      // pre-V5 files are truly removed; its 404 also counts as success.
+      const legacy = await deleteLegacyV4File(fileId);
+      if (!legacy) {
+        console.warn(`[OnyxBaseV5] deleteFile: blob 404 and legacy V4 delete failed for:`, fileId);
+      }
+      recordWrite(legacy);
+      return legacy;
+    }
+    console.warn(`[OnyxBaseV5] deleteFile HTTP ${r.status} for blob:`, fileId, r.netError || '');
+    recordWrite(false);
+    return false;
   }
   try {
     const res = await fetchWithTimeout(
@@ -1602,6 +1687,15 @@ export async function uploadFileResult(
   mimeType: string,
   label?: string
 ): Promise<UploadFileResult> {
+  // V5: upload through the V5 blob pipeline (authoritative SQLite + Telegram
+  // parts, blb_* ids). New files MUST live in V5 storage so their deletes
+  // are pure V5 too — the V4 multipart store below is only the
+  // V5-disabled fallback, and remains reachable solely for legacy files.
+  if (V5_ENABLED) {
+    void label; // V4 dashboard concept; V5 blob meta carries the real filename
+    return v5UploadBlob(file, fileName, mimeType);
+  }
+
   const timings = emptyTimings();
   const t0 = Date.now();
 
