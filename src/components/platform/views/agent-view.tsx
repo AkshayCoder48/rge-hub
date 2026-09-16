@@ -50,23 +50,17 @@ import type { AgentMessage, AssistantSegment } from '@/lib/agent/types';
 import type { ContainerFileNode } from '@/lib/agent/container-types';
 import { getContainer, sanitizeWsId } from '@/lib/agent/container-client';
 import { UIBlockHost, UiBlockActionsContext } from '@/components/agent/ui-blocks';
+import { Markdown } from '@/components/agent/markdown';
 import {
-  ToolCall,
-  CodeDiff,
-  FileTree,
   AgentPlan,
   AgentStatus,
-  ArtifactCard,
   TodoList,
-  StreamingText,
   StoppedRun,
   ThinkingReasoning,
   GenerationLoader,
   ShimmerLabel,
   Collapse,
   Orb,
-  field,
-  mono,
 } from '@/components/agent/elements';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -165,63 +159,41 @@ function toolDisplay(tc: { name: string; args: Record<string, unknown> }): { lab
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Tool call block — one ToolCall element + rich meta below it when present.
+// Tool activity row — ONE plain line per call: status icon + "Ran <tool_name>".
+// No specialized per-tool cards, no request/result disclosures — the details
+// live in the structured UI blocks (terminal/diff/table) the agent emits.
 // ────────────────────────────────────────────────────────────────────────────
 
-function ToolCallBlock({
-  tc,
-  defaultOpen,
-}: {
-  tc: { id: string; name: string; args: Record<string, unknown>; status: string; result?: string; meta?: any };
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen ?? false);
-  const { label, query } = toolDisplay(tc);
-  const running = tc.status === 'running';
+function ActivityRow({ tc }: { tc: ActivityCall }) {
+  if (tc.status === 'running') {
+    return (
+      <div className="flex items-center gap-2 px-2 py-1.5" data-slot="tool-row" data-status="running">
+        <Loader2 aria-hidden className="h-3.5 w-3.5 shrink-0 animate-spin text-[#ef233c]" />
+        <span className="min-w-0 truncate font-mono text-[12.5px] text-zinc-200">
+          Ran <span className="text-zinc-400">{tc.name}</span>
+        </span>
+      </div>
+    );
+  }
+  if (tc.status === 'error') {
+    return (
+      <div className="flex items-center gap-2 px-2 py-1.5" data-slot="tool-row" data-status="error" title={tc.result?.slice(0, 300) || 'failed'}>
+        <X aria-hidden className="h-3.5 w-3.5 shrink-0 text-red-400" />
+        <span className="min-w-0 truncate font-mono text-[12.5px] text-red-300">
+          Ran <span className="text-red-200/80">{tc.name}</span>
+        </span>
+        <span className="ml-auto shrink-0 text-[10px] font-manrope uppercase tracking-[0.12em] text-red-400/80">
+          failed
+        </span>
+      </div>
+    );
+  }
   return (
-    <div className="space-y-2">
-      <ToolCall
-        label={label}
-        activeLabel={`${label}…`}
-        query={query}
-        request={JSON.stringify(tc.args, null, 2)}
-        result={tc.result ?? (running ? '' : '(no output)')}
-        running={running}
-        open={open}
-        onOpenChange={setOpen}
-      />
-      {tc.status === 'error' && (
-        <div className="pl-2 -mt-1 flex items-center gap-1.5 text-[10px] font-manrope uppercase tracking-[0.15em] text-red-400">
-          <X className="h-3 w-3" aria-hidden /> failed
-        </div>
-      )}
-      {tc.meta?.diff && (
-        <CodeDiff
-          filename={tc.meta.diff.filename}
-          additions={tc.meta.diff.additions}
-          deletions={tc.meta.diff.deletions}
-          lines={tc.meta.diff.lines}
-          cycle={1}
-          className="max-w-none"
-        />
-      )}
-      {tc.meta?.tree && tc.meta.tree.length > 0 && (
-        <FileTree
-          nodes={tc.meta.tree}
-          visibleCount={tc.meta.tree.length}
-          totalAdditions={tc.meta.tree.reduce((s: number, n: any) => s + (n.additions || 0), 0)}
-          totalDeletions={tc.meta.tree.reduce((s: number, n: any) => s + (n.deletions || 0), 0)}
-          className="max-w-none"
-        />
-      )}
-      {tc.meta?.artifact && (
-        <ArtifactCard
-          title={tc.meta.artifact.title}
-          meta={tc.meta.artifact.meta || 'Workspace file'}
-          generating={tc.meta.artifact.generating}
-          words={tc.meta.artifact.words || 0}
-        />
-      )}
+    <div className="flex items-center gap-2 px-2 py-1.5" data-slot="tool-row" data-status="ok" title={tc.result?.slice(0, 300) || undefined}>
+      <Check aria-hidden className="h-3.5 w-3.5 shrink-0 text-emerald-400/90" />
+      <span className="min-w-0 truncate font-mono text-[12.5px] text-zinc-300">
+        Ran <span className="text-zinc-500">{tc.name}</span>
+      </span>
     </div>
   );
 }
@@ -287,7 +259,7 @@ function ToolActivityBlock({
         ) : (
           <span className="min-w-0 truncate text-sm font-manrope text-zinc-200">Agent activity</span>
         )}
-        <span className={`${field} ${mono} shrink-0 px-1.5 py-0.5 text-[11px] text-zinc-400`}>
+        <span className="ml-2 shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">
           {calls.length} {calls.length === 1 ? 'call' : 'calls'}
         </span>
         <span className="ml-auto shrink-0 flex items-center">
@@ -302,9 +274,9 @@ function ToolActivityBlock({
       </button>
 
       <Collapse open={open}>
-        <div className="space-y-1.5 border-t border-white/5 px-2 pt-2 pb-2">
+        <div className="space-y-0.5 border-t border-white/5 px-2 pt-2 pb-2">
           {calls.map((tc) => (
-            <ToolCallBlock key={tc.id} tc={tc} />
+            <ActivityRow key={tc.id} tc={tc} />
           ))}
         </div>
       </Collapse>
@@ -358,14 +330,7 @@ function AssistantMessage({ message }: { message: AgentMessage }) {
       )}
       {segments.map((seg) => {
         if (seg.kind === 'text') {
-          return seg.text ? (
-            <p
-              key={seg.id}
-              className="text-sm text-zinc-100 whitespace-pre-wrap break-words leading-relaxed"
-            >
-              {seg.text}
-            </p>
-          ) : null;
+          return seg.text ? <Markdown key={seg.id} text={seg.text} /> : null;
         }
         if (seg.kind === 'tools') {
           return <ToolActivityBlock key={seg.id} calls={seg.calls} streaming={false} />;
@@ -381,14 +346,16 @@ function AssistantMessage({ message }: { message: AgentMessage }) {
 // ────────────────────────────────────────────────────────────────────────────
 
 function TextSegmentView({ text, active }: { text: string; active: boolean }) {
-  const words = text.split(' ').filter(Boolean);
   return (
-    <StreamingText
-      segments={[{ text }]}
-      count={words.length}
-      streaming={active}
-      className="max-w-none text-sm leading-relaxed"
-    />
+    <div>
+      <Markdown text={text} />
+      {active && (
+        <span
+          aria-hidden
+          className="ml-0.5 inline-block h-4 w-[7px] translate-y-0.5 animate-pulse rounded-[1px] bg-[#ef233c]"
+        />
+      )}
+    </div>
   );
 }
 

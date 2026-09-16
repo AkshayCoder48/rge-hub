@@ -7,6 +7,7 @@
  */
 
 import { RENDERER_DOCS } from '@/components/agent/ui-blocks';
+import { execLanguageDoc } from '@/lib/agent/runtimes';
 
 export interface PromptWorkspaceSnapshot {
   /** Compact tree lines, e.g. "- hub/pack.zip (2.4 MB)". */
@@ -55,10 +56,22 @@ export function buildSystemPrompt(tree: PromptWorkspaceSnapshot | null): string 
     '- Fetch hub resources with hub_fetch_resource (they land in hub/), then inspect them (workspace_read / workspace_file_info / workspace_extract_zip / execute_code).',
     '- XML work: parse, search, edit attributes/values, add/remove nodes, pretty-print, validate and compare via workspace_edit (find/replace with diff) or execute_code (Python xml.etree.ElementTree gives full power).',
     '- ZIP work: workspace_extract_zip to unpack into extracted/, edit the files, then workspace_create_zip into output/ for the result.',
-    '- Run real code with execute_code (Python) or run_terminal (mini shell: python file.py, ls, cat, grep, unzip, zip -r, find, wc, tree …). stdout/stderr streams live to the user — print progress.',
+    '- Run real code with execute_code (25 languages — see below) or run_terminal (mini shell: python file.py, ls, cat, grep, unzip, zip -r, find, wc, tree …). stdout/stderr streams live to the user — print progress.',
     '- Put finished artifacts in output/ and PRESENT them: emit a "generated-file" or "download" UI block for each result.',
     '- Finish XML edits with a "diff" block and validation with a "validation" block. Never claim success without checking (re-read / re-validate).',
     '- Be concise in text — the structured UI blocks carry the details. Short lead-ins explaining what you are doing, then act.',
+    '',
+    '## Code execution — 25 languages',
+    'execute_code language tiers:',
+    execLanguageDoc(),
+    '- Default to python (local container: persistent workspace, full file access, live output, best for XML/ZIP/data jobs).',
+    '- node/javascript/bash run on the server sandbox: pass workspace paths via files[] — the script reads/writes them and changed files sync back into the workspace automatically. require() has the node stdlib plus adm-zip, archiver and date-fns.',
+    '- Remote languages are for self-contained snippets (no workspace files, no stdin persistence): compile can take seconds — say so and keep snippets small.',
+    '',
+    '## Text vs UI blocks — never duplicate',
+    '- Your text renders as rich markdown (bold, lists, tables, code) — but the structured UI blocks are the stars.',
+    '- When you render data as an emit_ui block (table, file-list, zip-contents…), do NOT also list the same rows in the chat text. One short lead-in sentence, then the block.',
+    '- Example: after hub_list_resources → emit a table block with the resources and write only "Here is what you have — 2 XML files:" in text. NEVER repeat the full inventory in both places.',
     '',
     '## Structured UI (emit_ui)',
     'Turn useful output into polished realtime UI with the emit_ui tool. Blocks update IN PLACE by stable id — reuse the same id with operation "append" to grow a table/checklist/terminal while you work, "update" to patch fields, "complete" when finished. Emit blocks DURING the run (as data arrives), never only at the end.',

@@ -134,13 +134,13 @@ export function applyUiOperation(
 }
 
 /** Cap a block's payload before persisting (protect localStorage size). */
-export function capBlockData(data: Record<string, unknown>, maxItems = 300): Record<string, unknown> {
+export function capBlockData(data: Record<string, unknown>, maxItems = 200): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value) && value.length > maxItems) {
       out[key] = value.slice(0, maxItems);
-    } else if (typeof value === 'string' && value.length > 60_000) {
-      out[key] = `${value.slice(0, 60_000)}\n… (truncated)`;
+    } else if (typeof value === 'string' && value.length > 20_000) {
+      out[key] = `${value.slice(0, 20_000)}\n… (truncated)`;
     } else {
       out[key] = value;
     }

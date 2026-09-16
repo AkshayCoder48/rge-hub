@@ -14,7 +14,7 @@
 'use client';
 
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
+import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import type {
   AgentChat,
   AgentMessage,
@@ -41,6 +41,70 @@ import {
 import { defaultAgentConfig, sanitizeConfig, isConfigured } from '@/lib/agent/config';
 
 const MAX_ROUNDS = 16;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Quota-safe localStorage — if the persisted state exceeds the storage quota
+// (UI blocks make chats big), progressively drop the OLDEST chats (and, as a
+// last resort, trim messages) instead of silently losing the newest turn.
+// This is why UI blocks used to vanish after a reload: the quota write failed
+// and the previous snapshot was restored instead.
+// ────────────────────────────────────────────────────────────────────────────
+
+function createAgentStorage(): PersistStorage<PersistedAgentState> {
+  const write = (name: string, value: StorageValue<PersistedAgentState>): boolean => {
+    try {
+      localStorage.setItem(name, JSON.stringify(value));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const withChats = (
+    value: StorageValue<PersistedAgentState>,
+    chats: AgentChat[]
+  ): StorageValue<PersistedAgentState> => ({ ...value, state: { ...value.state, chats } });
+
+  return {
+    getItem: (name) => {
+      try {
+        const raw = localStorage.getItem(name);
+        return raw ? (JSON.parse(raw) as StorageValue<PersistedAgentState>) : null;
+      } catch {
+        return null;
+      }
+    },
+    setItem: (name, value) => {
+      if (write(name, value)) return;
+      const chats = [...(value.state.chats ?? [])].sort(
+        (a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
+      );
+      // 1) Drop the oldest chats one at a time (keep at least the newest).
+      for (let drop = 1; drop < chats.length; drop++) {
+        if (write(name, withChats(value, chats.slice(drop)))) {
+          console.warn(`[agent-storage] quota exceeded — dropped ${drop} oldest chat(s).`);
+          return;
+        }
+      }
+      // 2) Last resort: newest 3 chats, last 30 messages each.
+      const slim = chats
+        .slice(-3)
+        .map((c) => ({ ...c, messages: c.messages.slice(-30) }));
+      if (write(name, withChats(value, slim))) {
+        console.warn('[agent-storage] quota exceeded — kept only the 3 newest chats (trimmed).');
+        return;
+      }
+      console.warn('[agent-storage] unable to persist agent chats — storage quota exhausted.');
+    },
+    removeItem: (name) => {
+      try {
+        localStorage.removeItem(name);
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Live streaming state (kept OUT of persisted messages while a turn runs)
@@ -517,7 +581,7 @@ export const useAgentStore = create<AgentStore>()(
     {
       name: 'rge-agent-storage',
       version: 1,
-      storage: createJSONStorage(() => localStorage),
+      storage: createAgentStorage(),
       // SSR-safe: the initial client render matches the server (empty), then
       // PlatformApp's mount effect calls useAgentStore.persist.rehydrate().
       skipHydration: true,
@@ -553,6 +617,9 @@ interface RunHistoryItem {
 
 function toolLabel(name: string): string {
   const map: Record<string, string> = {
+    set_plan: 'set plan',
+    write_todos: 'track todos',
+    emit_ui: 'render UI',
     hub_list_resources: 'hub resources',
     hub_fetch_resource: 'fetch resource',
     workspace_list: 'list workspace',
@@ -571,6 +638,62 @@ function toolLabel(name: string): string {
     speedramp_clip: 'speed-ramp clip',
   };
   return map[name] || name.replace(/_/g, ' ');
+}
+
+/** Tool calls for the provider history — derived from the persisted timeline
+ * (segments) when present, else the legacy flattened `toolCalls` field. */
+function deriveToolCalls(m: AgentMessage): AgentToolCall[] {
+  if (m.segments?.some((s) => s.kind === 'tools')) {
+    const calls: AgentToolCall[] = [];
+    for (const seg of m.segments) if (seg.kind === 'tools') calls.push(...seg.calls);
+    return calls;
+  }
+  return m.toolCalls ?? [];
+}
+
+/** Build the assistant message for the CURRENT live state (used for both the
+ * per-round incremental commit and the final commit — same id, so the final
+ * write cleanly replaces the partial one). */
+function buildAssistantMessage(live: LiveTurn, id: string): AgentMessage {
+  const finishedCalls = liveToolCalls(live);
+  const segments: AssistantSegment[] = live.timeline
+    .filter((s) =>
+      s.kind === 'text' ? s.text.trim().length > 0 : s.kind === 'tools' ? s.calls.length > 0 : !!live.blocks[s.blockId]
+    )
+    .map((s) =>
+      s.kind === 'text'
+        ? { kind: 'text' as const, id: s.id, text: s.text }
+        : s.kind === 'tools'
+          ? {
+              kind: 'tools' as const,
+              id: s.id,
+              calls: s.calls.map<AgentToolCall>((c) => ({
+                id: c.id,
+                name: c.name,
+                args: c.args,
+                status: c.status === 'error' ? ('error' as const) : ('ok' as const),
+                result: c.result,
+              })),
+            }
+          : {
+              kind: 'ui' as const,
+              id: s.id,
+              block: { ...live.blocks[s.blockId], data: capBlockData(live.blocks[s.blockId].data) },
+            }
+    );
+  return {
+    id,
+    role: 'assistant',
+    content: liveTextContent(live),
+    reasoning: live.reasoning || undefined,
+    ...(finishedCalls.length > 0 ? { toolCalls: finishedCalls.map<AgentToolCall>((c) => ({
+      id: c.id, name: c.name, args: c.args,
+      status: c.status === 'error' ? ('error' as const) : ('ok' as const),
+      result: c.result,
+    })) } : {}),
+    ...(segments.length > 0 ? { segments } : {}),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 /** Snapshot the workspace for the system prompt (never throws). */
@@ -715,21 +838,37 @@ async function runAgentTurn(
       patchLive({ todos: items.map((it, i) => ({ id: `t${i}`, text: it.text, status: it.status })) }),
   };
 
-  const runHistory: RunHistoryItem[] = history.map((m) => ({
-    role: m.role,
-    content: m.content,
-    ...(m.toolCalls && m.toolCalls.length
-      ? {
-          toolCalls: m.toolCalls.map((c) => ({
-            id: c.id,
-            name: c.name,
-            args: c.args,
-            status: c.status,
-            result: c.result,
-          })),
-        }
-      : {}),
-  }));
+  const runHistory: RunHistoryItem[] = history.map((m) => {
+    const toolCalls = deriveToolCalls(m);
+    return {
+      role: m.role,
+      content: m.content,
+      ...(toolCalls.length
+        ? {
+            toolCalls: toolCalls.map((c) => ({
+              id: c.id,
+              name: c.name,
+              args: c.args,
+              status: c.status,
+              result: c.result,
+            })),
+          }
+        : {}),
+    };
+  });
+
+  // The assistant message id is fixed for the whole turn — partial (per-round)
+  // commits and the final commit reuse it, so the final write REPLACES the
+  // partial instead of duplicating it.
+  const assistantMsgId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  /** Commit the CURRENT live timeline mid-run (after each round) — a reload
+   *  mid-run keeps everything streamed so far instead of losing the turn. */
+  const commitPartial = () => {
+    const live = get().live;
+    if (!live || live.timeline.length === 0) return;
+    commitToChat([...history, buildAssistantMessage(live, assistantMsgId)]);
+  };
 
   let rounds = 0;
   let hadError = false;
@@ -793,31 +932,11 @@ async function runAgentTurn(
       if (calls.length === 0) break;
 
       // ── Execute every tool call this round, in order ──────────────────
+      // (emit_ui included — every call gets a plain "Ran <tool>" activity row.)
       const executed: NonNullable<RunHistoryItem['toolCalls']> = [];
       for (const call of calls) {
         if (!runToken.current) break;
         const args = safeParseArgs(call.arguments);
-
-        // emit_ui is a pure UI operation — no activity row, instant result.
-        if (call.name === 'emit_ui') {
-          applyEmit({
-            uiType: String(args.uiType || ''),
-            id: String(args.id || ''),
-            operation: (args.operation as EmitUiArgs['operation']) || 'create',
-            ...(typeof args.title === 'string' && args.title ? { title: args.title } : {}),
-            ...(args.data && typeof args.data === 'object' && !Array.isArray(args.data)
-              ? { data: args.data as Record<string, unknown> }
-              : {}),
-          });
-          executed.push({
-            id: call.id,
-            name: 'emit_ui',
-            args,
-            status: 'ok',
-            result: `UI block '${String(args.id || '')}' (${String(args.uiType || '')}) updated.`,
-          });
-          continue;
-        }
 
         toolStart(call.id, call.name, args);
         patchLive({ statusState: 'working', statusLabel: `Running ${toolLabel(call.name)}` });
@@ -837,6 +956,9 @@ async function runAgentTurn(
       // Record this round on the working history (assistant + results) —
       // the next round sees the tool results.
       runHistory.push({ role: 'assistant', content: roundText, toolCalls: executed });
+
+      // Checkpoint: persist everything streamed so far (crash/reload safety).
+      commitPartial();
     }
   } catch (err) {
     const aborted = err instanceof DOMException && err.name === 'AbortError';
@@ -850,69 +972,9 @@ async function runAgentTurn(
   // The timeline is preserved 1:1 (segments incl. UI blocks), plus flattened
   // views (content/toolCalls) for the provider-history contract.
   const finished = get().live;
-  const finishedCalls = finished ? liveToolCalls(finished) : [];
-  const uiCalls = finished
-    ? Object.values(finished.blocks).map<AgentToolCall>((b) => ({
-        id: `ui_${b.id}`,
-        name: 'emit_ui',
-        args: { uiType: b.uiType, id: b.id, operation: 'create' },
-        status: 'ok',
-        result: `UI block '${b.id}' (${b.uiType}).`,
-      }))
-    : [];
 
   if (finished && (finished.timeline.length > 0 || finished.error)) {
-    const segments: AssistantSegment[] = finished.timeline
-      .filter((s) =>
-        s.kind === 'text' ? s.text.trim().length > 0 : s.kind === 'tools' ? s.calls.length > 0 : !!finished.blocks[s.blockId]
-      )
-      .map((s) =>
-        s.kind === 'text'
-          ? { kind: 'text' as const, id: s.id, text: s.text }
-          : s.kind === 'tools'
-            ? {
-                kind: 'tools' as const,
-                id: s.id,
-                calls: s.calls.map<AgentToolCall>((c) => ({
-                  id: c.id,
-                  name: c.name,
-                  args: c.args,
-                  status: c.status === 'error' ? ('error' as const) : ('ok' as const),
-                  result: c.result,
-                  meta: c.meta,
-                })),
-              }
-            : {
-                kind: 'ui' as const,
-                id: s.id,
-                block: { ...finished.blocks[s.blockId], data: capBlockData(finished.blocks[s.blockId].data) },
-              }
-      );
-
-    const assistantMsg: AgentMessage = {
-      id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      role: 'assistant',
-      content: liveTextContent(finished),
-      reasoning: finished.reasoning || undefined,
-      ...(finishedCalls.length + uiCalls.length > 0
-        ? {
-            toolCalls: [
-              ...finishedCalls.map<AgentToolCall>((c) => ({
-                id: c.id,
-                name: c.name,
-                args: c.args,
-                status: c.status === 'error' ? ('error' as const) : ('ok' as const),
-                result: c.result,
-                meta: c.meta,
-              })),
-              ...uiCalls,
-            ],
-          }
-        : {}),
-      ...(segments.length > 0 ? { segments } : {}),
-      createdAt: new Date().toISOString(),
-    };
-    commitToChat([...history, assistantMsg]);
+    commitToChat([...history, buildAssistantMessage(finished, assistantMsgId)]);
   } else {
     commitToChat(history);
   }

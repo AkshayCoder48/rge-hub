@@ -19,6 +19,7 @@ import type { ToolResultMeta, TreeNode } from '@/lib/agent/types';
 import type { EmitUiArgs, UiBlockState } from '@/lib/agent/ui-protocol';
 import { getContainer } from '@/lib/agent/container-client';
 import { UI_BLOCK_TYPES } from '@/components/agent/ui-blocks';
+import { EXEC_LANGUAGE_NAMES, EXEC_RUNTIMES, normalizeExecLanguage } from '@/lib/agent/runtimes';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Context + result
@@ -300,13 +301,23 @@ export const CLIENT_TOOLS: ToolSchema[] = [
     function: {
       name: 'execute_code',
       description:
-        'Execute Python 3.12 code (stdlib: xml.etree.ElementTree, zipfile, json, re, os, shutil…) in the web container with cwd = workspace root. stdout/stderr STREAM LIVE to the user — print progress. Avoid infinite loops (not interruptible). Use for XML parsing/generation, batch edits, validation, comparisons.',
+        'Execute code in one of 25 languages. python runs in the browser web container (persistent workspace, live stdout — best for XML/ZIP work). node/javascript and bash run on the server sandbox: pass workspace paths in files[] and changed files sync back automatically (require() has node stdlib + adm-zip, archiver, date-fns). 20 more languages (c, cpp, csharp, go, java, kotlin, swift, ruby, rust, zig, dart, lua, julia, perl, haskell, crystal, d, fortran, pascal, ocaml, fsharp) run on a remote executor — ephemeral snippets only, no workspace files, compiles can take seconds. stdout/stderr stream live to the user — print progress.',
       parameters: {
         type: 'object',
         properties: {
-          language: { type: 'string', enum: ['python'], description: 'Execution language (python)' },
-          code: { type: 'string', description: 'Python source to run' },
-          file: { type: 'string', description: 'Alternative: run this .py file from the workspace' },
+          language: {
+            type: 'string',
+            enum: EXEC_LANGUAGE_NAMES,
+            description: 'Execution language (default python)',
+          },
+          code: { type: 'string', description: 'Source code to run' },
+          file: { type: 'string', description: 'Alternative: run this file from the workspace' },
+          files: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'node/bash only: extra workspace files to stage next to the script (it reads/writes them; changes sync back)',
+          },
+          stdin: { type: 'string', description: 'Optional stdin for the program' },
         },
       },
     },
@@ -475,32 +486,50 @@ async function runWithTerminalBlock(
     data: { ...(command ? { command } : {}), lines: [] },
   });
   const lines: string[] = [];
-  const push = (text: string, stderr: boolean) => {
-    for (const ln of String(text).split('\n')) {
-      if (ln === '') continue;
-      lines.push(stderr ? ln : ln);
+  const MAX_LINES = 200;
+  const MAX_LINE = 2000;
+  let pending = '';
+  const flush = () => {
+    if (pending.trim()) {
+      lines.push(pending.length > MAX_LINE ? `${pending.slice(0, MAX_LINE)}…` : pending);
     }
+    pending = '';
+  };
+  const emit = () => {
     if (lines.length > 0) {
       ctx.emitUi({
         uiType: 'terminal',
         id: blockId,
         operation: 'replace',
-        data: { ...(command ? { command } : {}), lines: lines.slice(-400) },
+        data: { ...(command ? { command } : {}), lines: lines.slice(-MAX_LINES) },
       });
     }
   };
+  /** Line-oriented push — chunks may split lines arbitrarily (SSE). */
+  const push = (text: string) => {
+    pending += String(text);
+    const parts = pending.split('\n');
+    pending = parts.pop() ?? '';
+    for (const ln of parts) {
+      if (ln === '') continue;
+      lines.push(ln.length > MAX_LINE ? `${ln.slice(0, MAX_LINE)}…` : ln);
+    }
+    emit();
+  };
   try {
     const outcome = await run({
-      onStdout: (t) => push(t, false),
-      onStderr: (t) => push(t, true),
+      onStdout: push,
+      onStderr: push,
     });
+    flush();
+    emit();
     ctx.emitUi({
       uiType: 'terminal',
       id: blockId,
       operation: 'complete',
       data: {
         ...(command ? { command } : {}),
-        lines: lines.slice(-400),
+        lines: lines.slice(-MAX_LINES),
         ...(outcome.ok ? {} : { failed: true }),
       },
     });
@@ -510,7 +539,8 @@ async function runWithTerminalBlock(
       : `Exit code ${outcome.exitCode} after ${(outcome.durationMs / 1000).toFixed(1)}s.\n${tail || '(no output)'}`;
     return { ok: outcome.ok, result: summary };
   } catch (err) {
-    ctx.emitUi({ uiType: 'terminal', id: blockId, operation: 'complete', data: { lines: lines.slice(-400), failed: true } });
+    flush();
+    ctx.emitUi({ uiType: 'terminal', id: blockId, operation: 'complete', data: { lines: lines.slice(-MAX_LINES), failed: true } });
     return fail(`Execution failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
@@ -796,20 +826,139 @@ export async function executeClientTool(
 
       // ── execution ───────────────────────────────────────────────────────
       case 'execute_code': {
-        const code = typeof args.code === 'string' && args.code.trim() ? args.code : undefined;
+        const language = normalizeExecLanguage(String(args.language || 'python')) || 'python';
+        const def = EXEC_RUNTIMES[language];
+        let code = typeof args.code === 'string' && args.code.trim() ? args.code : undefined;
         const file = typeof args.file === 'string' && args.file.trim() ? args.file.trim() : undefined;
         if (!code && !file) return fail('Provide code or file.');
         const container = getContainer();
         await container.ensureWorkspace(ctx.chatId);
         const callId = `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-        return runWithTerminalBlock(ctx, callId, code ? 'Running Python' : `Running ${file}`, undefined, async (hooks) => {
-          const r = await container.execCode(ctx.chatId, {
-            ...(code ? { code } : { file: file as string }),
-            onStdout: hooks.onStdout,
-            onStderr: hooks.onStderr,
+
+        // Tier 1 — local web container (Python, persistent workspace).
+        if (def.tier === 'local') {
+          return runWithTerminalBlock(ctx, callId, code ? `Running ${def.label}` : `Running ${file}`, undefined, async (hooks) => {
+            const r = await container.execCode(ctx.chatId, {
+              ...(code ? { code } : { file: file as string }),
+              onStdout: hooks.onStdout,
+              onStderr: hooks.onStderr,
+            });
+            return { ok: r.ok, output: r.output, exitCode: r.exitCode, durationMs: r.durationMs };
           });
-          return { ok: r.ok, output: r.output, exitCode: r.exitCode, durationMs: r.durationMs };
-        });
+        }
+
+        // Tier 2/3 — server sandbox (node/bash, workspace file sync) or the
+        // remote executor (20+ languages, ephemeral snippets).
+        if (!code && file) {
+          const r = await container.read(ctx.chatId, file, 256 * 1024);
+          if (r.binary || r.content === null) return fail(`Cannot execute binary file ${file}.`);
+          code = r.content;
+        }
+
+        const stagePaths = Array.isArray(args.files)
+          ? args.files
+              .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+              .map((p) => p.trim().replace(/^\/+/, ''))
+              .slice(0, 40)
+          : [];
+        const staged: { path: string; content: string }[] = [];
+        if (def.tier === 'server') {
+          for (const p of stagePaths) {
+            const r = await container.read(ctx.chatId, p, 128 * 1024).catch(() => null);
+            if (r && !r.binary && typeof r.content === 'string') staged.push({ path: p, content: r.content });
+          }
+        }
+        const stdin = typeof args.stdin === 'string' ? args.stdin.slice(0, 64 * 1024) : undefined;
+
+        return runWithTerminalBlock(
+          ctx,
+          callId,
+          `Running ${def.label}${def.tier === 'remote' ? ' (remote)' : ''}`,
+          language,
+          async (hooks) => {
+            const res = await fetch('/api/agent/execute', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                language,
+                code,
+                ...(staged.length > 0 ? { files: staged } : {}),
+                ...(stdin ? { stdin } : {}),
+              }),
+            });
+            if (!res.ok || !res.body) {
+              const body = await res.json().catch(() => null);
+              return {
+                ok: false,
+                output: String(body?.error?.message || `Execution request failed (HTTP ${res.status}).`),
+                exitCode: 1,
+                durationMs: 0,
+              };
+            }
+
+            // Stream the SSE response: start/stdout/stderr/files/exit/error.
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let ok = false;
+            let exitCode = 1;
+            let durationMs = 0;
+            let errMsg: string | null = null;
+            const returnedFiles: { path?: unknown; content?: unknown }[] = [];
+            const onEvent = (ev: Record<string, unknown>) => {
+              if (ev.type === 'start' && typeof ev.runtime === 'string') {
+                hooks.onStdout(`[${ev.runtime}]\n`);
+              } else if (ev.type === 'stdout' && typeof ev.text === 'string') {
+                hooks.onStdout(ev.text);
+              } else if (ev.type === 'stderr' && typeof ev.text === 'string') {
+                hooks.onStderr(ev.text);
+              } else if (ev.type === 'files' && Array.isArray(ev.files)) {
+                returnedFiles.push(...(ev.files as { path?: unknown; content?: unknown }[]));
+              } else if (ev.type === 'exit') {
+                ok = ev.ok === true;
+                exitCode = Number(ev.code ?? 1);
+                durationMs = Number(ev.durationMs ?? 0);
+                if (typeof ev.message === 'string' && ev.message) errMsg = ev.message;
+              } else if (ev.type === 'error' && typeof ev.message === 'string') {
+                errMsg = ev.message;
+              }
+            };
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let idx: number;
+              while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                const chunk = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                const line = chunk.split('\n').find((l) => l.startsWith('data:'));
+                if (!line) continue;
+                const payload = line.slice(5).trim();
+                if (!payload) continue;
+                try {
+                  onEvent(JSON.parse(payload) as Record<string, unknown>);
+                } catch {
+                  /* ignore malformed frame */
+                }
+              }
+            }
+
+            // Sync changed/new files back into the persistent workspace.
+            let synced = 0;
+            for (const f of returnedFiles.slice(0, 40)) {
+              if (typeof f?.path !== 'string' || typeof f.content !== 'string') continue;
+              try {
+                await container.write(ctx.chatId, f.path, f.content);
+                synced++;
+              } catch {
+                /* skip */
+              }
+            }
+            if (synced > 0) hooks.onStdout(`\n[synced ${synced} file(s) back to the workspace]\n`);
+
+            return { ok, output: errMsg ?? '', exitCode, durationMs };
+          }
+        );
       }
       case 'run_terminal': {
         const command = String(args.command || '').trim();
