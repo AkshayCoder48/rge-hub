@@ -40,6 +40,7 @@ import {
   FlaskConical,
   Trash2,
   TriangleAlert,
+  ArrowRight,
 } from 'lucide-react';
 
 // ============ Shared bits ============
@@ -126,9 +127,11 @@ interface SettingsProfile {
 
 interface SettingsViewProps {
   onOpenSelfProfile?: () => void;
+  /** Opens the in-app Public API + MCP documentation (Developers → API Docs). */
+  onOpenApiDocs?: () => void;
 }
 
-export function SettingsView({ onOpenSelfProfile }: SettingsViewProps) {
+export function SettingsView({ onOpenSelfProfile, onOpenApiDocs }: SettingsViewProps) {
   const { user, refresh, logout } = useAuth();
 
   const [profile, setProfile] = useState<SettingsProfile | null>(null);
@@ -241,7 +244,7 @@ export function SettingsView({ onOpenSelfProfile }: SettingsViewProps) {
 
       {/* ============ Security: API key ============ */}
       <SectionCard icon={ShieldCheck} title="API key" subtitle="Programmatic access to your account">
-        <ApiKeyCard />
+        <ApiKeyCard onOpenApiDocs={onOpenApiDocs} />
       </SectionCard>
 
       {/* ============ AI Agent ============ */}
@@ -909,7 +912,7 @@ function ChangePasswordCard({
 
 // ============ API key card ============
 
-function ApiKeyCard() {
+function ApiKeyCard({ onOpenApiDocs }: { onOpenApiDocs?: () => void }) {
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
@@ -960,6 +963,14 @@ function ApiKeyCard() {
           <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-px" />
           This key grants full access to your account — keep it secret.
         </p>
+        {onOpenApiDocs && (
+          <button
+            onClick={onOpenApiDocs}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-[#ef233c] hover:text-red-400 transition-colors"
+          >
+            Use this key with the Public API &amp; MCP <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
     );
   }
@@ -982,6 +993,14 @@ function ApiKeyCard() {
         <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-px" />
         This key grants full access to your account — keep it secret.
       </p>
+      {onOpenApiDocs && (
+        <button
+          onClick={onOpenApiDocs}
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-[#ef233c] hover:text-red-400 transition-colors"
+        >
+          Use this key with the Public API &amp; MCP <ArrowRight className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }

@@ -21,6 +21,8 @@ import {
   ChevronRight,
   Shield,
   Settings,
+  Braces,
+  Plug,
   Bot,
   MessageSquare,
   Plus,
@@ -146,6 +148,8 @@ export function Sidebar({ currentView, onNavigate, user, onUpload }: SidebarProp
     { key: 'xmls', label: 'Files', icon: FileCode },
     { key: 'search', label: 'Search', icon: Search, section: 'Discover' },
     { key: 'community', label: 'Community', icon: Users },
+    { key: 'api', label: 'API Docs', icon: Braces, section: 'Developers' },
+    { key: 'mcp', label: 'MCP Server', icon: Plug },
     { key: 'profile', label: 'Profile', icon: User, section: 'Account' },
     // Same "Account" group as Profile — the section header only renders on
     // the first item of the group, so no duplicate "Account" label.

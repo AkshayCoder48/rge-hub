@@ -14,13 +14,15 @@ import { AdminView } from '@/components/platform/views/admin-view';
 import { SearchView } from '@/components/platform/views/search-view';
 import { UserView } from '@/components/platform/views/user-view';
 import { SettingsView } from '@/components/platform/views/settings-view';
+import { ApiDocsView } from '@/components/platform/views/api-docs-view';
+import { McpDocsView } from '@/components/platform/views/mcp-docs-view';
 import { AgentView } from '@/components/platform/views/agent-view';
 import { UploadModal } from '@/components/platform/upload-modal';
 import { Logo } from '@/components/logo';
 import { useApplyReducedMotion } from '@/lib/preferences';
 import { useAgentStore } from '@/lib/agent-store';
 
-export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'agent' | 'admin' | 'search' | 'user';
+export type ViewKey = 'home' | 'images' | 'clips' | 'xmls' | 'community' | 'profile' | 'settings' | 'studio' | 'agent' | 'admin' | 'search' | 'user' | 'api' | 'mcp';
 
 export function PlatformApp() {
   const { user, status, loading, refresh } = useAuth();
@@ -56,7 +58,7 @@ export function PlatformApp() {
       if (v === 'admin' && !user?.isAdmin && (!user?.role || user.role === 'user')) return;
       setView(v);
     },
-    [user?.isAdmin, user?.role]
+    [user]
   );
 
   const openUpload = useCallback((type: 'image' | 'clip' | 'xml') => {
@@ -183,7 +185,11 @@ export function PlatformApp() {
           {view === 'xmls' && <ResourcesView key={`xmls-${uploadVersion}`} type="xml" onUpload={() => openUpload('xml')} onOpenUser={openUser} />}
           {view === 'community' && <CommunityView key={`community-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'profile' && <ProfileView key={`profile-${uploadVersion}`} onOpenUser={openUser} />}
-          {view === 'settings' && <SettingsView onOpenSelfProfile={() => setView('profile')} />}
+          {view === 'settings' && (
+            <SettingsView onOpenSelfProfile={() => setView('profile')} onOpenApiDocs={() => setView('api')} />
+          )}
+          {view === 'api' && <ApiDocsView onOpenMcp={() => setView('mcp')} />}
+          {view === 'mcp' && <McpDocsView onOpenApi={() => setView('api')} />}
           {view === 'search' && <SearchView key={`search-${uploadVersion}`} onOpenUser={openUser} />}
           {view === 'user' && selectedUserId && (
             <UserView key={`user-${selectedUserId}`} userId={selectedUserId} onOpenUser={openUser} onOpenSelf={() => setView('profile')} />
