@@ -76,8 +76,34 @@ export interface AgentMessage {
   reasoning?: string;
   /** Tool calls made by the assistant in this message (executed results embedded). */
   toolCalls?: AgentToolCall[];
+  /**
+   * Ordered execution timeline for assistant turns — text segments and tool
+   * segments in the exact order the run produced them. This is what the
+   * thread renders; `content`/`toolCalls` stay as flattened views for the
+   * provider-history contract. Absent on pre-timeline (legacy) messages.
+   */
+  segments?: AssistantSegment[];
   createdAt: string;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Assistant run timeline — ordered segments preserving the streamed order.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface TextSegment {
+  kind: 'text';
+  id: string;
+  text: string;
+}
+
+export interface ToolsSegment {
+  kind: 'tools';
+  id: string;
+  /** All tool calls of the run, in execution order (ONE activity component). */
+  calls: AgentToolCall[];
+}
+
+export type AssistantSegment = TextSegment | ToolsSegment;
 
 export interface AgentToolCall {
   id: string;

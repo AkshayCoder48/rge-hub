@@ -33,9 +33,12 @@ import {
   Settings2,
   Sparkles,
   X,
+  Check,
+  Loader2,
+  ChevronRight,
 } from 'lucide-react';
-import { useAgentStore, type LiveToolCall } from '@/lib/agent-store';
-import type { AgentMessage, TreeNode, WorkspaceFileMeta } from '@/lib/agent/types';
+import { useAgentStore, liveToolCalls } from '@/lib/agent-store';
+import type { AgentMessage, AssistantSegment, TreeNode } from '@/lib/agent/types';
 import {
   ToolCall,
   CodeDiff,
@@ -49,11 +52,11 @@ import {
   ThinkingReasoning,
   GenerationLoader,
   ShimmerLabel,
-  ToolTimeline,
+  Collapse,
   Orb,
-  type TimelineStep,
+  field,
+  mono,
 } from '@/components/agent/elements';
-import { FileSearchIcon, PenLineIcon, FolderIcon, PackageIcon, RefreshCwIcon, TagIcon, UploadIcon, ZapIcon, ListIcon, TrashIcon, HardDriveDownloadIcon } from 'lucide-react';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Small helpers
@@ -72,35 +75,6 @@ function fileIconFor(name: string) {
   if (['mp4', 'webm', 'mov', 'mkv'].includes(ext)) return Film;
   if (['xml', 'json', 'txt', 'csv', 'md', 'srt', 'vtt', 'edl'].includes(ext)) return FileCode2;
   return FileText;
-}
-
-/** Timeline step (icon + verb + chip) per tool name — feeds ToolTimeline. */
-function timelineStep(name: string, args: Record<string, unknown>): TimelineStep {
-  const { label, query } = toolDisplay({ name, args });
-  const icons: Record<string, typeof ListIcon> = {
-    set_plan: ListIcon,
-    write_todos: ListIcon,
-    list_hub_resources: HardDriveDownloadIcon,
-    fetch_resource: FolderIcon,
-    read_file: FileSearchIcon,
-    write_file: PenLineIcon,
-    edit_file: PenLineIcon,
-    list_files: FolderIcon,
-    delete_file: TrashIcon,
-    unzip_file: PackageIcon,
-    zip_files: PackageIcon,
-    update_resource: TagIcon,
-    publish_file: UploadIcon,
-    speedramp_clip: ZapIcon,
-  };
-  const verbs: Record<string, string> = {
-    set_plan: 'Planned', write_todos: 'Tracked', list_hub_resources: 'Listed',
-    fetch_resource: 'Fetched', read_file: 'Read', write_file: 'Wrote',
-    edit_file: 'Edited', list_files: 'Listed', delete_file: 'Deleted',
-    unzip_file: 'Unzipped', zip_files: 'Zipped', update_resource: 'Updated',
-    publish_file: 'Published', speedramp_clip: 'Ramped',
-  };
-  return { verb: verbs[name] || 'Ran', chip: query || name, icon: icons[name] || RefreshCwIcon };
 }
 
 /** A friendly label + chip query for each tool call. */
@@ -166,6 +140,11 @@ function ToolCallBlock({
         open={open}
         onOpenChange={setOpen}
       />
+      {tc.status === 'error' && (
+        <div className="pl-2 -mt-1 flex items-center gap-1.5 text-[10px] font-manrope uppercase tracking-[0.15em] text-red-400">
+          <X className="h-3 w-3" aria-hidden /> failed
+        </div>
+      )}
       {tc.meta?.diff && (
         <CodeDiff
           filename={tc.meta.diff.filename}
@@ -198,6 +177,99 @@ function ToolCallBlock({
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Tool activity — THE single unified component for a whole agent run.
+// Every tool call of the run streams into this one card as a row (in
+// execution order); rows settle running → ok/error and expand to inspect
+// the raw request/result. Never rendered twice per run.
+// ────────────────────────────────────────────────────────────────────────────
+
+interface ActivityCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: 'running' | 'ok' | 'error';
+  result?: string;
+  meta?: any;
+}
+
+function ToolActivityBlock({
+  calls,
+  streaming,
+  defaultOpen = false,
+}: {
+  calls: ActivityCall[];
+  /** True while the owning run is still in progress. */
+  streaming: boolean;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(streaming ? true : defaultOpen);
+  const prevStreaming = useRef(streaming);
+
+  // Live runs open the activity so calls stream in visibly; the finished
+  // run collapses to a single line (still expandable). Only transitions
+  // flip the state — manual toggles during a run are respected.
+  useEffect(() => {
+    if (prevStreaming.current !== streaming) {
+      prevStreaming.current = streaming;
+      // Deferred per the repo's set-state-in-effect convention.
+      queueMicrotask(() => setOpen(streaming));
+    }
+  }, [streaming]);
+
+  if (calls.length === 0) return null;
+
+  const runningCall = calls.find((c) => c.status === 'running');
+  const failed = calls.some((c) => c.status === 'error');
+  const activeLabel = runningCall ? `${toolDisplay(runningCall).label}…` : 'Agent activity';
+
+  return (
+    <div
+      className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden"
+      data-slot="tool-activity"
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-white/[0.03]"
+      >
+        <ChevronRight
+          aria-hidden
+          className={`h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] ${
+            open ? 'rotate-90' : ''
+          }`}
+        />
+        {streaming && runningCall ? (
+          <ShimmerLabel className="min-w-0 truncate text-sm">{activeLabel}</ShimmerLabel>
+        ) : (
+          <span className="min-w-0 truncate text-sm font-manrope text-zinc-200">Agent activity</span>
+        )}
+        <span className={`${field} ${mono} shrink-0 px-1.5 py-0.5 text-[11px] text-zinc-400`}>
+          {calls.length} {calls.length === 1 ? 'call' : 'calls'}
+        </span>
+        <span className="ml-auto shrink-0 flex items-center">
+          {streaming && runningCall ? (
+            <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin text-[#ef233c]" />
+          ) : failed ? (
+            <X aria-hidden className="h-3.5 w-3.5 text-red-400" />
+          ) : (
+            <Check aria-hidden className="h-3.5 w-3.5 text-emerald-400/90" />
+          )}
+        </span>
+      </button>
+
+      <Collapse open={open}>
+        <div className="space-y-1.5 border-t border-white/5 px-2 pt-2 pb-2">
+          {calls.map((tc) => (
+            <ToolCallBlock key={tc.id} tc={tc} />
+          ))}
+        </div>
+      </Collapse>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Message renderers
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -213,9 +285,25 @@ function UserBubble({ message }: { message: AgentMessage }) {
 
 function AssistantMessage({ message }: { message: AgentMessage }) {
   const hasReasoning = !!message.reasoning?.trim();
-  const hasTools = (message.toolCalls?.length ?? 0) > 0;
-  const [timelineOpen, setTimelineOpen] = useState(false);
-  const steps: TimelineStep[] = (message.toolCalls || []).map((tc) => timelineStep(tc.name, tc.args));
+  // Preserve the recorded execution timeline. Legacy messages (persisted
+  // before segments existed) fall back to one activity box + trailing text.
+  const segments: AssistantSegment[] =
+    message.segments && message.segments.length > 0
+      ? message.segments
+      : [
+          ...(message.toolCalls && message.toolCalls.length > 0
+            ? [
+                {
+                  kind: 'tools' as const,
+                  id: `${message.id}_tools`,
+                  calls: message.toolCalls,
+                },
+              ]
+            : []),
+          ...(message.content
+            ? [{ kind: 'text' as const, id: `${message.id}_text`, text: message.content }]
+            : []),
+        ];
   return (
     <div className="space-y-3">
       {hasReasoning && (
@@ -225,29 +313,19 @@ function AssistantMessage({ message }: { message: AgentMessage }) {
           elapsedMs={Math.max(1000, (message.reasoning || '').length * 12)}
         />
       )}
-      {hasTools && steps.length >= 2 && (
-        <ToolTimeline
-          steps={steps}
-          visibleSteps={steps.length}
-          streaming={false}
-          open={timelineOpen}
-          onOpenChange={setTimelineOpen}
-          restingLabel={`${steps.length} tool calls this turn`}
-          activeLabel="Working…"
-          stats={[]}
-        />
-      )}
-      {hasTools && (
-        <div className="space-y-2">
-          {message.toolCalls!.map((tc) => (
-            <ToolCallBlock key={tc.id} tc={tc} />
-          ))}
-        </div>
-      )}
-      {message.content && (
-        <p className="text-sm text-zinc-100 whitespace-pre-wrap break-words leading-relaxed">
-          {message.content}
-        </p>
+      {segments.map((seg) =>
+        seg.kind === 'text' ? (
+          seg.text ? (
+            <p
+              key={seg.id}
+              className="text-sm text-zinc-100 whitespace-pre-wrap break-words leading-relaxed"
+            >
+              {seg.text}
+            </p>
+          ) : null
+        ) : (
+          <ToolActivityBlock key={seg.id} calls={seg.calls} streaming={false} />
+        )
       )}
     </div>
   );
@@ -256,6 +334,21 @@ function AssistantMessage({ message }: { message: AgentMessage }) {
 // ────────────────────────────────────────────────────────────────────────────
 // Live streaming block (the turn in progress)
 // ────────────────────────────────────────────────────────────────────────────
+
+/** One streamed text segment — tokens append into it until the model
+ *  switches to a tool call; a NEW segment is only started when the model
+ *  resumes speaking after tool results. */
+function TextSegmentView({ text, active }: { text: string; active: boolean }) {
+  const words = text.split(' ').filter(Boolean);
+  return (
+    <StreamingText
+      segments={[{ text }]}
+      count={words.length}
+      streaming={active}
+      className="max-w-none text-sm leading-relaxed"
+    />
+  );
+}
 
 function LiveTurnBlock({
   live,
@@ -266,10 +359,9 @@ function LiveTurnBlock({
   streaming: boolean;
   elapsedLabel: string;
 }) {
-  const hasContent = live.content.length > 0;
-  const words = live.content.split(' ').filter(Boolean);
-  const showLoader = !hasContent && live.toolCalls.length === 0 && !live.error;
-  const liveSteps: TimelineStep[] = live.toolCalls.map((tc) => timelineStep(tc.name, tc.args));
+  const calls = liveToolCalls(live);
+  const showLoader = live.timeline.length === 0 && !live.error;
+  const lastIdx = live.timeline.length - 1;
   return (
     <div className="space-y-3">
       {live.reasoning && (
@@ -285,7 +377,7 @@ function LiveTurnBlock({
           steps={live.plan.steps}
           activeIndex={
             streaming
-              ? Math.min(live.plan.activeIndex + live.toolCalls.length, live.plan.steps.length)
+              ? Math.min(live.plan.activeIndex + calls.length, live.plan.steps.length)
               : live.plan.steps.length
           }
         />
@@ -293,40 +385,20 @@ function LiveTurnBlock({
 
       {live.todos && live.todos.length > 0 && <TodoList items={live.todos} />}
 
-      {live.toolCalls.length >= 2 && (
-        <ToolTimeline
-          steps={liveSteps}
-          visibleSteps={liveSteps.length}
-          streaming={streaming}
-          open={false}
-          onOpenChange={() => {} }
-          restingLabel={`${liveSteps.length} tool calls this turn`}
-          activeLabel={`${liveSteps.length} tool calls running…`}
-          stats={[]}
-        />
-      )}
-
-      {live.toolCalls.length > 0 && (
-        <div className="space-y-2">
-          {live.toolCalls.map((tc: LiveToolCall) => (
-            <ToolCallBlock key={tc.id} tc={tc} />
-          ))}
-        </div>
+      {/* The run timeline, rendered EXACTLY in the order the stream produced
+          it: text segments and the single tool-activity component interleaved. */}
+      {live.timeline.map((seg, i) =>
+        seg.kind === 'text' ? (
+          <TextSegmentView key={seg.id} text={seg.text} active={streaming && i === lastIdx} />
+        ) : (
+          <ToolActivityBlock key={seg.id} calls={seg.calls} streaming={streaming} />
+        )
       )}
 
       {showLoader && streaming && (
         <div className="flex items-center gap-3 py-2">
           <LiveLoaderTick label={live.statusLabel} />
         </div>
-      )}
-
-      {hasContent && (
-        <StreamingText
-          segments={[{ text: live.content }]}
-          count={words.length}
-          streaming={streaming}
-          className="max-w-none text-sm leading-relaxed"
-        />
       )}
 
       {live.error && (
@@ -556,12 +628,25 @@ export function AgentView({ onOpenSettings }: { onOpenSettings: () => void }) {
   const threadRef = useRef<HTMLDivElement>(null);
   const elapsed = useElapsed(live?.startedAt ?? 0, streaming);
 
-  // Auto-scroll the thread as content grows.
+  // Auto-scroll the thread as the run timeline grows (text tokens, new
+  // segments, tool call status changes, reasoning).
+  const liveSig = useMemo(() => {
+    if (!live) return '';
+    const seg = live.timeline
+      .map((s) =>
+        s.kind === 'text'
+          ? `t${s.text.length}`
+          : `c${s.calls.length}:${s.calls.map((c) => c.status[0]).join('')}`
+      )
+      .join('|');
+    return `${seg}#r${live.reasoning.length}`;
+  }, [live]);
+
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, live?.content, live?.toolCalls.length, live?.reasoning]);
+  }, [messages.length, liveSig]);
 
   useEffect(() => {
     loadChats();

@@ -24,6 +24,7 @@ import type {
   AgentConfig,
   WorkspaceFileMeta,
   TreeNode,
+  AssistantSegment,
 } from '@/lib/agent/types';
 import {
   newChatId,
@@ -64,12 +65,30 @@ export interface LiveToolCall {
   meta?: AgentToolCall['meta'];
 }
 
+export interface LiveTextSegment {
+  kind: 'text';
+  id: string;
+  text: string;
+}
+
+export interface LiveToolsSegment {
+  kind: 'tools';
+  id: string;
+  calls: LiveToolCall[];
+}
+
+export type LiveSegment = LiveTextSegment | LiveToolsSegment;
+
 export interface LiveTurn {
-  /** Streaming assistant message being built. */
-  content: string;
+  /** Ordered run timeline — rendered exactly as it streamed. Text segments
+   * and ONE tools segment holding every call of the run, in stream order. */
+  timeline: LiveSegment[];
+  /** Set when a tool event occurred after the last text token — the next
+   * token must OPEN A NEW text segment instead of appending (the model
+   * resumed speaking after tool activity). */
+  splitNextText: boolean;
   reasoning: string;
   reasoningSentences: string[];
-  toolCalls: LiveToolCall[];
   /** Latest status pill state. */
   statusState: 'thinking' | 'working';
   statusLabel: string;
@@ -77,6 +96,27 @@ export interface LiveTurn {
   plan?: { steps: string[]; activeIndex: number };
   todos?: { id: string; text: string; status: 'pending' | 'active' | 'done' }[];
   error?: string;
+}
+
+/** Concatenated assistant text of the run (all text segments, in order). */
+export function liveTextContent(live: LiveTurn): string {
+  let out = '';
+  for (const seg of live.timeline) {
+    if (seg.kind === 'text' && seg.text) out = out ? `${out}\n\n${seg.text}` : seg.text;
+  }
+  return out;
+}
+
+/** Flat view of every tool call in the run (execution order). */
+export function liveToolCalls(live: LiveTurn): LiveToolCall[] {
+  const out: LiveToolCall[] = [];
+  for (const seg of live.timeline) if (seg.kind === 'tools') out.push(...seg.calls);
+  return out;
+}
+
+let segSeq = 0;
+function newSegmentId(): string {
+  return `seg_${Date.now().toString(36)}_${(segSeq++).toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
 /** What gets persisted to localStorage. */
@@ -284,10 +324,10 @@ export const useAgentStore = create<AgentStore>()(
           streaming: true,
           stoppedWords: null,
           live: {
-            content: '',
+            timeline: [],
+            splitNextText: false,
             reasoning: '',
             reasoningSentences: [],
-            toolCalls: [],
             statusState: 'thinking',
             statusLabel: 'Thinking',
             startedAt: Date.now(),
@@ -313,10 +353,10 @@ export const useAgentStore = create<AgentStore>()(
           streaming: true,
           stoppedWords: null,
           live: {
-            content: '',
+            timeline: [],
+            splitNextText: false,
             reasoning: '',
             reasoningSentences: [],
-            toolCalls: [],
             statusState: 'thinking',
             statusLabel: 'Thinking',
             startedAt: Date.now(),
@@ -327,8 +367,9 @@ export const useAgentStore = create<AgentStore>()(
 
       stop: () => {
         const live = get().live;
-        if (live && live.content) {
-          set({ stoppedWords: live.content });
+        const words = live ? liveTextContent(live) : '';
+        if (words) {
+          set({ stoppedWords: words });
         }
         abortController?.abort();
         abortController = null;
@@ -461,38 +502,73 @@ async function runStream(
         case 'status':
           patchLive({ statusState: ev.state, statusLabel: ev.label });
           break;
-        case 'token':
-          patchLive({ content: live.content + ev.text });
+
+        // Text delta → append to the CURRENT text segment. A new segment is
+        // created only when the model (re)starts speaking, so tokens always
+        // land exactly where the stream produced them — never reordered.
+        case 'token': {
+          const timeline = live.timeline.slice();
+          const last = timeline[timeline.length - 1];
+          if (!live.splitNextText && last && last.kind === 'text') {
+            timeline[timeline.length - 1] = { ...last, text: last.text + ev.text };
+          } else {
+            timeline.push({ kind: 'text', id: newSegmentId(), text: ev.text });
+          }
+          patchLive({ timeline, splitNextText: false });
           break;
+        }
+
         case 'thinking': {
           const reasoning = live.reasoning + ev.text;
           patchLive({ reasoning, reasoningSentences: splitReasoningSentences(reasoning) });
           break;
         }
-        case 'tool_start':
-          patchLive({
-            toolCalls: [
-              ...live.toolCalls,
-              { id: ev.callId, name: ev.name, args: ev.args, status: 'running' },
-            ],
-          });
+
+        // Tool call → the run's ONE tools segment: created at the FIRST tool
+        // call and reused for every subsequent call of the run (no matter
+        // how many text segments come between). All calls live in the same
+        // activity component, in execution order.
+        case 'tool_start': {
+          const timeline = live.timeline.slice();
+          const toolsIdx = timeline.findIndex((s) => s.kind === 'tools');
+          const call: LiveToolCall = {
+            id: ev.callId,
+            name: ev.name,
+            args: ev.args,
+            status: 'running',
+          };
+          if (toolsIdx >= 0) {
+            const seg = timeline[toolsIdx] as LiveToolsSegment;
+            timeline[toolsIdx] = { ...seg, calls: [...seg.calls, call] };
+          } else {
+            timeline.push({ kind: 'tools', id: newSegmentId(), calls: [call] });
+          }
+          patchLive({ timeline, splitNextText: true });
           break;
+        }
+
         case 'tool_result': {
-          patchLive({
-            toolCalls: live.toolCalls.map((c) =>
-              c.id === ev.callId
-                ? { ...c, status: ev.ok ? 'ok' : 'error', result: ev.result, meta: ev.meta }
-                : c
-            ),
-          });
+          const timeline = live.timeline.map((seg) =>
+            seg.kind !== 'tools'
+              ? seg
+              : {
+                  ...seg,
+                  calls: seg.calls.map((c) =>
+                    c.id === ev.callId
+                      ? { ...c, status: ev.ok ? ('ok' as const) : ('error' as const), result: ev.result, meta: ev.meta }
+                      : c
+                  ),
+                }
+          );
+          patchLive({ timeline, splitNextText: true });
           // plan / todos surface as dedicated UI blocks
           if (ev.name === 'set_plan' && ev.ok) {
-            const call = live.toolCalls.find((c) => c.id === ev.callId);
+            const call = liveToolCalls(live).find((c) => c.id === ev.callId);
             const steps = (call?.args as { steps?: string[] } | undefined)?.steps || [];
             patchLive({ plan: { steps, activeIndex: 0 } });
           }
           if (ev.name === 'write_todos' && ev.ok) {
-            const call = live.toolCalls.find((c) => c.id === ev.callId);
+            const call = liveToolCalls(live).find((c) => c.id === ev.callId);
             const items =
               (call?.args as { items?: { text: string; status?: string }[] } | undefined)?.items ||
               [];
@@ -518,22 +594,48 @@ async function runStream(
       }
     }
 
-    // Commit the finished assistant message to the local chat.
+    // Commit the finished assistant message to the local chat. The timeline
+    // is preserved 1:1 (segments), plus flattened views (content/toolCalls)
+    // for the provider-history contract and legacy rendering.
     const finished = get().live;
-    if (finished && (finished.content || finished.toolCalls.length || finished.error)) {
+    const finishedCalls = finished ? liveToolCalls(finished) : [];
+    if (finished && (finished.timeline.length > 0 || finished.error)) {
+      const segments: AssistantSegment[] = finished.timeline
+        .filter((s) => (s.kind === 'text' ? s.text.trim().length > 0 : s.calls.length > 0))
+        .map((s) =>
+          s.kind === 'text'
+            ? { kind: 'text' as const, id: s.id, text: s.text }
+            : {
+                kind: 'tools' as const,
+                id: s.id,
+                calls: s.calls.map<AgentToolCall>((c) => ({
+                  id: c.id,
+                  name: c.name,
+                  args: c.args,
+                  status: c.status === 'error' ? ('error' as const) : ('ok' as const),
+                  result: c.result,
+                  meta: c.meta,
+                })),
+              }
+        );
       const assistantMsg: AgentMessage = {
         id: `a_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         role: 'assistant',
-        content: finished.content,
+        content: liveTextContent(finished),
         reasoning: finished.reasoning || undefined,
-        toolCalls: finished.toolCalls.map<AgentToolCall>((c) => ({
-          id: c.id,
-          name: c.name,
-          args: c.args,
-          status: c.status === 'error' ? 'error' : 'ok',
-          result: c.result,
-          meta: c.meta,
-        })),
+        ...(finishedCalls.length > 0
+          ? {
+              toolCalls: finishedCalls.map<AgentToolCall>((c) => ({
+                id: c.id,
+                name: c.name,
+                args: c.args,
+                status: c.status === 'error' ? ('error' as const) : ('ok' as const),
+                result: c.result,
+                meta: c.meta,
+              })),
+            }
+          : {}),
+        ...(segments.length > 0 ? { segments } : {}),
         createdAt: new Date().toISOString(),
       };
       commitToChat([...history, assistantMsg]);
@@ -546,11 +648,12 @@ async function runStream(
       const msg = err instanceof Error ? err.message : 'Agent stream failed.';
       patchLive({ error: msg });
       const live = get().live;
-      if (live && (live.content || live.error)) {
+      const partial = live ? liveTextContent(live) : '';
+      if (live && (partial || live.error)) {
         const assistantMsg: AgentMessage = {
           id: `a_${Date.now()}_err`,
           role: 'assistant',
-          content: live.content,
+          content: partial,
           reasoning: live.reasoning || undefined,
           createdAt: new Date().toISOString(),
         };

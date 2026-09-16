@@ -25,7 +25,7 @@ function truncate(s: string | undefined, max: number, marker = '…[truncated]')
   return s.length > max ? s.slice(0, max - marker.length) + marker : s;
 }
 
-/** Cap message content (60KB) + every tool result string (8KB). */
+/** Cap message content (60KB) + every tool result string (8KB) + segments. */
 export function capMessage(msg: AgentMessage): AgentMessage {
   const capped: AgentMessage = {
     ...msg,
@@ -37,6 +37,21 @@ export function capMessage(msg: AgentMessage): AgentMessage {
       ...c,
       result: truncate(c.result, MAX_TOOL_RESULT_CHARS),
     }));
+  }
+  if (msg.segments) {
+    capped.segments = msg.segments
+      .map((seg) =>
+        seg.kind === 'text'
+          ? { ...seg, text: truncate(seg.text, MAX_CONTENT_CHARS) }
+          : {
+              ...seg,
+              calls: seg.calls.map((c) => ({
+                ...c,
+                result: truncate(c.result, MAX_TOOL_RESULT_CHARS),
+              })),
+            }
+      )
+      .filter((seg) => (seg.kind === 'text' ? seg.text.length > 0 : seg.calls.length > 0));
   }
   return capped;
 }
