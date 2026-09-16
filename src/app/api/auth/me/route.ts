@@ -25,7 +25,15 @@ export async function GET() {
     // truth — a session whose profile no longer exists (account deleted)
     // is dead everywhere. Engine trouble degrades to "loading" (never a
     // false logout); ONLY a confirmed 404 signs the user out.
-    const profileRead = await kvGetStatus(`profile:${s.userId}`, ONYXBASE_COLLECTIONS.PROFILES);
+    let profileRead = await kvGetStatus(`profile:${s.userId}`, ONYXBASE_COLLECTIONS.PROFILES);
+    if (profileRead.status === 'missing') {
+      // Cold-boot race guard: a fresh engine instance briefly serves an
+      // EMPTY store while its boot-restore is still in flight — a 404 from
+      // that window is NOT a deleted profile. Re-read once after a short
+      // wait; only a CONFIRMED second miss signs the user out.
+      await new Promise((r) => setTimeout(r, 900));
+      profileRead = await kvGetStatus(`profile:${s.userId}`, ONYXBASE_COLLECTIONS.PROFILES);
+    }
     if (profileRead.status === 'missing') {
       return NextResponse.json({
         ok: false,
