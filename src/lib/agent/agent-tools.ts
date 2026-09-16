@@ -301,7 +301,7 @@ export const CLIENT_TOOLS: ToolSchema[] = [
     function: {
       name: 'execute_code',
       description:
-        'Execute code in one of 25 languages. python runs in the browser web container (persistent workspace, live stdout — best for XML/ZIP work). node/javascript and bash run on the server sandbox: pass workspace paths in files[] and changed files sync back automatically (require() has node stdlib + adm-zip, archiver, date-fns). 20 more languages (c, cpp, csharp, go, java, kotlin, swift, ruby, rust, zig, dart, lua, julia, perl, haskell, crystal, d, fortran, pascal, ocaml, fsharp) run on a remote executor — ephemeral snippets only, no workspace files, compiles can take seconds. stdout/stderr stream live to the user — print progress.',
+        'Execute code in one of 25 languages. python runs in the browser web container (persistent workspace, live stdout — best for XML/ZIP work). node/javascript and bash run on the server sandbox: pass workspace paths in files[] and changed files sync back automatically (require() has node stdlib + adm-zip, date-fns). 20 more languages (c, cpp, csharp, fsharp, go, java, kotlin, swift, ruby, rust, zig, dart, lua, julia, perl, haskell, crystal, d, fortran, pascal, ocaml) run on a remote executor — ephemeral snippets only, no workspace files, compiles can take seconds. stdout/stderr stream live to the user — print progress.',
       parameters: {
         type: 'object',
         properties: {

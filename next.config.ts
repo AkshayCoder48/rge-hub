@@ -13,6 +13,16 @@ const nextConfig: NextConfig = {
   outputFileTracingExcludes: {
     '*': ['agent-ctx'],
   },
+  // The agent code-execution sandbox stages COMPLETE copies of these curated
+  // npm packages into the lambda bundle (child processes resolve them via
+  // NODE_PATH). Without this the output tracer copies them only partially and
+  // require() fails in the sandbox.
+  outputFileTracingIncludes: {
+    '/api/agent/execute': [
+      './node_modules/adm-zip/**/*',
+      './node_modules/date-fns/**/*',
+    ],
+  },
   experimental: {
     serverActions: {
       bodySizeLimit: '100mb',

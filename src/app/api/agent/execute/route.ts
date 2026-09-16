@@ -26,24 +26,35 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat } from 'fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink, access } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { getSession } from '@/lib/session';
 import { normalizeExecLanguage, EXEC_RUNTIMES } from '@/lib/agent/runtimes';
 
-// Force the output tracer to bundle these npm modules so sandboxed Node code
-// can require() them through NODE_PATH (curated — the app's own dependencies).
+// Reference the curated npm modules so the output tracer keeps them in the
+// lambda bundle (complete copies are forced via outputFileTracingIncludes).
 import * as bundledAdmZip from 'adm-zip';
 import * as bundledDateFns from 'date-fns';
-import * as bundledArchiver from 'archiver';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 void bundledAdmZip;
 void bundledDateFns;
-void bundledArchiver;
+
+/** npm packages sandboxed Node code may require() (resolved from cwd/node_modules
+ *  symlinks + NODE_PATH). */
+const CURATED_NPM_MODULES = ['adm-zip', 'date-fns'];
+
+/** Candidate roots that may hold complete node_modules copies (dev + lambda). */
+function nodeModuleRoots(): string[] {
+  return [
+    path.join(process.cwd(), 'node_modules'),
+    '/var/task/node_modules',
+    '/var/task/.next/server/node_modules',
+  ].filter(Boolean);
+}
 
 const MAX_CODE_CHARS = 256 * 1024;
 const MAX_FILES = 40;
@@ -211,17 +222,28 @@ async function runServerTier(
       await writeFile(abs, f.content, 'utf8');
     }
 
+    // Stage curated npm modules: symlink the bundled copies into
+    // <execdir>/node_modules so plain require('<pkg>') resolves from cwd.
+    for (const pkg of CURATED_NPM_MODULES) {
+      for (const root of nodeModuleRoots()) {
+        const from = path.join(root, pkg);
+        try {
+          await access(path.join(from, 'package.json')); // complete package present
+          await mkdir(path.join(dir, 'node_modules'), { recursive: true });
+          await symlink(from, path.join(dir, 'node_modules', pkg), 'dir').catch(() => undefined);
+          break;
+        } catch {
+          /* try next root */
+        }
+      }
+    }
+
     const isBash = language === 'bash';
     const bin = isBash ? '/bin/bash' : process.execPath;
     const args = isBash ? ['--noprofile', '--norc', '-c', code] : ['-e', code];
 
     // The child env is DELIBERATELY minimal: no secrets, just PATH (for bash
     // subprocesses) and NODE_PATH (so require() can find the curated modules).
-    const nodePathCandidates = [
-      path.join(process.cwd(), 'node_modules'),
-      '/var/task/node_modules',
-      '/var/task/.next/server/node_modules',
-    ].filter(Boolean);
     const env: NodeJS.ProcessEnv = isBash
       ? {
           PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
@@ -230,7 +252,7 @@ async function runServerTier(
       : {
           PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
           NODE_ENV: process.env.NODE_ENV || 'production',
-          NODE_PATH: nodePathCandidates.join(':'),
+          NODE_PATH: nodeModuleRoots().join(':'),
         };
 
     const started = Date.now();

@@ -65,7 +65,7 @@ export function buildSystemPrompt(tree: PromptWorkspaceSnapshot | null): string 
     'execute_code language tiers:',
     execLanguageDoc(),
     '- Default to python (local container: persistent workspace, full file access, live output, best for XML/ZIP/data jobs).',
-    '- node/javascript/bash run on the server sandbox: pass workspace paths via files[] — the script reads/writes them and changed files sync back into the workspace automatically. require() has the node stdlib plus adm-zip, archiver and date-fns.',
+    '- node/javascript/bash run on the server sandbox: pass workspace paths via files[] — the script reads/writes them and changed files sync back into the workspace automatically. require() has the node stdlib plus adm-zip (ZIP read/write) and date-fns.',
     '- Remote languages are for self-contained snippets (no workspace files, no stdin persistence): compile can take seconds — say so and keep snippets small.',
     '',
     '## Text vs UI blocks — never duplicate',
