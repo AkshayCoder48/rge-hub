@@ -83,10 +83,19 @@ export async function POST(request: NextRequest) {
         verified: true,
         purpose,
         ...(purpose === 'password_reset' && result.resetToken ? { resetToken: result.resetToken } : {}),
+        // Registration: the server-side verification transaction the
+        // create-account step presents (the OTP is never requested again).
+        ...(purpose === 'registration' && result.verificationToken
+          ? { verificationToken: result.verificationToken }
+          : {}),
       },
       meta
     );
-    logRequest(meta, '/api/auth/otp/verify', 'POST', 200, 'otp.verify.success');
+    logRequest(meta, '/api/auth/otp/verify', 'POST', 200, 'otp.verify.success', {
+      purpose,
+      // Truncated transaction id for end-to-end tracing (never the token).
+      verificationTx: result.verificationToken ? 'issued' : undefined,
+    });
     return res;
   } catch (err) {
     meta.durationMs = Date.now() - t0;

@@ -30,6 +30,23 @@
  * verifies that token instead of re-reading an OTP record that the
  * verify step correctly deletes (the old "consumed flag" check could
  * never pass — resets were permanently broken).
+ *
+ * REGISTRATION VERIFICATION TRANSACTIONS (auth-state fix):
+ * A successful registration-OTP verification issues a short-lived,
+ * HMAC-signed, PURPOSE-BOUND ('registration') verification token bound
+ * to the verified email. /api/auth/register validates THAT token (or a
+ * legacy direct otpRef+code proof) instead of demanding the same OTP a
+ * second time — the server-issued transaction is the single source of
+ * truth for "this email is verified for registration".
+ *
+ * - Signed with a domain-separated key (never interchangeable with a
+ *   password-reset token).
+ * - Carries { email, purpose, expiresAt, transactionId } only — never
+ *   the OTP, never secrets.
+ * - 30-minute TTL (the user needs time to fill the create-account form).
+ * - One-time use (best-effort in-memory consumed set + the durable
+ *   backstop that a used email can only reach the sign-in path, never a
+ *   second account).
  */
 
 import * as aisense from './aisense';
@@ -40,6 +57,7 @@ import crypto from 'crypto';
 const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes (PRD §4)
 const OTP_MAX_ATTEMPTS = 5;
 const RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // reset token lives 10 minutes
+const REG_VERIFICATION_TTL_MS = 30 * 60 * 1000; // 30 minutes to complete the create-account form
 
 export type OtpPurpose = 'registration' | 'password_reset';
 
@@ -98,8 +116,19 @@ interface RefEntry {
 }
 const emailToRef = new Map<string, RefEntry>();
 
+// Refs superseded by a NEWER code for the same email+purpose. Requesting a
+// new code invalidates the previous one (newest-code-wins) — an old code
+// must never verify once a newer one exists.
+const supersededRefs = new Set<string>();
+
 function rememberRef(email: string, purpose: OtpPurpose, ref: string) {
-  emailToRef.set(`${purpose}:${email}`, { ref, expiresAt: Date.now() + OTP_EXPIRY_MS });
+  const key = `${purpose}:${email}`;
+  const prev = emailToRef.get(key);
+  if (prev && prev.ref !== ref) {
+    supersededRefs.add(prev.ref);
+    if (supersededRefs.size > 1000) supersededRefs.clear(); // bounded; residual window capped by the 10-min OTP TTL
+  }
+  emailToRef.set(key, { ref, expiresAt: Date.now() + OTP_EXPIRY_MS });
   // opportunistic cleanup
   if (emailToRef.size > 500) {
     const now = Date.now();
@@ -272,6 +301,9 @@ export interface VerifyOtpResult {
   otpRef?: string;
   /** Issued ONLY for purpose=password_reset on success (bug fix). */
   resetToken?: string;
+  /** Issued ONLY for purpose=registration on success — the verification
+   *  transaction token the create-account step must present. */
+  verificationToken?: string;
   error?: string;
   errorCode?: string;
   remainingAttempts?: number;
@@ -301,6 +333,17 @@ export async function verifyOtp(
       ok: false,
       error: 'No active code found for this email. Please request a new one.',
       errorCode: 'OTP_NOT_FOUND',
+    };
+  }
+
+  // Newest-code-wins: a code superseded by a newer request for the same
+  // email+purpose can no longer verify (duplicate OTP records can never
+  // race past each other — only the latest transaction counts).
+  if (supersededRefs.has(ref)) {
+    return {
+      ok: false,
+      error: 'A newer code was requested for this email. Please use the latest one.',
+      errorCode: 'OTP_EXPIRED',
     };
   }
 
@@ -378,6 +421,10 @@ export async function verifyOtp(
     try {
       const updated: OtpRecord = { ...record, attempts };
       const put = await aisense.put(updated as unknown as Record<string, unknown>);
+      // The ref used for this FAILED attempt is dead — the attempt counter
+      // now lives in the NEW record. Supersede it explicitly so the pristine
+      // (attempts:0) original can never be replayed to reset the counter.
+      supersededRefs.add(ref);
       rememberRef(normalizedEmail, purpose, put.storageId);
       const remaining = OTP_MAX_ATTEMPTS - attempts;
       return {
@@ -410,7 +457,85 @@ export async function verifyOtp(
   if (purpose === 'password_reset') {
     return { ok: true, resetToken: issueResetToken(normalizedEmail) };
   }
-  return { ok: true };
+
+  // Registration: issue the server-side verification transaction token —
+  // the create-account step validates THIS (never the same OTP twice).
+  return { ok: true, verificationToken: issueRegistrationToken(normalizedEmail, ref) };
+}
+
+// ============ Registration verification transactions (auth-state fix) ============
+//
+// The server-side "this email is verified for registration" state. Issued
+// atomically with a successful registration-OTP verification; validated by
+// /api/auth/register (signature → purpose → email → expiry → consumption).
+// Stateless HMAC + a best-effort consumed set; the durable single-use
+// backstop is account-existence (a used email can only reach sign-in).
+
+interface RegVerificationPayload {
+  e: string; // verified email (normalized)
+  p: 'registration'; // purpose-bound: never valid for password_reset
+  x: number; // expiresAt (epoch ms)
+  j: string; // transaction id (the verified OTP storage ref)
+}
+
+/** Consumed registration transactions (transaction id → expiry), per instance. */
+const consumedRegTx = new Map<string, number>();
+
+function regVerificationSigningKey(): Buffer {
+  // Domain-separated key: a registration token can NEVER be forged from a
+  // password-reset token (or vice versa) even though both derive from the
+  // same root secret.
+  return crypto.createHmac('sha256', resetSecret()).update('rge-regver-v1').digest();
+}
+
+export function issueRegistrationToken(email: string, otpRef: string): string {
+  const payload: RegVerificationPayload = {
+    e: email.toLowerCase().trim(),
+    p: 'registration',
+    x: Date.now() + REG_VERIFICATION_TTL_MS,
+    j: otpRef,
+  };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', regVerificationSigningKey()).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+export interface RegVerificationCheck {
+  ok: boolean;
+  email?: string;
+  transactionId?: string;
+  reason?: 'invalid' | 'expired' | 'consumed';
+}
+
+export function verifyRegistrationToken(token: string): RegVerificationCheck {
+  try {
+    const [body, sig] = token.split('.');
+    if (!body || !sig) return { ok: false, reason: 'invalid' };
+    const expected = crypto.createHmac('sha256', regVerificationSigningKey()).update(body).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: 'invalid' };
+    const data = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Partial<RegVerificationPayload>;
+    if (data.p !== 'registration' || !data.e || typeof data.x !== 'number' || !data.j) {
+      return { ok: false, reason: 'invalid' }; // purpose-bound: reset tokens don't carry p:'registration'
+    }
+    if (data.x < Date.now()) return { ok: false, reason: 'expired' };
+    if (consumedRegTx.has(data.j)) return { ok: false, reason: 'consumed' };
+    return { ok: true, email: data.e, transactionId: data.j };
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+}
+
+/** Mark a verification transaction as used (one-time use, best effort per
+ *  instance; the durable backstop is account-existence → sign-in path). */
+export function consumeRegistrationTransaction(transactionId: string): void {
+  if (!transactionId) return;
+  consumedRegTx.set(transactionId, Date.now() + REG_VERIFICATION_TTL_MS);
+  if (consumedRegTx.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of consumedRegTx) if (v < now) consumedRegTx.delete(k);
+  }
 }
 
 // ============ Signed reset tokens (password-reset bug fix) ============

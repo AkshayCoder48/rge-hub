@@ -24,6 +24,7 @@
  * Busy twin: 202 { ok, status:'processing', operationId }
  */
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
 import {
   ONYXBASE_V5_ENABLED,
   v5CreateAccount,
@@ -37,11 +38,16 @@ import {
 import {
   getProfileByUsername,
   getProfile,
+  getProfileByEmail,
   upsertProfile,
   type Profile,
 } from '@/lib/resources';
 import { createSession, isAdminUser } from '@/lib/session';
-import { verifyOtp } from '@/lib/otp';
+import {
+  verifyOtp,
+  verifyRegistrationToken,
+  consumeRegistrationTransaction,
+} from '@/lib/otp';
 import {
   isReservedUsername,
   isReservedDisplayName,
@@ -60,6 +66,40 @@ import {
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
+
+/** Short, non-reversible email identifier for structured auth logs (PRD §15). */
+function emailTag(email: string): string {
+  return crypto.createHash('sha256').update(`rge-log:${email}`).digest('hex').slice(0, 12);
+}
+
+/** One structured auth-flow log line — never OTPs, passwords, or tokens. */
+function authLog(
+  requestId: string | null,
+  operation: string,
+  result: string,
+  context: {
+    email?: string;
+    verificationTx?: string;
+    errorCode?: string;
+    durationMs?: number;
+    created?: boolean;
+  } = {}
+) {
+  console.log(
+    JSON.stringify({
+      t: new Date().toISOString(),
+      requestId: requestId || '-',
+      authFlow: 'registration',
+      operation,
+      result,
+      ...(context.email ? { emailHash: emailTag(context.email) } : {}),
+      ...(context.verificationTx ? { verificationTx: context.verificationTx } : {}),
+      ...(context.errorCode ? { errorCode: context.errorCode } : {}),
+      ...(context.created !== undefined ? { created: context.created } : {}),
+      durationMs: context.durationMs ?? 0,
+    })
+  );
+}
 
 function userPayload(rec: AuthRecoveryRecord) {
   return {
@@ -152,31 +192,140 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, code: 'VALIDATION_ERROR', error: reservedDisplayNameMessage() }, { status: 400 });
     }
 
-    // ─── 2.5 OTP PROOF (SECURITY — email ownership, enforced server-side) ─
-    // The user MUST present the 6-digit code from their email + the otpRef
-    // (the AI SENSE temp-storage capability). This is the SAME workflow as
-    // login/verify: the temp KV record carries the hashed code + expiry +
-    // attempt counter. Without this check anyone could register with an
-    // email they don't own (the old frontend-only verify was decorative).
+    // ─── 2.5 EMAIL-OWNERSHIP PROOF (server-side verification state) ─────
+    // The backend is the source of truth for "this email is verified for
+    // registration". Two accepted proofs, in priority order:
+    //
+    //   a) verificationToken — the HMAC-signed, purpose-bound transaction
+    //      issued by the SUCCESSFUL OTP-verification step. This is the
+    //      normal UI path: the user verifies the code ONCE, and the
+    //      create-account request presents the transaction (never the same
+    //      OTP twice).
+    //
+    //   b) LEGACY direct proof: otpRef + 6-digit code (the AI SENSE temp
+    //      record). Still accepted so in-flight clients and API consumers
+    //      don't break.
+    //
+    // Neither present → EMAIL_VERIFICATION_REQUIRED (a precise, stable
+    // code — never a misleading "enter the code" error for a user who
+    // already verified).
+    const tVerificationStart = Date.now();
+    const verificationToken =
+      typeof body.verificationToken === 'string' ? body.verificationToken.trim() : '';
     const otpRef = typeof body.otpRef === 'string' ? body.otpRef.trim() : '';
     const otpCode = typeof body.code === 'string' ? body.code.trim() : '';
-    if (!otpRef || !/^\d{6}$/.test(otpCode)) {
-      return NextResponse.json(
-        { ok: false, code: 'OTP_REQUIRED', error: 'Enter the 6-digit code sent to your email to verify this address.' },
-        { status: 400 }
-      );
-    }
-    const otpCheck = await verifyOtp(normalizedEmail, otpCode, 'registration', otpRef);
-    if (!otpCheck.ok) {
-      const status = otpCheck.errorCode === 'OTP_ATTEMPTS_EXCEEDED' ? 429 : 400;
+
+    let verifiedTransactionId = '';
+
+    if (verificationToken) {
+      const tx = verifyRegistrationToken(verificationToken);
+      if (!tx.ok) {
+        // A CONSUMED transaction means this flow ALREADY created an account
+        // — the appropriate response is the existing-account one (the UI
+        // routes to sign-in), never a misleading "verify again" dead end.
+        if (tx.reason === 'consumed') {
+          const existing = await getProfileByEmail(normalizedEmail).catch(() => null);
+          if (existing) {
+            authLog(request.headers.get('x-request-id'), 'verification_check', 'consumed_existing_account', {
+              email: normalizedEmail,
+              errorCode: 'EMAIL_ALREADY_REGISTERED',
+              durationMs: Date.now() - tVerificationStart,
+            });
+            return NextResponse.json(
+              {
+                ok: false,
+                code: 'EMAIL_ALREADY_REGISTERED',
+                error: 'An account with this email already exists. Please sign in instead.',
+                hint: 'sign-in',
+              },
+              { status: 409 }
+            );
+          }
+        }
+        const code =
+          tx.reason === 'expired' ? 'VERIFICATION_EXPIRED' : 'VERIFICATION_INVALID';
+        const message =
+          tx.reason === 'expired'
+            ? 'Email verification expired. Please request a new code.'
+            : tx.reason === 'consumed'
+              ? 'This verification was already used. Please request a new code.'
+              : 'Email verification could not be validated. Please request a new code.';
+        authLog(request.headers.get('x-request-id'), 'verification_check', 'rejected', {
+          email: normalizedEmail,
+          errorCode: code,
+          durationMs: Date.now() - tVerificationStart,
+        });
+        return NextResponse.json(
+          { ok: false, code, error: message, hint: 'reverify' },
+          { status: 400 }
+        );
+      }
+      if (tx.email !== normalizedEmail) {
+        // The transaction is bound to the verified email — a token issued
+        // for one address can never register another.
+        authLog(request.headers.get('x-request-id'), 'verification_check', 'email_mismatch', {
+          email: normalizedEmail,
+          errorCode: 'VERIFICATION_INVALID',
+          durationMs: Date.now() - tVerificationStart,
+        });
+        return NextResponse.json(
+          {
+            ok: false,
+            code: 'VERIFICATION_INVALID',
+            error: 'Email verification could not be validated for this address. Please request a new code.',
+            hint: 'reverify',
+          },
+          { status: 400 }
+        );
+      }
+      verifiedTransactionId = tx.transactionId ?? '';
+      authLog(request.headers.get('x-request-id'), 'verification_check', 'verified', {
+        email: normalizedEmail,
+        verificationTx: verifiedTransactionId.slice(0, 8),
+        durationMs: Date.now() - tVerificationStart,
+      });
+    } else if (otpRef || otpCode) {
+      // LEGACY direct proof — the pre-verification-token contract. Exactly
+      // one direct OTP check (same temp-KV workflow as the verify step).
+      if (!otpRef || !/^\d{6}$/.test(otpCode)) {
+        return NextResponse.json(
+          { ok: false, code: 'OTP_REQUIRED', error: 'Enter the 6-digit code sent to your email to verify this address.' },
+          { status: 400 }
+        );
+      }
+      const otpCheck = await verifyOtp(normalizedEmail, otpCode, 'registration', otpRef);
+      if (!otpCheck.ok) {
+        const status = otpCheck.errorCode === 'OTP_ATTEMPTS_EXCEEDED' ? 429 : 400;
+        authLog(request.headers.get('x-request-id'), 'verification_check', 'rejected', {
+          email: normalizedEmail,
+          errorCode: otpCheck.errorCode || 'OTP_INVALID',
+          durationMs: Date.now() - tVerificationStart,
+        });
+        return NextResponse.json(
+          {
+            ok: false,
+            code: otpCheck.errorCode || 'OTP_INVALID',
+            error: otpCheck.error || 'Invalid verification code.',
+            ...(otpCheck.otpRef ? { otpRef: otpCheck.otpRef } : {}),
+          },
+          { status }
+        );
+      }
+      verifiedTransactionId = otpRef;
+    } else {
+      authLog(request.headers.get('x-request-id'), 'verification_check', 'missing', {
+        email: normalizedEmail,
+        errorCode: 'EMAIL_VERIFICATION_REQUIRED',
+        durationMs: Date.now() - tVerificationStart,
+      });
       return NextResponse.json(
         {
           ok: false,
-          code: otpCheck.errorCode || 'OTP_INVALID',
-          error: otpCheck.error || 'Invalid verification code.',
-          ...(otpCheck.otpRef ? { otpRef: otpCheck.otpRef } : {}),
+          code: 'EMAIL_VERIFICATION_REQUIRED',
+          error: 'Email verification is required before creating an account.',
+          hint: 'verify-email',
         },
-        { status }
+        { status: 400 }
       );
     }
 
@@ -313,6 +462,15 @@ export async function POST(request: NextRequest) {
         void v5PutAuthOpMarker('register', requestId, { ...record });
       }
     }
+    // One-time use: the verification transaction that authorized this
+    // account creation is consumed (a replay can only reach the sign-in
+    // path above — never a second account).
+    if (verifiedTransactionId) consumeRegistrationTransaction(verifiedTransactionId);
+    authLog(request.headers.get('x-request-id'), 'account_creation', created ? 'created' : 'existing_signed_in', {
+      email: normalizedEmail,
+      verificationTx: verifiedTransactionId.slice(0, 8),
+      created,
+    });
     return await issueSessionResponse(record, created);
   } catch (err) {
     console.error('[register] error:', err);

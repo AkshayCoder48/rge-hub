@@ -26,6 +26,9 @@ interface OtpVerifyData {
   purpose: OtpPurpose;
   /** Signed token authorizing /api/auth/reset-password (password_reset only). */
   resetToken?: string;
+  /** Server-issued verification transaction authorizing /api/auth/register
+   *  (registration only) — the email-verified state lives server-side. */
+  verificationToken?: string;
 }
 
 /** Extra fields the OTP endpoints attach to error bodies. */
@@ -65,6 +68,24 @@ type AuthOutcome =
 
 /** Honest copy for a lost connection — no claims about future success. */
 const CONNECTION_PROBLEM = "Couldn't reach the server — check your connection and try again.";
+
+/**
+ * Centralized registration error mapping (PRD §11) — branch on the stable
+ * machine-readable error.code, never on message strings. These are the
+ * codes that mean "verification state not usable for account creation":
+ * the UI routes the user back to email verification with precise copy
+ * instead of a misleading "enter the code you already entered".
+ */
+const REVERIFY_ERROR_CODES: Record<string, string> = {
+  EMAIL_VERIFICATION_REQUIRED: 'Email verification is required. Please request a new code.',
+  VERIFICATION_EXPIRED: 'Verification expired. Please request a new code.',
+  VERIFICATION_INVALID: 'Verification could not be validated. Please request a new code.',
+  OTP_EXPIRED: 'Verification expired. Please request a new code.',
+  OTP_INVALID: 'Verification could not be validated. Please request a new code.',
+  OTP_NOT_FOUND: 'No active verification found. Please request a new code.',
+  OTP_ATTEMPTS_EXCEEDED: 'Too many failed attempts. Please request a new code.',
+  OTP_REQUIRED: 'Email verification is required. Please request a new code.',
+};
 
 /** Client attempt id: stable across auto-retries of ONE user action so the
  *  backend can re-issue the session instead of duplicating the work. */
@@ -182,10 +203,12 @@ export function AuthScreen() {
   const loading = authPhase !== 'idle';
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  // OTP flow state (new contract): the reference for the code in flight and
-  // the signed token that authorizes the password reset.
+  // OTP flow state (new contract): the reference for the code in flight, the
+  // signed token that authorizes the password reset, and the server-issued
+  // verification transaction that authorizes account creation.
   const [otpRef, setOtpRef] = useState<string | null>(null);
   const [resetToken, setResetToken] = useState<string | null>(null);
+  const [verificationToken, setVerificationToken] = useState<string | null>(null);
   // Live resend countdown (mirrors the 60s duplicate-send rate limit).
   const [resendInSecs, setResendInSecs] = useState(0);
   // Inline failure panel for an unconfirmed register/login/reset outcome.
@@ -316,6 +339,9 @@ export function AuthScreen() {
           setStep('reset-password');
           toast({ title: 'Verified!', description: 'Enter your new password' });
         } else {
+          // The server issued the verification transaction — account creation
+          // presents THIS (the OTP is never requested a second time).
+          setVerificationToken(res.data.verificationToken ?? null);
           if (!displayName) setDisplayName(email.split('@')[0]);
           setStep('register');
           toast({ title: 'Email verified!', description: 'Complete your registration' });
@@ -354,20 +380,34 @@ export function AuthScreen() {
       toast({ title: 'Weak password', description: 'Password must be at least 6 characters', variant: 'destructive' });
       return;
     }
+    // Server-verified state guard: without the server-issued verification
+    // transaction (e.g. the page was refreshed mid-flow), account creation
+    // cannot proceed — route back to email verification honestly instead of
+    // letting the backend reject a request the UI can't prove.
+    if (!verificationToken) {
+      toast({
+        title: 'Verification needed',
+        description: 'Please verify your email first — we\u2019ll send you a new code.',
+        variant: 'destructive',
+      });
+      setStep('email');
+      return;
+    }
     authInFlight.current = true;
     setAuthFailure(null);
     setAuthPhase('submitting');
     try {
       const outcome = await runAuthMutation(
         '/api/auth/register',
-        // OTP proof rides the register call — the server verifies email
-        // ownership itself (same temp-KV workflow as login); the client-side
-        // verify step alone was decorative.
-        { email, username, displayName, password, code: otp, ...(otpRef ? { otpRef } : {}) },
+        // The server-issued verification transaction is the proof — the
+        // email was verified once (OTP step) and this request presents that
+        // server-side state. The OTP itself is never demanded again.
+        { email, username, displayName, password, verificationToken },
         registerRequestId.current,
         setAuthPhase
       );
       if (outcome.kind === 'authenticated') {
+        setVerificationToken(null);
         await refresh();
         if (outcome.viaSession) {
           toast({ title: 'Signed in', description: "You're signed in" });
@@ -389,6 +429,15 @@ export function AuthScreen() {
         // Hard failure ends this attempt lifecycle — the next submit uses a
         // fresh requestId.
         registerRequestId.current = newAuthRequestId();
+        if (outcome.code && REVERIFY_ERROR_CODES[outcome.code]) {
+          // Verification-state rejection (missing / expired / invalid):
+          // precise copy + route back to fresh email verification — never
+          // a misleading "enter the code" error after a successful verify.
+          setVerificationToken(null);
+          setStep('email');
+          toast({ title: 'Verification needed', description: REVERIFY_ERROR_CODES[outcome.code], variant: 'destructive' });
+          return;
+        }
         toast({ title: 'Registration failed', description: outcome.message, variant: 'destructive' });
         return;
       }
@@ -402,7 +451,7 @@ export function AuthScreen() {
       authInFlight.current = false;
       setAuthPhase('idle');
     }
-  }, [email, username, displayName, password, otp, otpRef, refresh, toast]);
+  }, [email, username, displayName, password, verificationToken, refresh, toast]);
 
   const handleLogin = useCallback(async () => {
     if (authInFlight.current) return;
