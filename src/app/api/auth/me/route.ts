@@ -81,7 +81,25 @@ export async function GET() {
         }, { status: 200 });
       }
       if (alive === 'unauthorized') {
-        // Confirmed: the account (and every key it minted) is gone.
+        // Confirmed: the account (and every key it minted) is gone —
+        // UNLESS the session is YOUNG. A freshly minted session key can
+        // itself be stranded (the login/register instance's snapshot
+        // upload lost the race) while the account is perfectly alive;
+        // signing out over that is a false logout. Real deletions destroy
+        // the session cookie server-side (the Hub's delete-account flow),
+        // so a still-present young cookie + whoami-401 is far more likely
+        // cross-instance lag than deletion. Young sessions (< 24h) get
+        // 'loading' — the client retries with backoff and never logs out
+        // over it; old sessions sign out (the grace is long past).
+        const sessionAgeMs = s.createdAt ? Date.now() - new Date(s.createdAt).getTime() : 0;
+        if (sessionAgeMs < 24 * 60 * 60 * 1000) {
+          return NextResponse.json({
+            ok: true,
+            status: 'loading',
+            user: null,
+            message: 'Session check in progress',
+          }, { status: 200 });
+        }
         return NextResponse.json({
           ok: false,
           status: 'unauthenticated',
