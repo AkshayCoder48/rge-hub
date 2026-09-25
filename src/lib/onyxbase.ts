@@ -328,7 +328,8 @@ export async function v5LoginAccount(email: string, password: string): Promise<V
  */
 export async function v5UpdateAccountPassword(
   email: string,
-  password: string
+  password: string,
+  name?: string
 ): Promise<V5AccountResult> {
   if (!V5_ENABLED) return { ok: false, code: 'UNKNOWN', error: 'ONYXBASE_V5_URL is not set' };
   const r = await v5Request(
@@ -336,7 +337,10 @@ export async function v5UpdateAccountPassword(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      // `name` seeds the account name when the engine must RESURRECT a
+      // stranded account row (row missing instance-wide). Pass the profile's
+      // displayName so a resurrected account keeps the user's identity.
+      body: JSON.stringify({ email, password, ...(name ? { name } : {}) }),
     },
     // The engine publishes the post-update snapshot SYNCHRONOUSLY (so an
     // immediate re-login always sees the new password) — that legitimately
@@ -367,6 +371,45 @@ export async function v5UpdateAccountPassword(
             ? 'RATE_LIMITED'
             : 'UNKNOWN';
   return { ok: false, code, error: r.body?.error || `Password update failed (HTTP ${r.status})` };
+}
+
+/**
+ * Resolve an END-USER api key against the V5 engine's whoami endpoint.
+ *
+ * Used by /api/auth/me as the ACCOUNT-LIVENESS CHECK when the profile row is
+ * missing: the engine's multi-instance store can strand a KV row (missing on
+ * the serving instance + absent from the shared snapshot) while the account
+ * itself is perfectly alive elsewhere. A stranded profile must NEVER log the
+ * user out — whoami (which resolves ANY of the account's minted keys, with
+ * its own cross-instance freshness retry) is the authoritative answer to
+ * "does this account still exist?". Account deletion removes the canonical
+ * row AND every minted-key row, so a confirmed 401 is a real deletion.
+ *
+ * Uses the USER'S key as the bearer (not the Hub's master key) — 'ok' means
+ * the account that minted this key still exists.
+ */
+export async function v5WhoamiAccount(
+  apiKey: string
+): Promise<{ status: 'ok'; userId: string } | { status: 'unauthorized' } | { status: 'error' }> {
+  if (!V5_ENABLED || !apiKey) return { status: 'error' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetch(`${ONYXBASE_V5_URL}/api/v5/accounts/whoami`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) return { status: 'unauthorized' };
+    if (!res.ok) return { status: 'error' };
+    const body = await res.json().catch(() => null);
+    const p = v5Payload(body);
+    if (p && typeof p.userId === 'string' && p.userId) return { status: 'ok', userId: p.userId };
+    return { status: 'error' };
+  } catch {
+    return { status: 'error' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- V5 operations + RGE auth-op recovery markers ----

@@ -653,17 +653,23 @@ export function AuthScreen() {
                   <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Sign in</h2>
                   <p className="text-xs text-zinc-500 font-inter">Enter your email and password</p>
                 </div>
-                <div>
-                  <label className={labelCls}>Email</label>
-                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>Password</label>
-                  <input type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="••••••••" onKeyDown={(e) => { if (e.key === 'Enter') handleLogin(); }} className={inputCls} />
-                </div>
-                <button onClick={handleLogin} disabled={loading} className={btnCls}>
-                  {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Signing in…')}</> : <><Lock className="w-4 h-4" /> Sign In</>}
-                </button>
+                {/* Real <form> submit + autocomplete attributes — browsers
+                    (Chrome/Safari/Firefox password managers) only offer to
+                    SAVE credentials when a password input lives in a form
+                    that fires a submit event with proper field names. */}
+                <form onSubmit={(e) => { e.preventDefault(); handleLogin(); }} className="space-y-5" autoComplete="on">
+                  <div>
+                    <label htmlFor="login-email" className={labelCls}>Email</label>
+                    <input id="login-email" type="email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required className={inputCls} />
+                  </div>
+                  <div>
+                    <label htmlFor="login-password" className={labelCls}>Password</label>
+                    <input id="login-password" type="password" name="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" required className={inputCls} />
+                  </div>
+                  <button type="submit" disabled={loading} className={btnCls}>
+                    {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Signing in…')}</> : <><Lock className="w-4 h-4" /> Sign In</>}
+                  </button>
+                </form>
                 <button onClick={() => setStep('forgot')} className="w-full text-center text-[11px] text-[#ef233c] hover:text-red-400 transition-colors">
                   Forgot password? Request new password
                 </button>
@@ -736,28 +742,32 @@ export function AuthScreen() {
                   <h2 className="text-2xl font-manrope font-semibold text-white mb-1">Create account</h2>
                   <p className="text-xs text-zinc-500 font-inter">Complete your profile to finish registration</p>
                 </div>
-                <div>
-                  <label className={labelCls}>Username</label>
-                  <div className="relative">
-                    <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
-                    <input type="text" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="railfan123" className={inputWithIconCls} />
+                {/* Real <form> + new-password autocomplete — lets password
+                    managers save the credential at account creation. */}
+                <form onSubmit={(e) => { e.preventDefault(); handleRegister(); }} className="space-y-5" autoComplete="on">
+                  <div>
+                    <label htmlFor="reg-username" className={labelCls}>Username</label>
+                    <div className="relative">
+                      <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                      <input id="reg-username" type="text" name="username" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} placeholder="railfan123" autoComplete="username" required className={inputWithIconCls} />
+                    </div>
                   </div>
-                </div>
-                <div>
-                  <label className={labelCls}>Display Name</label>
-                  <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Rail Fan" className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>Password</label>
-                  <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
-                    <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" onKeyDown={(e) => { if (e.key === 'Enter') handleRegister(); }} className={inputWithIconCls} />
+                  <div>
+                    <label htmlFor="reg-name" className={labelCls}>Display Name</label>
+                    <input id="reg-name" type="text" name="name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Rail Fan" autoComplete="name" required className={inputCls} />
                   </div>
-                  <p className="text-[10px] text-zinc-600 mt-1.5">Your password is stored securely</p>
-                </div>
-                <button onClick={handleRegister} disabled={loading} className={btnCls}>
-                  {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Creating account…')}</> : <>Create Account <ArrowRight className="w-4 h-4" /></>}
-                </button>
+                  <div>
+                    <label htmlFor="reg-password" className={labelCls}>Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                      <input id="reg-password" type="password" name="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" autoComplete="new-password" required minLength={6} className={inputWithIconCls} />
+                    </div>
+                    <p className="text-[10px] text-zinc-600 mt-1.5">Your password is stored securely</p>
+                  </div>
+                  <button type="submit" disabled={loading} className={btnCls}>
+                    {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Creating account…')}</> : <>Create Account <ArrowRight className="w-4 h-4" /></>}
+                  </button>
+                </form>
               </div>
             ))}
 
@@ -829,23 +839,27 @@ export function AuthScreen() {
                   <h2 className="text-2xl font-manrope font-semibold text-white mb-1">New password</h2>
                   <p className="text-xs text-zinc-500 font-inter">Choose a new password for your account</p>
                 </div>
-                <div>
-                  <label className={labelCls}>New Password</label>
-                  <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
-                    <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" className={inputWithIconCls} />
+                {/* Real <form> + new-password autocomplete — lets password
+                    managers update the saved credential after a reset. */}
+                <form onSubmit={(e) => { e.preventDefault(); handleResetPassword(); }} className="space-y-5" autoComplete="on">
+                  <div>
+                    <label htmlFor="new-password" className={labelCls}>New Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                      <input id="new-password" type="password" name="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" autoComplete="new-password" required minLength={6} className={inputWithIconCls} />
+                    </div>
                   </div>
-                </div>
-                <div>
-                  <label className={labelCls}>Confirm Password</label>
-                  <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
-                    <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" onKeyDown={(e) => { if (e.key === 'Enter') handleResetPassword(); }} className={inputWithIconCls} />
+                  <div>
+                    <label htmlFor="confirm-password" className={labelCls}>Confirm Password</label>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600" />
+                      <input id="confirm-password" type="password" name="confirm-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter password" autoComplete="new-password" required minLength={6} className={inputWithIconCls} />
+                    </div>
                   </div>
-                </div>
-                <button onClick={handleResetPassword} disabled={loading} className={btnCls}>
-                  {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Resetting password…')}</> : <><KeyRound className="w-4 h-4" /> Reset Password</>}
-                </button>
+                  <button type="submit" disabled={loading} className={btnCls}>
+                    {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> {submitLabel('Resetting password…')}</> : <><KeyRound className="w-4 h-4" /> Reset Password</>}
+                  </button>
+                </form>
               </div>
             ))}
         </div>

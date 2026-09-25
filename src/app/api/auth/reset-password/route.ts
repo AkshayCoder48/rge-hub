@@ -100,14 +100,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ─── 1. Password update (V5 first — the authoritative account) ────────
+    // ─── 1. Locate the hub profile FIRST ────────────────────────────────
+    // Its displayName seeds the engine-side account name when this reset
+    // must RESURRECT a stranded V5 account row (row missing instance-wide —
+    // the engine re-creates it with the user's new password).
+    let existingProfile = await getProfileByEmail(normalizedEmail);
+
+    // ─── 2. Password update (V5 first — the authoritative account) ──────
     let accountUserId: string | undefined;
     let accountApiKey: string | undefined;
     let accountName: string | undefined;
     let profileWasMissing = false;
 
     if (ONYXBASE_V5_ENABLED) {
-      const upd = await v5UpdateAccountPassword(normalizedEmail, password);
+      const upd = await v5UpdateAccountPassword(
+        normalizedEmail,
+        password,
+        existingProfile?.displayName
+      );
       meta.durationMs = Date.now() - t0;
       if (upd.ok && upd.userId && upd.apiKey) {
         accountUserId = upd.userId;
@@ -129,9 +139,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // ─── 2. Locate the hub profile (get-or-BUILD from the V5 account) ────
-    let existingProfile = await getProfileByEmail(normalizedEmail);
-
+    // ─── 3. Profile (get-or-BUILD from the V5 account) ────────────────
     if (!existingProfile && accountUserId) {
       // The V5 account PROVABLY exists (we just rotated its password) —
       // rebuild the missing hub profile row instead of dead-ending. This
